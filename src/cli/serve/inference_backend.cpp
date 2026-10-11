@@ -3271,6 +3271,25 @@ public:
     return prepared;
   }
 
+  [[nodiscard]] std::optional<std::size_t> CountPromptTokens(
+      const ChatRequest& request) const override {
+    if (std::ranges::none_of(request.messages,
+                             [](const auto& m) { return !m.images.empty(); })) {
+      return TextModelRunner::CountPromptTokens(request);
+    }
+    if (!vision_) {
+      throw std::invalid_argument(
+          "image input requires a matching --mmproj BF16 sidecar");
+    }
+    // Generation's CPU image preparation, without encoding. No context limit,
+    // so oversized prompts can still be sized.
+    return models::gemma4::vision::Prepare(
+               model_->tokenizer(), request.messages, Tools(request),
+               ChatOptions(request), vision_->identity(),
+               std::numeric_limits<std::uint32_t>::max(), image_tokens_)
+        .tokens.size();
+  }
+
   [[nodiscard]] TextPreparedPrompt PrepareImagePrompt(
       const ChatRequest& request) const {
     if (!vision_) {
