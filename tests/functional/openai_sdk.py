@@ -1456,7 +1456,15 @@ def check_native_tools(client, model, checks, vision=False, preset=None):
         final = events[-1].response
         assert final.status == "incomplete", final
         assert final.incomplete_details.reason == "max_output_tokens", final
-        assert not any(item.type == "function_call" for item in final.output), final
+        # An interrupted call may be reported, but never as executable.
+        for item in final.output:
+            if item.type == "function_call":
+                assert item.status == "incomplete", final
+                try:
+                    json.loads(item.arguments)
+                except json.JSONDecodeError:
+                    continue
+                raise AssertionError(("interrupted tool was made executable", final))
         record(f"responses_tool_limit_{limit}", final.to_dict())
 
     def isolated(index):
@@ -2694,7 +2702,8 @@ def main():
                 client, args.model, checks, chat_result, args.sampling_preset),
             "reasoning-separator": lambda: check_reasoning_separator(
                 client, args.model, checks, chat_result, args.sampling_preset),
-            "tool-streaming": lambda: check_tool_streaming(client, args.model, checks, chat_result),
+            "tool-streaming": lambda: check_tool_streaming(
+                client, args.model, checks, chat_result, args.sampling_preset),
             "tool-agent": lambda: check_tool_agent(
                 client, args.model, checks, chat_result, args.vision, image_content),
             "tool-agent-loop": lambda: check_tool_agent_loop(client, args.model, checks, chat_result),

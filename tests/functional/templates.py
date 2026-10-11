@@ -27,3 +27,14 @@ SHOWS_STRING_CONST_AS_ENUM = {"gemma4"}
 # is enforced as that value; Qwen and DeepSeek tags declare no parameters for
 # a root that is not a plain object, as llama.cpp's parsers do.
 TYPED_NATIVE_CALLS = {"gemma4"}
+
+# Gemma 4's declaration shows `enum` only for strings and never `const`, so a
+# non-string `const` (integer, array) is invisible to the model; a prompt that
+# relies on one must state the value.
+HIDES_NON_STRING_CONST = {"gemma4"}
+
+# Gemma 4 with thinking on decides itself whether to think, and may close its
+# thought channel at once. On the tool-streaming record call, 26B-A4B
+# UD-Q4_K_XL closes it first at P 0.67 (llama.cpp reference: 0.77) and 31B
+# UD-Q4_K_XL at 0.03 (0.05).
+MAY_SKIP_THINKING = {"gemma4"}
