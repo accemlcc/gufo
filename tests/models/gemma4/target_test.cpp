@@ -635,8 +635,15 @@ int main() {
       }
       Require(got == want, "batched decode differs from single sessions");
       // Speculative decode: every session drafts and all verify together.
+      // Fresh sessions, as `want`'s: rewinding to the prompt re-evaluates its
+      // last token at decode width, whose KV row differs from the prefilled
+      // one, so later rows would no longer match `want` bit for bit (on
+      // routing near-ties, not even token for token).
       std::vector<std::vector<g4::TokenId>> spec(std::size(texts));
       for (std::size_t i = 0; i < std::size(texts); ++i) {
+        sessions[i] = mtp->CreateSession(0, &error);
+        Require(sessions[i] != nullptr, error);
+        raw[i] = sessions[i].get();
         Require(sessions[i]->Sync(PromptTokens(*mtp, texts[i]), &error), error);
         samplers[i] = gufo::sampling::SamplerState(
             gufo::sampling::SamplingConfig{},
