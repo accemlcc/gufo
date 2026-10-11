@@ -238,6 +238,19 @@
         {"role": "assistant", "content": "A red square."},
         {"role": "user", "content": "And its size?"}
       ]
+    },
+    "tool_images": {
+      "tools": ["weather"],
+      "messages": [
+        {"role": "user", "content": "Show me the forecast chart for Paris."},
+        {"role": "assistant", "content": "", "tool_calls": [
+          {"id": "c1", "name": "get_weather", "arguments": {"location": "Paris"}},
+          {"id": "c2", "name": "get_weather", "arguments": {"location": "Oslo"}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": [{"type": "text", "text": " Chart: "}, {"type": "image_url", "image_url": {"url": "data:,"}}, {"type": "text", "text": "degrees C "}, {"type": "image_url", "image_url": {"url": "data:,"}}]},
+        {"role": "tool", "tool_call_id": "c2", "content": [{"type": "image_url", "image_url": {"url": "data:,"}}]},
+        {"role": "assistant", "content": "Paris is warmer."},
+        {"role": "user", "content": "Thanks"}
+      ]
     }
   }
 }

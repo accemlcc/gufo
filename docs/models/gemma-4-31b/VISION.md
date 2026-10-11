@@ -57,6 +57,9 @@ No tensor has a bias, and this checkpoint has no clamp scalars
 
 **Prompt:**
 - The chat template emits `<|image|>` for each image part, in content order.
+  A tool result's images follow its `<|tool_response>` block, which holds
+  only the result's text; images in a tool message without a preceding call
+  are rejected, since the template drops that message.
 - The processor replaces it with `<|image>` (255999), N × `<|image|>` (258880)
   and `<image|>` (258882). No newlines are added.
 - llama.cpp wraps the embeddings with the same `<|image>`/`<image|>` pair.

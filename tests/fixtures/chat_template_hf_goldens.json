@@ -271,6 +271,10 @@
       "image_history": {
         "rendered_sha256": "c41300066c8d81cffeab6d329ff9c1b54a2733763360f5fa3d259b3afc0d065e",
         "rendered_bytes": 160
+      },
+      "tool_images": {
+        "rendered_sha256": "27602f67169339cbe6e41ddcc912805be0081e9c2332f6a97bb105997b18705c",
+        "rendered_bytes": 894
       }
     }
   }

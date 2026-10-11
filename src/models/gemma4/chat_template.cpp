@@ -667,17 +667,28 @@ std::optional<RenderedPrompt> ChatTemplate::Render(
   if (image_offsets != nullptr) {
     image_offsets->clear();
   }
+  // Tool results render only after the assistant turn that made the calls.
+  bool tool_results = false;
   for (const auto& message : messages) {
+    if (message.role != ChatRole::kTool) {
+      tool_results =
+          message.role == ChatRole::kAssistant && !message.tool_calls.empty();
+    }
     if (message.images.empty()) {
       continue;
     }
     if (image_offsets == nullptr) {
       return fail("gemma4 image input requires a vision sidecar");
     }
+    if (message.role == ChatRole::kTool && !tool_results) {
+      return fail("tool result images require a preceding tool call");
+    }
     std::size_t previous = 0;
     for (const auto& image : message.images) {
-      if (message.role != ChatRole::kUser || image.bytes == nullptr ||
-          image.offset < previous || image.offset > message.content.size()) {
+      if ((message.role != ChatRole::kUser &&
+           message.role != ChatRole::kTool) ||
+          image.bytes == nullptr || image.offset < previous ||
+          image.offset > message.content.size()) {
         return fail("invalid user image content");
       }
       previous = image.offset;
@@ -820,7 +831,12 @@ std::optional<RenderedPrompt> ChatTemplate::Render(
             name = call.name;
           }
         }
+        // The text parts form the response; its images follow it in order.
         out += ToolResponseBlock(name, Value(follow.content));
+        for (std::size_t image = 0; image < follow.images.size(); ++image) {
+          image_offsets->push_back(out.size());
+          out += kImagePlaceholder;
+        }
         tool_responses = true;
         prev_type = MessageType::kToolResponse;
       }

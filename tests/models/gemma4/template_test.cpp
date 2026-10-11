@@ -1,5 +1,6 @@
 #include <cstdint>
 #include <iostream>
+#include <memory>
 #include <span>
 #include <string>
 #include <vector>
@@ -107,6 +108,25 @@ void CheckRejections() {
   Require(!g4::ChatTemplate::Render(std::span(&image, 1), {}, {}, &error) &&
               !error.empty(),
           "image input accepted without image offsets");
+  // The template renders tool results only after the turn that made the
+  // calls; an image in any other tool message would be dropped.
+  const auto pixels = std::make_shared<const std::vector<std::uint8_t>>();
+  gufo::tokenization::ChatMessage orphan(gufo::tokenization::ChatRole::kTool,
+                                         "chart");
+  orphan.images.push_back({0, pixels});
+  const std::vector orphaned{gufo::tokenization::ChatMessage(
+                                 gufo::tokenization::ChatRole::kUser, "hi"),
+                             orphan};
+  std::vector<std::size_t> offsets;
+  Require(!g4::ChatTemplate::Render(orphaned, {}, {}, &error, &offsets) &&
+              !error.empty(),
+          "orphan tool result image accepted");
+  gufo::tokenization::ChatMessage assistant(
+      gufo::tokenization::ChatRole::kAssistant, "");
+  assistant.images.push_back({0, pixels});
+  Require(!g4::ChatTemplate::Render(std::span(&assistant, 1), {}, {}, &error,
+                                    &offsets),
+          "assistant image accepted");
   gufo::tokenization::ChatTool bad;
   bad.definition_json = "[1]";
   Require(!g4::ChatTemplate::Render({}, std::span(&bad, 1), {}, &error),
