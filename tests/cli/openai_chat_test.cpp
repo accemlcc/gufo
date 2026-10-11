@@ -4693,10 +4693,27 @@ void TestGemmaNativeToolCalls() {
     streamed += chunk;
     return true;
   });
+  // Settled arguments and the open string stream before the call closes.
+  std::string arguments;
+  std::size_t fragments = 0;
+  for (std::size_t at = streamed.find("data: {"); at != std::string::npos;
+       at = streamed.find("data: {", at + 1)) {
+    const auto end = streamed.find("\n\n", at);
+    const auto event = gufo::json::parse(streamed.substr(at + 6, end - at - 6));
+    if (const auto* choices = event.find("choices"))
+      for (const auto& choice : choices->items())
+        if (const auto* calls = choice.find("delta")->find("tool_calls"))
+          for (const auto& call : calls->items()) {
+            arguments += call.find("function")->member_str("arguments");
+            ++fragments;
+          }
+  }
   Expect(streamed.find("error") == std::string::npos &&
              streamed.find("channel") == std::string::npos &&
-             streamed.find(R"(\"city\":\"Rome\")") != std::string::npos,
-         "A streamed non-parallel Gemma 4 call is parsed: " + streamed);
+             arguments == R"({"city":"Rome","note":"a, {b}: \"c\"\n"})" &&
+             fragments > 2,
+         "A streamed non-parallel Gemma 4 call is parsed incrementally: " +
+             streamed);
 }
 
 void TestResponsesAutoReasoning() {
@@ -5890,23 +5907,35 @@ void TestIncrementalToolArguments() {
   const std::string value =
       "first line\nliteral </parameter> is data\n"
       "<tool_call> and <|im_end|> stay literal; \"quoted\" \\ café";
-  for (const auto format : {Format::kQwen, Format::kDeepSeek})
+  for (const auto format : {Format::kQwen, Format::kDeepSeek, Format::kGemma4})
     for (const int api : {0, 1, 2})
       for (const bool reasoning : {false, true}) {
         FakeBackend backend;
         backend.tool_format = format;
         backend.block_after_first_piece = true;
         const bool qwen = format == Format::kQwen;
+        const bool gemma = format == Format::kGemma4;
+        if (gemma)
+          backend.markup = {
+              .reasoning_start = "<|channel>thought\n",
+              .reasoning_end = "<channel|>",
+              .tool_syntax = gufo::server::TextGenerationBackend::OutputMarkup::
+                  ToolSyntax::kGemma4,
+          };
         const std::string opening =
-            qwen ? "<tool_call>\n<function=record>\n<parameter=text>\n"
-                 : "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"record\">\n"
-                   "<｜DSML｜parameter name=\"text\" string=\"true\">";
+            gemma  ? "<|tool_call>call:record{text:<|\"|>"
+            : qwen ? "<tool_call>\n<function=record>\n<parameter=text>\n"
+                   : "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"record\">\n"
+                     "<｜DSML｜parameter name=\"text\" string=\"true\">";
         const std::string closing =
-            qwen ? "\n</parameter>\n</function>\n</tool_call>"
-                 : "</｜DSML｜parameter>\n</｜DSML｜invoke>\n"
-                   "</｜DSML｜tool_calls>";
-        backend.pieces = {(reasoning ? "Check briefly.</think>\n" : "") +
-                          opening + value.substr(0, 10)};
+            gemma  ? "<|\"|>}<tool_call|>"
+            : qwen ? "\n</parameter>\n</function>\n</tool_call>"
+                   : "</｜DSML｜parameter>\n</｜DSML｜invoke>\n"
+                     "</｜DSML｜tool_calls>";
+        const std::string thought =
+            gemma ? "Check briefly.<channel|>" : "Check briefly.</think>\n";
+        backend.pieces = {(reasoning ? thought : "") + opening +
+                          value.substr(0, 10)};
         // Exercise every byte boundary, including UTF-8 and escaped JSON.
         for (const char byte : value.substr(10) + closing)
           backend.pieces.emplace_back(1, byte);

@@ -70,6 +70,61 @@ void CheckRejections() {
   Require(!g4::ParseToolCall(deep).has_value(), "unbounded nesting accepted");
 }
 
+/// Settled arguments of `body`, then the open string (if any) after a `|`.
+std::string Partial(std::string_view body) {
+  const auto call = g4::ParsePartialToolCall(body);
+  if (!call) {
+    return "none";
+  }
+  std::string out = call->name + call->arguments.dump();
+  if (call->open_string) {
+    out += "|" + call->open_string->first + "=" + call->open_string->second;
+  }
+  return out;
+}
+
+void CheckPartial() {
+  Require(Partial("") == "none" && Partial("call:") == "none" &&
+              Partial("call:get_we") == "none",
+          "no call before its name and brace");
+  Require(Partial("call:f{") == "f{}", "name settles at its brace");
+  Require(Partial("call:f{a:<|\"|>Par") == "f{}|a=Par", "open string");
+  // A delimiter prefix may close the string; hold it.
+  Require(Partial("call:f{a:<|\"|>x<|") == "f{}|a=x" &&
+              Partial("call:f{a:<|\"|>x<|\"") == "f{}|a=x",
+          "delimiter prefix held");
+  Require(Partial("call:f{a:<|\"|>x<|\"|>") == "f{}" &&
+              Partial("call:f{a:<|\"|>x<|\"|>,b:1") == R"(f{"a":"x"})",
+          "a value settles at its delimiter");
+  Require(Partial("call:f{n:12") == "f{}" &&
+              Partial("call:f{n:12,") == R"(f{"n":12})",
+          "a bare scalar may still grow");
+  Require(Partial("call:f{o:{k:[1,2],s:<|\"|>}") == "f{}" &&
+              Partial("call:f{o:{k:[1,2]}}") == R"(f{"o":{"k":[1,2]}})",
+          "containers settle whole");
+  Require(Partial("call:f{a:1,a:2}") == R"(f{"a":1})",
+          "a repeated key ends the settled members");
+  Require(
+      Partial("call:f{<|\"|>quoted key<|\"|>:<|\"|>v") == "f{}|quoted key=v",
+      "quoted key");
+  // Every byte prefix of a full call settles a prefix of its arguments.
+  const std::string body =
+      "call:edit{count:3,edits:[{newText:<|\"|><|\"|>,oldText:<|\"|>a, "
+      "{b}\n<|\"|>}],mode:safe,path:<|\"|>calc.py<|\"|>}";
+  const std::string full = ParseToJson(body);
+  for (std::size_t size = 0; size <= body.size(); ++size) {
+    const auto call = g4::ParsePartialToolCall(body.substr(0, size));
+    if (!call) {
+      continue;
+    }
+    auto settled = call->arguments.dump();
+    settled.pop_back();
+    Require(full.starts_with(settled),
+            "settled arguments are a prefix at " + std::to_string(size));
+  }
+  Require(Partial(body) == "edit" + full, "the full body settles");
+}
+
 bool Accepts(const JsonConstraint& grammar, std::string_view text) {
   auto state = grammar.Start();
   for (const unsigned char byte : text) {
@@ -226,6 +281,7 @@ int main() {
   return gemma4_test::Run([] {
     CheckValues();
     CheckRejections();
+    CheckPartial();
     CheckGrammar();
   });
 }

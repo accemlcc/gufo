@@ -1,5 +1,6 @@
 #include "src/models/gemma4/tool_syntax.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <charconv>
 #include <cmath>
@@ -215,6 +216,60 @@ std::optional<ToolCall> ParseToolCall(std::string_view body,
     return std::nullopt;
   }
   return call;
+}
+
+std::optional<PartialToolCall> ParsePartialToolCall(std::string_view body) {
+  Parser p{body};
+  p.SkipSpace();
+  if (!p.Consume("call:")) {
+    return std::nullopt;
+  }
+  const std::size_t brace = body.find('{', p.pos);
+  if (brace == std::string_view::npos || brace == p.pos) {
+    return std::nullopt;
+  }
+  PartialToolCall call{.name = std::string(body.substr(p.pos, brace - p.pos)),
+                       .arguments = json::Value::object()};
+  p.pos = brace + 1;
+  while (true) {
+    p.SkipSpace();
+    std::string key;
+    if (p.pos >= body.size() || body[p.pos] == '}' || !p.Key(&key)) {
+      return call;
+    }
+    p.SkipSpace();
+    if (!p.Consume(":") || call.arguments.find(key) != nullptr) {
+      return call;
+    }
+    p.SkipSpace();
+    const std::string_view rest = body.substr(p.pos);
+    if (rest.starts_with(kQuote) &&
+        rest.find(kQuote, kQuote.size()) == std::string_view::npos) {
+      std::string_view text = rest.substr(kQuote.size());
+      for (std::size_t size = std::min(text.size(), kQuote.size() - 1);
+           size > 0; --size) {
+        if (kQuote.starts_with(text.substr(text.size() - size))) {
+          text.remove_suffix(size);
+          break;
+        }
+      }
+      call.open_string.emplace(std::move(key), std::string(text));
+      return call;
+    }
+    json::Value value;
+    if (!p.Value(&value, 0)) {
+      return call;
+    }
+    // A bare scalar may still grow; any value ends at its delimiter.
+    p.SkipSpace();
+    if (p.pos >= body.size() || (body[p.pos] != ',' && body[p.pos] != '}')) {
+      return call;
+    }
+    call.arguments[key] = std::move(value);
+    if (!p.Consume(",")) {
+      return call;
+    }
+  }
 }
 
 }  // namespace gufo::models::gemma4

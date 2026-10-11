@@ -1951,11 +1951,22 @@ void ParseDsmlCalls(
   }
 }
 
-/// Gemma 4 calls: `<|tool_call>call:NAME{...}<tool_call|>` blocks.
-void ParseGemmaCalls(std::string_view text,
-                     std::vector<ParsedToolCall>* calls) {
+/// Gemma 4 calls: `<|tool_call>call:NAME{...}<tool_call|>` blocks. A
+/// partial parse also reports an interrupted last call's settled arguments.
+void ParseGemmaCalls(std::string_view text, std::vector<ParsedToolCall>* calls,
+                     bool partial = false) {
   constexpr std::string_view kStart = "<|tool_call>";
   constexpr std::string_view kEnd = "<tool_call|>";
+  const auto add_arguments = [](ParsedToolCall& parsed,
+                                const json::Value& arguments) {
+    for (const auto& [key, value] : arguments.members()) {
+      parsed.arguments.push_back({
+          .name = key,
+          .value = value.is_string() ? value.get_str() : value.dump(),
+          .is_string = value.is_string(),
+      });
+    }
+  };
   std::size_t cursor = 0;
   while (true) {
     const std::size_t start = text.find(kStart, cursor);
@@ -1965,20 +1976,31 @@ void ParseGemmaCalls(std::string_view text,
     const std::size_t body = start + kStart.size();
     const std::size_t end = text.find(kEnd, body);
     if (end == std::string_view::npos) {
-      return;  // an interrupted call is never reported
+      // Without a partial parse, an interrupted call is never reported.
+      const auto call =
+          partial ? models::gemma4::ParsePartialToolCall(text.substr(body))
+                  : std::nullopt;
+      if (call) {
+        ParsedToolCall parsed;
+        parsed.id = RandomId("call_");
+        parsed.name = call->name;
+        add_arguments(parsed, call->arguments);
+        if (call->open_string) {
+          PartialStringArgument(parsed, call->open_string->first,
+                                call->open_string->second);
+        } else {
+          parsed.partial_arguments = ArgumentsPrefix(parsed);
+        }
+        calls->push_back(std::move(parsed));
+      }
+      return;
     }
     if (auto call =
             models::gemma4::ParseToolCall(text.substr(body, end - body))) {
       ParsedToolCall parsed;
       parsed.id = RandomId("call_");
       parsed.name = std::move(call->name);
-      for (const auto& [key, value] : call->arguments.members()) {
-        parsed.arguments.push_back({
-            .name = key,
-            .value = value.is_string() ? value.get_str() : value.dump(),
-            .is_string = value.is_string(),
-        });
-      }
+      add_arguments(parsed, call->arguments);
       calls->push_back(std::move(parsed));
     }
     cursor = end + kEnd.size();
@@ -2095,7 +2117,7 @@ ParsedGeneration ParseGeneration(
     // Scanning both dialects would turn a literal call inside an argument into
     // an additional API invocation.
     if (markup.tool_syntax == OutputMarkup::ToolSyntax::kGemma4)
-      ParseGemmaCalls(text_from_tools, &parsed.tool_calls);
+      ParseGemmaCalls(text_from_tools, &parsed.tool_calls, partial);
     else if (text_from_tools.starts_with("<tool_call>"))
       ParseQwenCalls(parsed.text, tools, &parsed.tool_calls, nullptr,
                      unfinished_reasoning_quote, partial);
