@@ -41,6 +41,25 @@ lies beyond the binary16 range.
 
 By its header UD-Q4_K_M uses the same formats; it has not been run.
 
+### Other quants
+
+Unsloth's QAT checkpoint and llama.cpp's own K-quant mixes (as published for
+fine-tunes) load too:
+
+| Quant | Attention, dense MLP | Experts (gate/up, down) | Vocabulary head |
+| --- | --- | --- | --- |
+| QAT UD-Q4_K_XL (`unsloth/gemma-4-26B-A4B-it-qat-GGUF`) | Q4_0 | Q4_0, Q4_0 | Q4_0 (tied) |
+| llama.cpp Q4_K_M | Q4_K (V: some Q6_K); dense down Q8_0 or Q5_0 | Q4_K; Q8_0 or Q5_0 | Q6_K (untied) |
+| llama.cpp Q6_K | Q6_K; dense down Q8_0 | Q6_K; Q8_0 | Q6_K (untied) |
+
+The QAT checkpoint pairs with the `mtp-gemma-4-26B-A4B-it.gguf` of its own
+repository (Q4_0); fine-tunes draft with the base model's drafter, at an
+acceptance that depends on how far they moved. Q4_0 and Q5_0 rows of 704 or
+2112 values, which are not 256-aligned, decode with a Gemma blockwise GEMV
+in both decode and verification ([Quality](QUALITY.md#other-quants)). A GGUF
+carrying another revision of the Gemma 4 chat template loads with a warning
+and renders with the built-in one.
+
 ## Load and run
 
 ```sh

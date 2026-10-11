@@ -4,6 +4,8 @@
 // alone equals the same row inside a verification batch bit for bit, so
 // greedy speculation reproduces decode. Prints cold-weight timings of the
 // decode (one row, eight experts) and five-row verification projections.
+// The dense blockwise kernels (Q4_0, Q5_0) are checked the same way at the
+// 26B-A4B's dense down projection shape.
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
@@ -612,7 +614,8 @@ void CheckFinish(std::mt19937& rng) {
 /// dots of the dequantized rows and the binary16 inputs; Q4_K, Q5_K, Q5_1 and
 /// Q8_0 also bit for bit against Flash-Next's routed GEMM. At the gate/up
 /// shape the fused GeGLU matches the separate pass (for Q8_0 over Flash-Next's
-/// binary16 rows, the path it replaces).
+/// binary16 rows, the path it replaces; for binary16 and Q4_0 over the FP32
+/// rows rounded to binary16).
 void CheckRoutedPrefill(const Format& f, std::uint32_t m, std::uint32_t k,
                         bool gate_up, std::mt19937& rng) {
   namespace fn = gufo::models::qwen38_flash_next::rocm;
@@ -682,7 +685,8 @@ void CheckRoutedPrefill(const Format& f, std::uint32_t m, std::uint32_t k,
     HIP_CHECK(hipMalloc(&want, slots * width * 2));
     HIP_CHECK(hipMalloc(&fused, slots * width * 2));
     const auto n_tiles = static_cast<std::uint32_t>(tiles.size());
-    if (f.format == g4k::ExpertFormat::kF16) {
+    if (f.format == g4k::ExpertFormat::kF16 ||
+        f.format == g4k::ExpertFormat::kQ4_0) {
       // The FP32 rows above, rounded as the binary16 output would be.
       std::vector<__half> rows(got.size());
       for (std::size_t i = 0; i < got.size(); ++i) {
@@ -723,7 +727,9 @@ void CheckRoutedPrefill(const Format& f, std::uint32_t m, std::uint32_t k,
     }
   }
   if (f.format != g4k::ExpertFormat::kQ6_K &&
-      f.format != g4k::ExpertFormat::kF16) {
+      f.format != g4k::ExpertFormat::kF16 &&
+      f.format != g4k::ExpertFormat::kQ4_0 &&
+      f.format != g4k::ExpertFormat::kQ5_0) {
     // Flash-Next's widest tile per format: 48 rows (K-quants), 64 (Q5_1,
     // Q8_0).
     const bool down = f.format == g4k::ExpertFormat::kQ5_1 ||
@@ -845,11 +851,14 @@ void CheckDensePrefill(const Format& f, std::uint32_t m, std::uint32_t k,
   HIP_CHECK(hipFree(dw));
 }
 
-/// The dense Q4_0 prefill GEMM (the QAT targets) against FP64 dots of the
-/// dequantized rows and the binary16 inputs; its fused GeGLU bit for bit
-/// against the separate pass over its own binary16-rounded FP32 rows.
-void CheckDenseQ40(const Format& f, std::uint32_t m, std::uint32_t k,
-                   std::mt19937& rng) {
+/// The dense Q4_0 / Q5_0 prefill GEMM (the QAT targets, Q5_0 down
+/// projections) against FP64 dots of the dequantized rows and the binary16
+/// inputs; its fused GeGLU bit for bit against the separate pass over its own
+/// binary16-rounded FP32 rows.
+void CheckDenseBlockwise(const Format& f, std::uint32_t m, std::uint32_t k,
+                         std::mt19937& rng) {
+  const std::string name =
+      std::string(f.name) + " " + std::to_string(m) + "x" + std::to_string(k);
   const auto w = RandomMatrix(f, m, k, rng);
   auto* dw = Device(w.data(), w.size());
   const std::size_t row_bytes = k / f.block * f.bytes;
@@ -871,7 +880,7 @@ void CheckDenseQ40(const Format& f, std::uint32_t m, std::uint32_t k,
                                      nullptr) &&
                 g4k::LaunchDenseHalfGemm(f.format, dw, dx, nullptr, fused, rows,
                                          m, k, nullptr, true),
-            "dense Q4_0 prefill GEMM rejected");
+            name + ": dense prefill GEMM rejected");
     const auto got = Host(dy, std::size_t{rows} * m);
     std::vector<float> row(k);
     double worst = 0.0;
@@ -889,7 +898,8 @@ void CheckDenseQ40(const Format& f, std::uint32_t m, std::uint32_t k,
             worst, std::fabs(got[std::size_t{r} * m + o] - expect) / magnitude);
       }
     }
-    Require(worst < 2e-3, "dense Q4_0 prefill error " + std::to_string(worst));
+    Require(worst < 2e-3,
+            name + ": dense prefill error " + std::to_string(worst));
     std::vector<__half> rounded(got.size());
     for (std::size_t i = 0; i < got.size(); ++i) {
       rounded[i] = __float2half(std::clamp(got[i], -65504.0F, 65504.0F));
@@ -900,10 +910,10 @@ void CheckDenseQ40(const Format& f, std::uint32_t m, std::uint32_t k,
     const auto a = Host(want, std::size_t{rows} * width);
     const auto b = Host(fused, std::size_t{rows} * width);
     Require(std::memcmp(a.data(), b.data(), a.size() * 2) == 0,
-            "dense Q4_0 GeGLU differs from the separate pass at " +
+            name + ": dense GeGLU differs from the separate pass at " +
                 std::to_string(rows) + " rows");
-    std::cout << "dense prefill Q4_0, " << rows << " rows: error " << worst
-              << "\n";
+    std::cout << "dense prefill " << name << ", " << rows << " rows: error "
+              << worst << "\n";
     for (void* p : {static_cast<void*>(dx), static_cast<void*>(dy),
                     static_cast<void*>(gu), static_cast<void*>(want),
                     static_cast<void*>(fused)}) {
@@ -911,6 +921,90 @@ void CheckDenseQ40(const Format& f, std::uint32_t m, std::uint32_t k,
     }
   }
   HIP_CHECK(hipFree(dw));
+}
+
+/// The dense decode/verification GEMV (LaunchDenseGemv) against FP64 dots
+/// of the dequantized rows; every row of a 1..15-row batch, and the one-slot
+/// single row, equals the same row of the 16-row batch bit for bit. Prints
+/// cold-weight timings of one and five rows.
+void CheckDenseGemv(const Format& f, std::uint32_t m, std::uint32_t k,
+                    std::mt19937& rng) {
+  const std::string name = std::string(f.name) + " dense " + std::to_string(m) +
+                           "x" + std::to_string(k);
+  constexpr std::uint32_t kRows = g4k::kMaxGroupSlots;
+  const auto w = RandomMatrix(f, m, k, rng);
+  const auto x = Normal(std::size_t{kRows} * k, 1.0F, rng);
+  auto* dw = Device(w.data(), w.size());
+  float* dx = Device(x.data(), x.size());
+  float* dy = nullptr;
+  HIP_CHECK(hipMalloc(&dy, std::size_t{kRows} * m * sizeof(float)));
+  const auto run = [&](std::uint32_t first, std::uint32_t rows) {
+    HIP_CHECK(hipMemset(dy, 0xFF, std::size_t{rows} * m * 4));
+    Require(g4k::LaunchDenseGemv(f.format, dw, dx + std::size_t{first} * k, dy,
+                                 rows, m, k, nullptr),
+            name + ": shape rejected");
+    return Host(dy, std::size_t{rows} * m);
+  };
+  const auto all = run(0, kRows);
+  const std::size_t row_bytes = k / f.block * f.bytes;
+  std::vector<float> row(k);
+  double worst = 0.0;
+  for (std::uint32_t o = 0; o < m; o += 7) {
+    gufo::quant::Dequantize(f.type, w.data() + o * row_bytes, row.data(), k);
+    for (std::uint32_t r = 0; r < kRows; r += 3) {
+      double want = 0.0, magnitude = 0.0;
+      for (std::uint32_t c = 0; c < k; ++c) {
+        const double p = double{row[c]} * x[std::size_t{r} * k + c];
+        want += p;
+        magnitude += std::fabs(p);
+      }
+      worst = std::max(
+          worst, std::fabs(all[std::size_t{r} * m + o] - want) / magnitude);
+    }
+  }
+  Require(worst < 2e-6, name + ": error " + std::to_string(worst));
+  for (std::uint32_t rows = 1; rows < kRows; ++rows) {
+    const std::uint32_t first = (rows * 5) % (kRows - rows + 1);
+    const auto part = run(first, rows);
+    Require(std::memcmp(part.data(), &all[std::size_t{first} * m],
+                        part.size() * 4) == 0,
+            name + ": " + std::to_string(rows) +
+                "-row batch differs from the 16-row batch");
+  }
+  // Cold weights: rotate copies past the 32 MiB MALL.
+  constexpr int kCopies = 16;
+  const std::size_t bytes = std::size_t{m} * row_bytes;
+  std::vector<void*> copies;
+  for (int i = 0; i < kCopies; ++i) {
+    copies.push_back(Device(w.data(), w.size()));
+  }
+  const auto time = [&](std::uint32_t rows) {
+    constexpr int kIters = 64;
+    for (int i = 0; i < kCopies; ++i) {
+      (void)g4k::LaunchDenseGemv(f.format, copies[i], dx, dy, rows, m, k,
+                                 nullptr);
+    }
+    HIP_CHECK(hipDeviceSynchronize());
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < kIters; ++i) {
+      (void)g4k::LaunchDenseGemv(f.format, copies[i % kCopies], dx, dy, rows, m,
+                                 k, nullptr);
+    }
+    HIP_CHECK(hipDeviceSynchronize());
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
+               .count() /
+           kIters * 1e6;
+  };
+  const double one = time(1);
+  const double five = time(5);
+  std::cout << name << ": error " << worst << "; 1 row " << one << " us ("
+            << bytes / one / 1e3 << " GB/s); 5 rows " << five << " us\n";
+  for (void* p : copies) {
+    HIP_CHECK(hipFree(p));
+  }
+  HIP_CHECK(hipFree(dw));
+  HIP_CHECK(hipFree(dx));
+  HIP_CHECK(hipFree(dy));
 }
 
 }  // namespace
@@ -938,26 +1032,35 @@ int main() {
     // BF16 experts (the UD-Q8_K_XL last layer) run as binary16.
     const Format f16{
         g4k::ExpertFormat::kF16, GgmlType::kF16, 32, 64, {}, "F16"};
+    // The QAT checkpoints' Q4_0; Q5_0 down projections (llama.cpp K-quant
+    // mixes, whose 704 and 2112 widths are not 256-aligned).
+    const Format q40{
+        g4k::ExpertFormat::kQ4_0, GgmlType::kQ4_0, 32, 18, {0}, "Q4_0"};
+    const Format q50{
+        g4k::ExpertFormat::kQ5_0, GgmlType::kQ5_0, 32, 22, {0}, "Q5_0"};
     // Fused gate/up [2 * 704, 2816] and down [2816, 704] of every format the
-    // Unsloth quants use.
-    for (const Format& f : {q4k, q5k, q6k, q80, f16}) {
+    // quants use.
+    for (const Format& f : {q4k, q5k, q6k, q80, f16, q40}) {
       CheckProjection(f, 2 * kWidth, kHidden, kUsed, rng);
     }
-    for (const Format& f : {q51, q80, f16}) {
+    for (const Format& f : {q51, q80, f16, q40, q50}) {
       CheckProjection(f, kHidden, kWidth, 1, rng);
     }
-    for (const Format& f : {q4k, q5k, q6k, q80, f16}) {
+    for (const Format& f : {q4k, q5k, q6k, q80, f16, q40}) {
       CheckRoutedPrefill(f, 2 * kWidth, kHidden, true, rng);
     }
-    for (const Format& f : {q51, q80, f16}) {
+    for (const Format& f : {q51, q80, f16, q40, q50}) {
       CheckRoutedPrefill(f, kHidden, kWidth, false, rng);
     }
     // A fused gate/up of 2 x 1000 rows: partial row blocks both ways.
     for (const Format& f : {q4k, q5k, q6k}) {
       CheckDensePrefill(f, 2000, kHidden, rng);
     }
-    const Format q40{
-        g4k::ExpertFormat::kQ4_0, GgmlType::kQ4_0, 32, 18, {0}, "Q4_0"};
-    CheckDenseQ40(q40, 2000, kHidden, rng);
+    for (const Format& f : {q40, q50}) {
+      CheckDenseBlockwise(f, 2000, kHidden, rng);
+      // The dense down projection [2816, 2112].
+      CheckDenseBlockwise(f, kHidden, 2112, rng);
+      CheckDenseGemv(f, kHidden, 2112, rng);
+    }
   });
 }

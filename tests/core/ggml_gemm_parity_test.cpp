@@ -298,6 +298,37 @@ int main() {
     std::printf("Q5_1: PASS\n");
   }
 
+  // (2d) Q5_0: value = d * (q - 16) with Q5_1's fifth-bit layout.
+  {
+    gufo::quant::block_q5_0 b{};
+    b.d = 0x3800;  // fp16(0.5)
+    const std::uint32_t qh = 0xA5C3'0F81U;
+    std::memcpy(b.qh, &qh, sizeof(qh));
+    for (int i = 0; i < 16; ++i)
+      b.qs[i] = static_cast<std::uint8_t>(i | ((15 - i) << 4));
+    const auto x = RandomFloats(rng, 32);
+    std::vector<float> dst(32);
+    gufo::quant::Dequantize(gufo::core::GgmlType::kQ5_0, &b, dst.data(), 32);
+    bool deq_ok = true;
+    for (int i = 0; i < 16; ++i) {
+      const int lo = i | static_cast<int>(((qh >> i) & 1U) << 4);
+      const int hi = (15 - i) | static_cast<int>(((qh >> (i + 16)) & 1U) << 4);
+      deq_ok = deq_ok && dst[i] == 0.5F * static_cast<float>(lo - 16) &&
+               dst[i + 16] == 0.5F * static_cast<float>(hi - 16);
+    }
+    float want = 0.0F;
+    for (int i = 0; i < 32; ++i) {
+      want += dst[i] * x[i];
+    }
+    const float dot = gufo::quant::Dot(gufo::core::GgmlType::kQ5_0, &b, x, 32);
+    if (!deq_ok || !SameBits(dot, want) ||
+        gufo::quant::QuantizedRowBytes(gufo::core::GgmlType::kQ5_0, 64) != 44) {
+      std::printf("Q5_0: FAIL (deq=%d dot=%d)\n", deq_ok, SameBits(dot, want));
+      return 1;
+    }
+    std::printf("Q5_0: PASS\n");
+  }
+
   // (3) F32 / F16 / BF16.
   {
     const std::size_t k = 64;
@@ -367,6 +398,7 @@ int main() {
   if (!gufo::quant::IsSupported(gufo::core::GgmlType::kF32) ||
       !gufo::quant::IsSupported(gufo::core::GgmlType::kQ8_K) ||
       !gufo::quant::IsSupported(gufo::core::GgmlType::kQ4_0) ||
+      !gufo::quant::IsSupported(gufo::core::GgmlType::kQ5_0) ||
       !gufo::quant::IsSupported(gufo::core::GgmlType::kQ5_1) ||
       gufo::quant::IsSupported(gufo::core::GgmlType::kQ4_1) ||
       gufo::quant::IsSupported(static_cast<gufo::core::GgmlType>(65535))) {

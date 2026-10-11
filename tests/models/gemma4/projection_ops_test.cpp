@@ -658,6 +658,17 @@ int main() {
     CheckWmmaShape(formats[2], 4100, 5376, rng);
     CheckWmmaShape(formats[4], 43008, 5376, rng);
     CheckWmmaShape(formats[4], 4100, 21504, rng);
+    // The 26B-A4B's K-quant and Q4_0 quants (llama.cpp mixes, QAT): q, k / v,
+    // fused [q | k] of a global layer, attention output, [gate | up] and the
+    // vocabulary head over 2816-wide rows.
+    const std::pair<std::uint32_t, std::uint32_t> moe_wmma_shapes[] = {
+        {4096, 2816}, {2048, 2816}, {9216, 2816},  {2816, 4096},
+        {2816, 8192}, {4224, 2816}, {262144, 2816}};
+    for (const std::size_t f : {0U, 2U, 4U}) {
+      for (const auto& [m, k] : moe_wmma_shapes) {
+        CheckWmmaShape(formats[f], m, k, rng);
+      }
+    }
     CheckBf16Conversion(rng);
     CheckRepack(rng);
   });

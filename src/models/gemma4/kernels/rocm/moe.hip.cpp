@@ -344,8 +344,9 @@ __global__ void __launch_bounds__(kThreads) RouteGroupedKernel(
 // ---------------------------------------------------------------------------
 
 /// Storage of each format. K-quants: bytes per 256-value super-block, lanes
-/// per row (tasks per super-block) and values per task. Q8_0/Q5_1/binary16:
-/// bytes per 32-value block; eight lanes take eight consecutive blocks.
+/// per row (tasks per super-block) and values per task. Q4_0/Q5_0/Q5_1/Q8_0/
+/// binary16: bytes per 32-value block; eight lanes take eight consecutive
+/// blocks.
 template<ExpertFormat F>
 struct Traits;
 template<>
@@ -379,6 +380,20 @@ struct Traits<ExpertFormat::kQ8_0> {
 template<>
 struct Traits<ExpertFormat::kQ5_1> {
   static constexpr int kBytes = 24;
+  static constexpr int kTasks = 8;
+  static constexpr int kValues = 32;
+  static constexpr bool kBlockwise = true;
+};
+template<>
+struct Traits<ExpertFormat::kQ4_0> {
+  static constexpr int kBytes = 18;
+  static constexpr int kTasks = 8;
+  static constexpr int kValues = 32;
+  static constexpr bool kBlockwise = true;
+};
+template<>
+struct Traits<ExpertFormat::kQ5_0> {
+  static constexpr int kBytes = 22;
   static constexpr int kTasks = 8;
   static constexpr int kValues = 32;
   static constexpr bool kBlockwise = true;
@@ -419,6 +434,11 @@ __device__ __forceinline__ bool Decode(const std::uint8_t* row,
       // Rows are word aligned (a multiple of eight blocks is 272 bytes and
       // expert widths keep k / 32 even), so odd blocks start mid-word.
       DecodeQ8_0(p, (block & 1U) != 0, w);
+    } else if constexpr (F == ExpertFormat::kQ4_0) {
+      // 18- and 22-byte blocks: as Q8_0, odd blocks start mid-word.
+      DecodeQ4_0(p, (block & 1U) != 0, w);
+    } else if constexpr (F == ExpertFormat::kQ5_0) {
+      DecodeQ5_0(p, (block & 1U) != 0, w);
     } else if constexpr (F == ExpertFormat::kF16) {
       const auto* v = reinterpret_cast<const uint4*>(p);
 #pragma unroll
@@ -479,25 +499,33 @@ __device__ inline float GeGlu(float x, float u) {
 
 /// kGeGlu: the first half of the wave groups take gate rows, the second
 /// half the matching up rows (m / 2 further), and the block writes
-/// GeGlu(gate, up) rows of width m / 2.
-template<ExpertFormat F, int kSplit, bool kGeGlu, int kSlots = kSlotsPerPass>
+/// GeGlu(gate, up) rows of width m / 2. kDense: no group table; one group
+/// of expert 0 holding slots 0..dense_rows.
+template<ExpertFormat F, int kSplit, bool kGeGlu, int kSlots = kSlotsPerPass,
+         bool kDense = false>
 __global__ void __launch_bounds__(kThreads)
     RoutedGemvKernel(const std::uint8_t* __restrict__ w,
                      const std::int32_t* __restrict__ groups,
                      const float* __restrict__ x, std::uint32_t x_div,
-                     float* __restrict__ y, std::uint32_t m, std::uint32_t k) {
+                     float* __restrict__ y, std::uint32_t m, std::uint32_t k,
+                     std::uint32_t dense_rows = 0) {
   using T = Traits<F>;
   constexpr int kRowsPerWave = kWave / T::kTasks;
   constexpr int kGroups = kWaves / kSplit;
   constexpr int kRowsPerBlock = kRowsPerWave * kGroups;
   static_assert(!kGeGlu || kGroups % 2 == 0);
   __shared__ float partial[kSlots][kSplit][kWaves / kSplit][kWave];
-  if (static_cast<int>(blockIdx.y) >= groups[0]) {
-    return;
+  const std::int32_t* group = groups;
+  int expert = 0;
+  int count = static_cast<int>(dense_rows);
+  if constexpr (!kDense) {
+    if (static_cast<int>(blockIdx.y) >= groups[0]) {
+      return;
+    }
+    group = groups + 1 + blockIdx.y * kGroupInts;
+    expert = group[0];
+    count = group[1];
   }
-  const std::int32_t* group = groups + 1 + blockIdx.y * kGroupInts;
-  const int expert = group[0];
-  const int count = group[1];
   const int lane = threadIdx.x % kWave;
   const int wave = threadIdx.x / kWave;
   const int slice = wave % kSplit;
@@ -522,7 +550,7 @@ __global__ void __launch_bounds__(kThreads)
 #pragma unroll
     for (int j = 0; j < kSlots; ++j) {
       acc[j] = 0.0F;
-      slot[j] = s0 + j < count ? group[2 + s0 + j] : -1;
+      slot[j] = s0 + j >= count ? -1 : kDense ? s0 + j : group[2 + s0 + j];
       xs[j] =
           x +
           std::size_t{static_cast<std::uint32_t>(max(slot[j], 0)) / x_div} * k;
@@ -607,40 +635,37 @@ __global__ void __launch_bounds__(kThreads)
   }
 }
 
-template<ExpertFormat F, bool kGeGlu>
+template<ExpertFormat F, bool kGeGlu, bool kDense = false>
 void LaunchRouted(const void* w, const std::int32_t* groups,
                   std::uint32_t max_groups, const float* x, std::uint32_t x_div,
                   float* y, std::uint32_t m, std::uint32_t k,
-                  hipStream_t stream, bool single) {
+                  hipStream_t stream, bool single,
+                  std::uint32_t dense_rows = 0) {
   constexpr int kRowsPerWave = kWave / Traits<F>::kTasks;
   const auto* weights = static_cast<const std::uint8_t*>(w);
   // A GeGLU launch covers m / 2 gate rows and their up rows.
   const std::uint32_t rows = kGeGlu ? m / 2 : m;
   constexpr int kShare = kGeGlu ? 2 : 1;
+  const auto launch = [&]<int kSplit>() {
+    constexpr int kRows = kRowsPerWave * (kWaves / kSplit) / kShare;
+    const dim3 grid((rows + kRows - 1) / kRows, max_groups);
+    if (single) {
+      RoutedGemvKernel<F, kSplit, kGeGlu, 1, kDense>
+          <<<grid, kThreads, 0, stream>>>(weights, groups, x, x_div, y, m, k,
+                                          dense_rows);
+    } else {
+      RoutedGemvKernel<F, kSplit, kGeGlu, kSlotsPerPass, kDense>
+          <<<grid, kThreads, 0, stream>>>(weights, groups, x, x_div, y, m, k,
+                                          dense_rows);
+    }
+  };
   // Measured with cold experts on gfx1151: short reductions (the 704-wide
   // down projection) run whole rows per wave; the 2816-wide gate/up splits
   // its 11 super-blocks over four waves (eight leave most slices one).
   if (k < 2048) {
-    constexpr int kRows = kRowsPerWave * kWaves / kShare;
-    const dim3 grid((rows + kRows - 1) / kRows, max_groups);
-    if (single) {
-      RoutedGemvKernel<F, 1, kGeGlu, 1>
-          <<<grid, kThreads, 0, stream>>>(weights, groups, x, x_div, y, m, k);
-    } else {
-      RoutedGemvKernel<F, 1, kGeGlu>
-          <<<grid, kThreads, 0, stream>>>(weights, groups, x, x_div, y, m, k);
-    }
-    return;
-  }
-  constexpr int kSplit = 4;
-  constexpr int kRows = kRowsPerWave * (kWaves / kSplit) / kShare;
-  const dim3 grid((rows + kRows - 1) / kRows, max_groups);
-  if (single) {
-    RoutedGemvKernel<F, kSplit, kGeGlu, 1>
-        <<<grid, kThreads, 0, stream>>>(weights, groups, x, x_div, y, m, k);
+    launch.template operator()<1>();
   } else {
-    RoutedGemvKernel<F, kSplit, kGeGlu>
-        <<<grid, kThreads, 0, stream>>>(weights, groups, x, x_div, y, m, k);
+    launch.template operator()<4>();
   }
 }
 
@@ -656,6 +681,14 @@ void LaunchRouted(const void* w, const std::int32_t* groups,
     LaunchRouted<F, false>(w, groups, max_groups, x, x_div, y, m, k, stream,
                            single);
   }
+}
+
+/// Whether the blockwise routed GEMV takes rows of `k` values: an even block
+/// count keeps every row word aligned, which the 2-byte-aligned decoders
+/// (Q8_0, Q4_0, Q5_0) rely on.
+template<ExpertFormat F>
+bool BlockwiseWidth(std::uint32_t k) {
+  return Traits<F>::kBlockwise && k % 64 == 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -896,9 +929,45 @@ bool LaunchRoutedGemv(ExpertFormat format, const void* w,
                                        stream, geglu, single);
       return true;
     case ExpertFormat::kQ4_0:
-      return false;
+      if (!BlockwiseWidth<ExpertFormat::kQ4_0>(k)) {
+        return false;
+      }
+      LaunchRouted<ExpertFormat::kQ4_0>(w, groups, max_groups, x, x_div, y, m,
+                                        k, stream, geglu, single);
+      return true;
+    case ExpertFormat::kQ5_0:
+      if (!BlockwiseWidth<ExpertFormat::kQ5_0>(k)) {
+        return false;
+      }
+      LaunchRouted<ExpertFormat::kQ5_0>(w, groups, max_groups, x, x_div, y, m,
+                                        k, stream, geglu, single);
+      return true;
   }
   return false;
+}
+
+bool LaunchDenseGemv(ExpertFormat format, const void* w, const float* x,
+                     float* y, std::uint32_t rows, std::uint32_t m,
+                     std::uint32_t k, hipStream_t stream) {
+  if (rows == 0 || rows > kMaxGroupSlots || m == 0) {
+    return false;
+  }
+  const auto launch = [&]<ExpertFormat F>() {
+    if (!BlockwiseWidth<F>(k)) {
+      return false;
+    }
+    LaunchRouted<F, false, true>(w, nullptr, 1, x, 1, y, m, k, stream,
+                                 rows == 1, rows);
+    return true;
+  };
+  switch (format) {
+    case ExpertFormat::kQ4_0:
+      return launch.template operator()<ExpertFormat::kQ4_0>();
+    case ExpertFormat::kQ5_0:
+      return launch.template operator()<ExpertFormat::kQ5_0>();
+    default:
+      return false;
+  }
 }
 
 void MoeFinish(const MoeFinishArgs& args, hipStream_t stream) {

@@ -242,11 +242,6 @@ __device__ __forceinline__ void DecodeQ5_1(const std::uint8_t* block,
   }
 }
 
-// Q4_0: eight 32-value blocks form a 256-value, 144-byte group, and task t
-// is block t: values 32 t + i (low nibbles) and 32 t + 16 + i (high) with
-// (q - 8) d = d q - 8 d. Blocks are 18 bytes, so only every other block is
-// word aligned; each lane loads the five words enclosing its block and
-// selects the payload with byte alignment.
 /// Q8_0 task t of a 256-value group (eight 34-byte blocks; the group is word
 /// aligned, odd blocks start mid-word): block t, ggml's d * q, one FMA chain.
 __device__ __forceinline__ float TaskQ80(const std::uint8_t* group, int t,
@@ -256,10 +251,12 @@ __device__ __forceinline__ float TaskQ80(const std::uint8_t* group, int t,
   return Accumulate<32>(acc, w, x + 32 * t);
 }
 
-__device__ __forceinline__ float TaskQ40(const std::uint8_t* group, int t,
-                                         const float* x, float acc) {
-  const std::uint8_t* block = group + 18 * t;
-  const bool odd = (t & 1) != 0;
+/// Q4_0 block (18 bytes, 2-byte aligned inside word-aligned rows): values
+/// 0-15 from the low nibbles, 16-31 from the high, as d q - 8 d (exactly
+/// ggml's (q - 8) d after the one rounding). `odd` as in DecodeQ8_0: the five
+/// enclosing words are loaded and the payload selected with byte alignment.
+__device__ __forceinline__ void DecodeQ4_0(const std::uint8_t* block, bool odd,
+                                           float (&w)[32]) {
   const auto* words =
       reinterpret_cast<const std::uint32_t*>(block - (odd ? 2 : 0));
   std::uint32_t r[5];
@@ -274,9 +271,49 @@ __device__ __forceinline__ float TaskQ40(const std::uint8_t* group, int t,
     qs[i] = odd ? r[i + 1] : __builtin_amdgcn_alignbyte(r[i + 1], r[i], 2);
   }
   const auto* q = reinterpret_cast<const std::uint8_t*>(qs);
-  float w[32];
   Dequant16(q, 0, nullptr, 0, 0, d, -8.0F * d, w);
   Dequant16(q, 4, nullptr, 0, 0, d, -8.0F * d, w + 16);
+}
+
+/// Q5_0 block (22 bytes: d, 32 fifth bits, 16 nibble bytes; 2-byte aligned
+/// inside word-aligned rows): Q5_1's value order, as d q - 16 d (exactly
+/// ggml's (q - 16) d after the one rounding). `odd` as in DecodeQ8_0.
+__device__ __forceinline__ void DecodeQ5_0(const std::uint8_t* block, bool odd,
+                                           float (&w)[32]) {
+  const auto* words =
+      reinterpret_cast<const std::uint32_t*>(block - (odd ? 2 : 0));
+  std::uint32_t r[6];
+#pragma unroll
+  for (int i = 0; i < 6; ++i) {
+    r[i] = words[i];
+  }
+  const float d = HalfBits(odd ? r[0] >> 16 : r[0]);
+  const std::uint32_t qh =
+      odd ? r[1] : __builtin_amdgcn_alignbyte(r[1], r[0], 2);
+  std::uint32_t qs[4];
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    qs[i] = odd ? r[i + 2] : __builtin_amdgcn_alignbyte(r[i + 2], r[i + 1], 2);
+  }
+  const auto* q = reinterpret_cast<const std::uint8_t*>(qs);
+  const float offset = -16.0F * d;
+#pragma unroll
+  for (int i = 0; i < 16; ++i) {
+    const int lo = (q[i] & 0xF) | static_cast<int>(((qh >> i) & 1U) << 4);
+    const int hi = (q[i] >> 4) | static_cast<int>(((qh >> (i + 16)) & 1U) << 4);
+    w[i] = __builtin_fmaf(d, static_cast<float>(lo), offset);
+    w[i + 16] = __builtin_fmaf(d, static_cast<float>(hi), offset);
+  }
+}
+
+// Q4_0: eight 32-value blocks form a 256-value, 144-byte group, and task t
+// is block t: values 32 t + i (low nibbles) and 32 t + 16 + i (high) with
+// (q - 8) d = d q - 8 d. Blocks are 18 bytes, so only every other block is
+// word aligned (DecodeQ4_0).
+__device__ __forceinline__ float TaskQ40(const std::uint8_t* group, int t,
+                                         const float* x, float acc) {
+  float w[32];
+  DecodeQ4_0(group + 18 * t, (t & 1) != 0, w);
   const float* xv = x + 32 * t;
   acc = Accumulate<16>(acc, w, xv);
   return Accumulate<16>(acc, w + 16, xv + 16);

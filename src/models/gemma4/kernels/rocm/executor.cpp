@@ -441,6 +441,8 @@ std::optional<ExpertFormat> DenseHalfFormat(core::GgmlType type) {
   switch (type) {
     case core::GgmlType::kQ4_0:
       return ExpertFormat::kQ4_0;
+    case core::GgmlType::kQ5_0:
+      return ExpertFormat::kQ5_0;
     case core::GgmlType::kQ4_K:
       return ExpertFormat::kQ4_K;
     case core::GgmlType::kQ5_K:
@@ -450,6 +452,21 @@ std::optional<ExpertFormat> DenseHalfFormat(core::GgmlType type) {
     default:
       return std::nullopt;
   }
+}
+
+/// Decode and verification projections on the routed GEMV's dense mode
+/// (LaunchDenseGemv): Q5_0, which no other GEMV decodes, and Q4_0 rows the
+/// Gemma GEMVs cannot split into 256-value groups (the 26B-A4B's 2112-wide
+/// down projection).
+std::optional<ExpertFormat> DenseGemvFormat(core::GgmlType type,
+                                            std::uint32_t k) {
+  if (type == core::GgmlType::kQ5_0) {
+    return ExpertFormat::kQ5_0;
+  }
+  if (type == core::GgmlType::kQ4_0 && k % 256 != 0) {
+    return ExpertFormat::kQ4_0;
+  }
+  return std::nullopt;
 }
 
 }  // namespace
@@ -481,6 +498,13 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
     }
     hip::LaunchBatchedQuantGEMMPreQuantized(w.type, w.data, xq, y, rows, w.rows,
                                             w.cols, stream_);
+    return;
+  }
+  // One kernel at every decode width, so verification rows round like
+  // single tokens.
+  if (const auto format = DenseGemvFormat(w.type, w.cols);
+      format &&
+      LaunchDenseGemv(*format, w.data, x, y, rows, w.rows, w.cols, stream_)) {
     return;
   }
   // Target projections take the WMMA kernel at every width when the drafter
@@ -929,6 +953,10 @@ std::optional<ExpertFormat> ExpertFormatOf(core::GgmlType type) {
       return ExpertFormat::kQ5_1;
     case core::GgmlType::kF16:
       return ExpertFormat::kF16;
+    case core::GgmlType::kQ4_0:
+      return ExpertFormat::kQ4_0;
+    case core::GgmlType::kQ5_0:
+      return ExpertFormat::kQ5_0;
     default:
       return std::nullopt;
   }
@@ -958,14 +986,15 @@ bool OwnGateUp(std::optional<ExpertFormat> format) {
   return format &&
          (*format == ExpertFormat::kQ4_K || *format == ExpertFormat::kQ5_K ||
           *format == ExpertFormat::kQ6_K || *format == ExpertFormat::kQ8_0 ||
-          *format == ExpertFormat::kF16);
+          *format == ExpertFormat::kF16 || *format == ExpertFormat::kQ4_0);
 }
 
 /// Down formats the Gemma routed binary16 GEMM takes.
 bool OwnDown(std::optional<ExpertFormat> format) {
   return format &&
          (*format == ExpertFormat::kQ5_1 || *format == ExpertFormat::kQ8_0 ||
-          *format == ExpertFormat::kF16);
+          *format == ExpertFormat::kF16 || *format == ExpertFormat::kQ4_0 ||
+          *format == ExpertFormat::kQ5_0);
 }
 
 bool HalfExperts(const DeviceLayer& l, const Config& c) {
@@ -1076,7 +1105,8 @@ bool Executor::PrefillExperts(const DeviceLayer& l, std::uint32_t n,
       own_gate_up ? kRoutedKQuantTileRows : kRoutedTileRows;
   const std::uint32_t tiles =
       RoutedTileCapacity(slots, c.num_experts, gate_up_rows);
-  // The down projection takes the Gemma routed GEMM (Q5_1, Q8_0, binary16).
+  // The down projection takes the Gemma routed GEMM (Q4_0, Q5_0, Q5_1, Q8_0,
+  // binary16).
   const auto down_format = ExpertFormatOf(l.down_exps.type);
   const bool own_down = OwnDown(down_format);
   const std::uint32_t down_rows =

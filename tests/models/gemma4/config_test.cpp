@@ -272,7 +272,7 @@ void CheckExpertWeights() {
   wrong["blk.0.ffn_down_exps.weight"].dims[2] = 7;
   rejects(wrong, MoeMetadata(), "short expert stack accepted");
   wrong = tensors;
-  wrong["blk.1.ffn_gate_up_exps.weight"].type = GgmlType::kQ4_0;
+  wrong["blk.1.ffn_gate_up_exps.weight"].type = GgmlType::kQ5_1;
   rejects(wrong, MoeMetadata(), "unsupported expert format accepted");
   rejects(tensors, TargetMetadata(), "experts in a dense model accepted");
 }

@@ -11,6 +11,16 @@ thinking off. llama.cpp is the repository's pinned `b11069` (ROCm) reference.
 Positive gain favors Gufo. **TODO** means unmeasured.
 [Quality and measurement details](QUALITY.md#benchmark-method) · [Model identities](artifacts/model-identities.json)
 
+Other quants ([formats](README.md#other-quants)) have no HTTP tables yet.
+Native `gufo bench` against `llama-bench` (b11069, `-fa 1 -ngl 99`), pp2048
+and tg128, three repetitions, October 11, 2026:
+
+| Quant | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| QAT UD-Q4_K_XL | 4131 | 1546 | +167% | 81.4 | 69.4 | +17% |
+| Fine-tune, llama.cpp Q4_K_M | 3885 | 1597 | +143% | 69.9 | 60.7 | +15% |
+| UD-Q4_K_XL (control, same build) | 3939 | TODO | | 56.7 | TODO | |
+
 ## Single user, autoregressive
 
 Approximately pp2048 / tg128; depth is the cached prefix in tokens.

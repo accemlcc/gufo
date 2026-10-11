@@ -69,6 +69,34 @@ input norm (1.1e-7) match exactly. Its dense projections match a Q8_1
 emulation of the reference to 1.4e-4. Its expert projections differ from the
 reference by 1–6%, beyond what Q8_1 rounding explains.
 
+## Other quants
+
+Measured October 11, 2026 with `gemma4.target` against the same scalar
+reference over each GGUF ([formats](README.md#other-quants)). The QAT
+checkpoint ran with its own Q4_0 drafter; a fine-tune of the 26B-A4B in
+llama.cpp's Q4_K_M and Q6_K mixes (imatrix quants) with the Unsloth Q8_0
+drafter.
+
+| Check | QAT UD-Q4_K_XL | Fine-tune Q4_K_M | Fine-tune Q6_K |
+| --- | --- | --- | --- |
+| Decode vs scalar reference | Mean KL 1.5e-7, top-1 22/22 | 5.7e-7, 22/22 | 4.1e-7, 22/22 |
+| Prefill vs scalar reference (limit 1e-3) | 9.7e-6, top-1 22/22 | **0.013**, 21/22 | **0.0026**, 22/22 |
+| Bulk prefill vs exact rows, 1542-token conversation (limit 0.06) | 0.0015, 1523/1542 | 0.024, 1481/1542 | 0.019, 1493/1542 |
+| Greedy MTP and batched sessions vs decode; sampled replay; session state | Pass | Pass | Pass |
+
+The fine-tune's quants exceed the short-prompt prefill limit set on the Unsloth
+quants. On Q4_K_M a single position carries 0.25 of the 22 positions' summed
+KL (mean 0.0114 of 0.0131): its residual departs from the reference in layer
+29, a top-8 routing flip ([routing sensitivity](#routing-sensitivity)).
+Comparing per-layer residuals with the reference on this prompt, the
+fine-tune also flips at other positions in layers 9 and 18 (relative RMS up
+to 6e-2 afterwards, UD-Q4_K_XL at most 2e-2 after its one flip in layer 11),
+and its error before any flip is 1.5–2 times UD-Q4_K_XL's (K-quant instead
+of Q8_0 attention and dense projections). The conversation check, over 1542
+positions, sits at the Unsloth quants' level. Q6_K, whose formats the engine
+already ran before Q5_0 support, behaves the same way, so this is not
+specific to Q5_0. The limit is unchanged; these two quants fail it.
+
 ## Reproduce
 
 ```sh
@@ -81,9 +109,10 @@ nix develop -c ctest --preset gpu-full -R '^gemma4\.(target|moe_ops|projection_o
 ```
 
 `gemma4.moe_ops` checks routing against FP64, every routed format (Q4_K,
-Q5_K, Q6_K, Q8_0 gate/up; Q5_1, Q8_0 down) against FP64 dots and batch
-invariance from one to sixteen rows, the routed Q6_K prefill GEMM and the
-mixture epilogue. Reference and llama.cpp logits:
+Q5_K, Q6_K, Q8_0, Q4_0 gate/up; Q5_1, Q8_0, Q4_0, Q5_0 down) against FP64
+dots and batch invariance from one to sixteen rows, the routed prefill GEMMs,
+the dense Q4_0 / Q5_0 GEMV and prefill GEMM at the 2112-wide down
+projection, and the mixture epilogue. Reference and llama.cpp logits:
 `gemma4_reference_probe --model M --chat "Write one sentence about the sea
 near Genoa." --half-kv --tokens-out T.i32 --logits-out R.g4lg`, then
 `llama_logits --model M --tokens T.i32 --output L.g4lg`

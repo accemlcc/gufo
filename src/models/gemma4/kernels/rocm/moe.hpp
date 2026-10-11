@@ -19,8 +19,8 @@ enum class ExpertFormat : std::uint32_t {
   kQ8_0,
   kQ5_1,
   kF16,
-  /// Dense prefill only (the QAT targets): no expert kernels.
   kQ4_0,
+  kQ5_0,
 };
 
 /// Rows whose assignments one expert group can hold: an expert appears at
@@ -93,17 +93,26 @@ void MoeRoute(const MoeRouteArgs& args, hipStream_t stream);
                                     hipStream_t stream, bool geglu = false,
                                     bool single = false);
 
+/// Dense projection of `rows` (1..kMaxGroupSlots) FP32 activation rows x
+/// ([rows][k]) with LaunchRoutedGemv's arithmetic over one expert: y[r] =
+/// W x[r] ([rows][m]), every row rounding as it would alone. For Q4_0 and
+/// Q5_0 (k a multiple of 64) at shapes the Gemma decode GEMVs lack. Returns
+/// false without launching for others.
+[[nodiscard]] bool LaunchDenseGemv(ExpertFormat format, const void* w,
+                                   const float* x, float* y, std::uint32_t rows,
+                                   std::uint32_t m, std::uint32_t k,
+                                   hipStream_t stream);
+
 /// Routed prefill projection over binary16 activation rows `x` ([rows][k])
 /// in Flash-Next's routing layout (RoutedCompact buckets and a tile map of
 /// expert | tile << 16 entries built for `tile_rows` bucket rows per tile):
 /// row rows_out[i] of `out` (FP32) or `out_half` (binary16, saturated)
 /// receives W[expert] x[rows_in[i]]. Covers the formats the Flash-Next
-/// routed GEMM lacks or runs slower (Q4_K, Q5_K, Q6_K, and Q5_1 / Q8_0 /
-/// binary16 with FP32 outputs; 96-row tiles); returns false for others. With
-/// `geglu` (a
-/// K-quant, Q8_0 or binary16 fused [gate | up] W, binary16 output) row r of
-/// `out_half`
-/// holds the m / 2 values GeGluPackedHalf would make of the binary16 pair.
+/// routed GEMM lacks or runs slower (Q4_K, Q5_K, Q6_K, and Q4_0 / Q5_0 /
+/// Q5_1 / Q8_0 / binary16 with FP32 outputs; 96-row tiles); returns false
+/// for others. With `geglu` (a K-quant, Q4_0, Q8_0 or binary16 fused
+/// [gate | up] W, binary16 output) row r of `out_half` holds the m / 2 values
+/// GeGluPackedHalf would make of the binary16 pair.
 [[nodiscard]] bool LaunchRoutedHalfGemm(
     ExpertFormat format, const void* w, const void* x,
     const std::int32_t* tiles, std::uint32_t n_tiles, std::uint32_t tile_rows,
@@ -113,9 +122,10 @@ void MoeRoute(const MoeRouteArgs& args, hipStream_t stream);
 
 /// Dense prefill projection over binary16 activation rows `x` ([rows][k])
 /// for Q4_K, Q5_K, Q6_K (the routed GEMM's arithmetic over an identity
-/// routing; k a multiple of 256) or Q4_0 (the routed down kernel's layout
-/// with weights (q - 8) d; k a multiple of 64). `out` (FP32) or `out_half`
-/// (binary16, saturated; K-quants only) is [rows][m]; `geglu` as in
+/// routing; k a multiple of 256) or Q4_0 / Q5_0 (the routed down kernel's
+/// layout with weights (q - 8) d / (q - 16) d; k a multiple of 64). `out`
+/// (FP32) or `out_half` (binary16, saturated; K-quants only) is [rows][m];
+/// `geglu` as in
 /// LaunchRoutedHalfGemm. Returns false for other formats or shapes.
 [[nodiscard]] bool LaunchDenseHalfGemm(ExpertFormat format, const void* w,
                                        const void* x, float* out,

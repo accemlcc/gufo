@@ -1,8 +1,8 @@
 // Routed expert GEMM for prefill over binary16 activations for the K-quant
-// expert formats (Q4_K, Q5_K, Q6_K), and for the blockwise ones (Q5_1, Q8_0,
-// binary16). It reads the routing layout of Flash-Next's routed GEMM:
-// RoutedCompact's 16-padded expert buckets and a tile map of
-// expert | tile << 16 entries.
+// expert formats (Q4_K, Q5_K, Q6_K), and for the blockwise ones (Q4_0, Q5_0,
+// Q5_1, Q8_0, binary16). It reads the routing layout of Flash-Next's routed
+// GEMM: RoutedCompact's 16-padded expert buckets and a tile map of expert |
+// tile << 16 entries.
 //
 // A block computes 128 output rows (eight waves of 16) for one tile of
 // kTileTokens bucket rows, skipping the tile's 16-row parts past the bucket.
@@ -551,20 +551,30 @@ constexpr int kF16Stride = 144;
 /// bytes into a word, the second's on a word), padded like Q5_1 to 48 bytes.
 constexpr int kQ40Stride = 48;
 constexpr int kQ40Words = 9;
+/// Bytes per staged Q5_0 row: the stage's two raw 22-byte blocks as 11
+/// words (d0, qh0, codes 0-15, d1, qh1, codes 0-15; the first block's qh and
+/// codes start two bytes into a word, the second's on a word), padded like
+/// Q5_1 to 48 bytes.
+constexpr int kQ50Stride = 48;
+constexpr int kQ50Words = 11;
 
 template<ExpertFormat F>
 constexpr int kDownStride = F == ExpertFormat::kQ5_1   ? kQ51Stride
                             : F == ExpertFormat::kQ8_0 ? kQ80Stride
                             : F == ExpertFormat::kQ4_0 ? kQ40Stride
+                            : F == ExpertFormat::kQ5_0 ? kQ50Stride
                                                        : kF16Stride;
 template<ExpertFormat F>
 constexpr int kDownBlockBytes = F == ExpertFormat::kQ5_1   ? 24
                                 : F == ExpertFormat::kQ8_0 ? 34
                                 : F == ExpertFormat::kQ4_0 ? 18
+                                : F == ExpertFormat::kQ5_0 ? 22
                                                            : 64;
-/// Words a word-staged format (Q8_0, Q4_0) keeps per row and stage.
+/// Words a word-staged format (Q8_0, Q4_0, Q5_0) keeps per row and stage.
 template<ExpertFormat F>
-constexpr int kDownWords = F == ExpertFormat::kQ8_0 ? kQ80Words : kQ40Words;
+constexpr int kDownWords = F == ExpertFormat::kQ8_0   ? kQ80Words
+                           : F == ExpertFormat::kQ5_0 ? kQ50Words
+                                                      : kQ40Words;
 /// Floats per token row of the down kernel's output transpose (128 rows plus
 /// padding: 132 = 4 mod 64 puts a tile's writes on distinct banks).
 constexpr int kOutStride = kRowsPerBlock + 4;
@@ -684,11 +694,61 @@ __device__ __forceinline__ void DecodeQ40(const std::uint32_t (&w)[kQ40Words],
   }
 }
 
-/// Routed Q5_1 / Q8_0 / binary16 down projection with FP32 outputs: the
+/// Q5_0 K block s (< 2) of a staged row's 11 words as two fragments: Q5_1's
+/// element order and fifth bits, weight (q - 16) * d, exact before the
+/// binary16 rounding.
+__device__ __forceinline__ void DecodeQ50(const std::uint32_t (&w)[kQ50Words],
+                                          int s, bool live, v16h* lo,
+                                          v16h* hi) {
+  std::uint32_t codes[4];
+  std::uint32_t d_bits = 0;
+  std::uint32_t qh = 0;
+  if (s == 0) {
+    d_bits = w[0] & 0xFFFFU;
+    qh = __builtin_amdgcn_alignbit(w[1], w[0], 16);
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      codes[i] = __builtin_amdgcn_alignbit(w[i + 2], w[i + 1], 16);
+    }
+  } else {
+    d_bits = w[5] >> 16U;
+    qh = w[6];
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      codes[i] = w[7 + i];
+    }
+  }
+  const __half2 scale = __half2half2(__builtin_bit_cast(
+      __half, static_cast<std::uint16_t>(live ? d_bits : 0U)));
+  const __half2 offset = __float2half2_rn(1040.0F);
+#pragma unroll
+  for (int part = 0; part < 2; ++part) {
+    __half2 h[8];
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      const std::uint32_t bits = qh >> (16 * part + 4 * i);
+      // Bit b of `bits` (b < 4) to bit 4 of byte b, as DecodeQ51.
+      const std::uint32_t high = ((bits & 1U) | ((bits & 2U) << 7U) |
+                                  ((bits & 4U) << 14U) | ((bits & 8U) << 21U))
+                                 << 4U;
+      CodesToHalves(((codes[i] >> (4 * part)) & 0x0F0F0F0FU) | high, offset,
+                    scale, &h[2 * i]);
+    }
+    if (part == 0) {
+      __builtin_memcpy(lo, h, 32);
+    } else {
+      __builtin_memcpy(hi, h, 32);
+    }
+  }
+}
+
+/// Routed Q4_0 / Q5_0 / Q5_1 / Q8_0 / binary16 down projection with FP32
+/// outputs: the
 /// layout and tiling of RoutedHalfKQuantKernel over 64-value stages (three
 /// 16-byte pieces per Q5_1 row, consecutive threads on consecutive pieces).
 /// Each token tile's results are transposed through LDS so a token's 128
-/// outputs leave as one contiguous 512-byte store. kGeGlu (Q8_0, binary16):
+/// outputs leave as one contiguous 512-byte store. kGeGlu (Q4_0, Q8_0,
+/// binary16):
 /// the gate/up projection with RoutedHalfKQuantKernel's row split and GeGLU
 /// epilogue into `out_half`.
 template<ExpertFormat F, int kTileTokens, bool kGeGlu = false,
@@ -705,8 +765,9 @@ __global__ void __launch_bounds__(kThreads)
                          std::uint32_t dense_rows = 0,
                          std::uint32_t dense_group = 0) {
   constexpr bool kQ8 = F == ExpertFormat::kQ8_0;
-  // Q8_0 and Q4_0 rows are only 2-byte aligned: staged as words.
-  constexpr bool kWordStaged = kQ8 || F == ExpertFormat::kQ4_0;
+  // Q8_0, Q4_0 and Q5_0 rows are only 2-byte aligned: staged as words.
+  constexpr bool kSmall = F == ExpertFormat::kQ4_0 || F == ExpertFormat::kQ5_0;
+  constexpr bool kWordStaged = kQ8 || kSmall;
   constexpr int kRowWords = kDownWords<F>;
   constexpr bool kF16 = F == ExpertFormat::kF16;
   constexpr int kStride = kDownStride<F>;
@@ -785,8 +846,8 @@ __global__ void __launch_bounds__(kThreads)
   };
 
   // Weight fetch. Q5_1: piece c (tid, and tid + 256 for tid < 128) is bytes
-  // 16 (c % 3) of row c / 3's stage. Q8_0 / Q4_0: word c = tid + 256 i is
-  // word c % 17 (c % 9) of row c / 17 (c / 9)'s stage.
+  // 16 (c % 3) of row c / 3's stage. Q8_0 / Q4_0 / Q5_0: word c = tid +
+  // 256 i is word c % 17 (9, 11) of row c / 17 (9, 11)'s stage.
   // Binary16: piece c = tid + 256 i is bytes 16 (c % 8) of row c / 8's stage.
   static_assert(kPieces > kThreads && kPieces <= 2 * kThreads);
   constexpr int kWords = kRowsPerBlock * kRowWords;
@@ -928,18 +989,21 @@ __global__ void __launch_bounds__(kThreads)
       }
       words[16] = reinterpret_cast<const std::uint32_t*>(row)[16];
     }
-    std::uint32_t q40_words[kQ40Words];
-    if constexpr (F == ExpertFormat::kQ4_0) {
+    std::uint32_t small_words[kSmall ? kRowWords : 1];
+    if constexpr (kSmall) {
       const auto* r4 = reinterpret_cast<const uint4*>(row);
 #pragma unroll
       for (int i = 0; i < 2; ++i) {
         const uint4 v = r4[i];
-        q40_words[4 * i] = v.x;
-        q40_words[4 * i + 1] = v.y;
-        q40_words[4 * i + 2] = v.z;
-        q40_words[4 * i + 3] = v.w;
+        small_words[4 * i] = v.x;
+        small_words[4 * i + 1] = v.y;
+        small_words[4 * i + 2] = v.z;
+        small_words[4 * i + 3] = v.w;
       }
-      q40_words[8] = reinterpret_cast<const std::uint32_t*>(row)[8];
+#pragma unroll
+      for (int i = 8; i < kRowWords; ++i) {
+        small_words[i] = reinterpret_cast<const std::uint32_t*>(row)[i];
+      }
     }
 #pragma unroll
     for (int s = 0; s < 2; ++s) {
@@ -956,7 +1020,9 @@ __global__ void __launch_bounds__(kThreads)
       } else if constexpr (kQ8) {
         DecodeQ80(words, s, live, &a_lo, &a_hi);
       } else if constexpr (F == ExpertFormat::kQ4_0) {
-        DecodeQ40(q40_words, s, live, &a_lo, &a_hi);
+        DecodeQ40(small_words, s, live, &a_lo, &a_hi);
+      } else if constexpr (F == ExpertFormat::kQ5_0) {
+        DecodeQ50(small_words, s, live, &a_lo, &a_hi);
       } else {
         DecodeQ51(row + 24 * s, live, &a_lo, &a_hi);
       }
@@ -1065,11 +1131,13 @@ bool LaunchDenseHalfGemm(ExpertFormat format, const void* w, const void* x,
                          float* out, void* out_half, std::uint32_t rows,
                          std::uint32_t m, std::uint32_t k, hipStream_t stream,
                          bool geglu) {
-  const bool q40 = format == ExpertFormat::kQ4_0;
-  if (rows == 0 || k % (q40 ? kDownStageK : 256) != 0 ||
+  // Q4_0 and Q5_0 take the down kernel's 64-value stages.
+  const bool blockwise =
+      format == ExpertFormat::kQ4_0 || format == ExpertFormat::kQ5_0;
+  if (rows == 0 || k % (blockwise ? kDownStageK : 256) != 0 ||
       (out == nullptr) == (out_half == nullptr) ||
       (geglu && (out_half == nullptr || m % 2 != 0)) ||
-      (q40 && out_half != nullptr && !geglu)) {
+      (blockwise && out_half != nullptr && !geglu)) {
     return false;
   }
   constexpr int kTile = 96;
@@ -1084,6 +1152,18 @@ bool LaunchDenseHalfGemm(ExpertFormat format, const void* w, const void* x,
   const auto* wb = static_cast<const std::uint8_t*>(w);
   const auto* xh = static_cast<const __half*>(x);
   auto* oh = static_cast<__half*>(out_half);
+  const auto launch_blockwise = [&]<ExpertFormat F>() {
+    if (geglu) {
+      RoutedHalfDownKernel<F, kTile, true, true><<<grid, kThreads, 0, stream>>>(
+          wb, xh, nullptr, nullptr, nullptr, nullptr, nullptr, oh, m, k, rows,
+          kGroup);
+    } else {
+      RoutedHalfDownKernel<F, kTile, false, true>
+          <<<grid, kThreads, 0, stream>>>(wb, xh, nullptr, nullptr, nullptr,
+                                          nullptr, out, nullptr, m, k, rows,
+                                          kGroup);
+    }
+  };
   const auto launch = [&]<ExpertFormat F>() {
     if (geglu) {
       RoutedHalfKQuantKernel<F, kTile, true, true>
@@ -1106,17 +1186,10 @@ bool LaunchDenseHalfGemm(ExpertFormat format, const void* w, const void* x,
       launch.template operator()<ExpertFormat::kQ6_K>();
       return true;
     case ExpertFormat::kQ4_0:
-      if (geglu) {
-        RoutedHalfDownKernel<ExpertFormat::kQ4_0, kTile, true, true>
-            <<<grid, kThreads, 0, stream>>>(wb, xh, nullptr, nullptr, nullptr,
-                                            nullptr, nullptr, oh, m, k, rows,
-                                            kGroup);
-      } else {
-        RoutedHalfDownKernel<ExpertFormat::kQ4_0, kTile, false, true>
-            <<<grid, kThreads, 0, stream>>>(wb, xh, nullptr, nullptr, nullptr,
-                                            nullptr, out, nullptr, m, k, rows,
-                                            kGroup);
-      }
+      launch_blockwise.template operator()<ExpertFormat::kQ4_0>();
+      return true;
+    case ExpertFormat::kQ5_0:
+      launch_blockwise.template operator()<ExpertFormat::kQ5_0>();
       return true;
     default:
       return false;
@@ -1134,11 +1207,13 @@ bool LaunchRoutedHalfGemm(ExpertFormat format, const void* w, const void* x,
   if (tile_rows != 96 || n_tiles == 0 ||
       (out == nullptr) == (out_half == nullptr) ||
       (format != ExpertFormat::kQ5_1 && format != ExpertFormat::kQ8_0 &&
-       format != ExpertFormat::kF16 && k % 256 != 0)) {
+       format != ExpertFormat::kF16 && format != ExpertFormat::kQ4_0 &&
+       format != ExpertFormat::kQ5_0 && k % 256 != 0)) {
     return false;
   }
   if (geglu &&
-      (out_half == nullptr || m % 2 != 0 || format == ExpertFormat::kQ5_1)) {
+      (out_half == nullptr || m % 2 != 0 || format == ExpertFormat::kQ5_1 ||
+       format == ExpertFormat::kQ5_0)) {
     return false;
   }
   const dim3 grid((m + kRowsPerBlock - 1) / kRowsPerBlock, n_tiles);
@@ -1203,6 +1278,29 @@ bool LaunchRoutedHalfGemm(ExpertFormat format, const void* w, const void* x,
             <<<grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds, rows_in,
                                             rows_out, out, nullptr, m, k);
       }
+      return true;
+    case ExpertFormat::kQ4_0:
+      if (k % kDownStageK != 0 || (out == nullptr) != geglu) {
+        return false;
+      }
+      if (geglu) {
+        RoutedHalfDownKernel<ExpertFormat::kQ4_0, 96, true>
+            <<<geglu_grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds,
+                                                  rows_in, rows_out, nullptr,
+                                                  oh, m, k);
+      } else {
+        RoutedHalfDownKernel<ExpertFormat::kQ4_0, 96>
+            <<<grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds, rows_in,
+                                            rows_out, out, nullptr, m, k);
+      }
+      return true;
+    case ExpertFormat::kQ5_0:
+      if (out == nullptr || k % kDownStageK != 0) {
+        return false;
+      }
+      RoutedHalfDownKernel<ExpertFormat::kQ5_0, 96>
+          <<<grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds, rows_in,
+                                          rows_out, out, nullptr, m, k);
       return true;
     case ExpertFormat::kF16:
       if (k % kDownStageK != 0 || (out == nullptr) != geglu) {
