@@ -65,7 +65,9 @@ completions of the two configurations can differ. Sampled requests verify
 drafts by p/q rejection, so emitted tokens follow the target distribution.
 
 The chat template is Unsloth's variant (SHA-256 `845f1ee4…73d1b`), compiled
-into the engine and checked against Jinja renders. It defaults to thinking
+into the engine and checked against Jinja renders. A GGUF carrying another
+template (fine-tunes often ship an older revision) loads with a warning and
+renders with this one. It defaults to thinking
 off; the [reasoning controls](../../SERVER.md#reasoning-controls) turn the
 thinking channel on, returned as `reasoning_content`. Gemma tool calls
 (`<|tool_call>call:NAME{…}<tool_call|>`) are returned as OpenAI `tool_calls`.

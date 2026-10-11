@@ -231,9 +231,10 @@ target_compile_features(gufo_logging PUBLIC cxx_std_20)
 
 # The imported DeepSeek V4 Flash runtime routes its informational messages
 # through the shared logger instead of writing to stderr directly, so it needs
-# the threshold that `--log-level` arms.
+# the threshold that `--log-level` arms. The Gemma 4 loader warns through it.
 if (ENGINE_ENABLE_HIP)
   target_link_libraries(gufo_deepseek_v4_flash PUBLIC gufo_logging)
+  target_link_libraries(gufo_gemma4 PUBLIC gufo_logging)
 endif()
 
 add_library(gufo_http STATIC

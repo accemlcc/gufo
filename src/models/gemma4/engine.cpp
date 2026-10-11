@@ -13,6 +13,7 @@
 #include <thread>
 #include <utility>
 
+#include "src/cli/serve/logging.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/models/gemma4/chat_template.hpp"
 #include "src/models/gemma4/kernels/rocm/device_model.hpp"
@@ -222,9 +223,12 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     return nullptr;
   }
   m->reader_ = std::move(reader);
+  // Prompts render with the built-in template whatever the GGUF carries, so
+  // fine-tunes shipping another revision of the Gemma 4 template still load.
   if (!ChatTemplate::ValidateGgufTemplate(*m->reader_, &error)) {
-    Fail(error_msg, error);
-    return nullptr;
+    server::Logger::Warn(
+        "gemma4", error + "; rendering prompts with the built-in " +
+                      std::string(ChatTemplate::TemplateId()) + " template");
   }
   auto weights = ModelWeights::Bind(*m->reader_, &error);
   if (!weights) {
