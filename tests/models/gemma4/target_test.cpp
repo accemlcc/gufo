@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -20,6 +21,8 @@
 #include "src/models/gemma4/kernels/rocm/executor.hpp"
 #include "src/models/gemma4/reference.hpp"
 #include "tests/models/gemma4/check.hpp"
+
+void LimitReportedDeviceFree(std::size_t bytes);
 
 namespace g4 = gufo::models::gemma4;
 using gemma4_test::Require;
@@ -394,6 +397,26 @@ int main() {
       Require(payload(*shared) == payload(*reference) &&
                   payload(*adopted) == payload(*reference),
               "shared snapshot payload differs from a fresh copy");
+    }
+    {
+      // Without device headroom a capture fails cleanly, and the session and
+      // its earlier snapshots are unchanged.
+      struct Unlimit {
+        ~Unlimit() {
+          LimitReportedDeviceFree(std::numeric_limits<std::size_t>::max());
+        }
+      } unlimit;
+      const auto before = original->SaveSnapshot(&error);
+      Require(before != nullptr, error);
+      LimitReportedDeviceFree(0);
+      std::string refused_error;
+      Require(original->SaveSnapshot(&refused_error) == nullptr &&
+                  !refused_error.empty(),
+              "snapshot storage ignored the device reserve");
+      LimitReportedDeviceFree(std::numeric_limits<std::size_t>::max());
+      const auto after = original->SaveSnapshot(&error);
+      Require(after && payload(*after) == payload(*before),
+              "a refused capture changed the session");
     }
     std::string other;
     for (int i = 0; i < 60; ++i) {

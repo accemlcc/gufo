@@ -73,6 +73,11 @@ bool Fail(std::string* error_msg, std::string message) {
 struct SnapshotMemory : std::enable_shared_from_this<SnapshotMemory> {
   static constexpr std::uint64_t kStagingBytes = std::uint64_t{64} << 20;
   static constexpr std::uint32_t kStagingRuns = 8192;
+  /// Device memory every snapshot allocation leaves free: the runtime's, plus
+  /// buffers allocated per request (image encoding needs ~0.6 GB at 1120
+  /// tokens). The snapshot budget counts host memory, which on an APU need
+  /// not bound the device's.
+  static constexpr std::uint64_t kDeviceReserveBytes = std::uint64_t{1} << 30;
 
   ~SnapshotMemory() {
     {
@@ -94,8 +99,15 @@ struct SnapshotMemory : std::enable_shared_from_this<SnapshotMemory> {
       (void)hipStreamDestroy(stream);
     }
   }
-  /// Device bytes, freed by the worker; null on failure.
+  /// Device bytes, freed by the worker; null on failure or when they would
+  /// leave less than the reserve free.
   std::shared_ptr<std::uint8_t> Allocate(std::uint64_t bytes) {
+    std::size_t free = 0;
+    std::size_t total = 0;
+    if (hipMemGetInfo(&free, &total) != hipSuccess || free < bytes ||
+        free - bytes < kDeviceReserveBytes) {
+      return nullptr;
+    }
     void* at = nullptr;
     if (hipMalloc(&at, bytes) != hipSuccess) {
       return nullptr;

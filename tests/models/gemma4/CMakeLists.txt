@@ -38,9 +38,10 @@ if (ENGINE_ENABLE_HIP)
   foreach(name IN ITEMS attention_ops kernel_ops moe_ops projection_ops)
     add_gemma4_test(${name} gufo_gemma4 "hip;gpu;gfx1151")
   endforeach()
-  add_executable(gemma4_target_test EXCLUDE_FROM_ALL target_test.cpp)
+  add_executable(gemma4_target_test EXCLUDE_FROM_ALL target_test.cpp
+    device_headroom_fault.cpp)
   target_link_libraries(gemma4_target_test PRIVATE gufo_gemma4
-    gufo_gemma4_reference)
+    gufo_gemma4_reference ${CMAKE_DL_LIBS})
   set_source_files_properties(target_test.cpp PROPERTIES COMPILE_OPTIONS "-O2")
   target_compile_definitions(gemma4_target_test PRIVATE
     GUFO_GEMMA4_FIXTURES="${PROJECT_SOURCE_DIR}/tests/models/gemma4/fixtures")
