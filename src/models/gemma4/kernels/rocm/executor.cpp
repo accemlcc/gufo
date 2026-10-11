@@ -468,7 +468,7 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
       if (w.type == core::GgmlType::kQ8_0 &&
           qwen38_flash_next::rocm::DenseF16Gemm(
               w.data, static_cast<const __half*>(xq), y, rows, w.rows, w.cols,
-              stream_, HalfPlan(w.rows, w.cols))) {
+              stream_, 0, HalfPlan(w.rows, w.cols))) {
         return;
       }
       if (const auto format = DenseHalfFormat(w.type);

@@ -25,10 +25,12 @@ from metrics import (CaseComplete, Recorder, canonical, compare, join_server_tim
 from progress import ProgressTrace
 from tool_reasoning import ARGUMENTS, assert_edit, assert_terminal_call, assert_no_envelope_framing
 from discovery import assert_model_listing
+from messages_count_tokens import assert_count_response, assert_prompt_count
 from image_inputs import assert_color, image_cases, invalid_image_cases
 from cache_concurrency import check_cache_concurrency
 from cache_shared_prefix import check_cache_shared_prefix
 from cache_bridge import check_cache_bridge
+from cache_compaction import check_cache_compaction, ARCHIVE_LINE
 from cache_disk_spacing import check_disk_spacing
 from cache_growth import check_cache_growth
 from cache_depth import check_cache_depth
@@ -40,6 +42,62 @@ from server_metrics import (COUNTERS, TYPES, PROMPT, GENERATED, PROCESSING,
 
 
 class FunctionalRunnerTest(unittest.TestCase):
+    def test_messages_tool_ids_preserve_links_and_argument_data(self):
+        def history(identifier):
+            return {"messages": [
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": identifier, "name": "read",
+                     "input": {"type": "message", "id": "user-data"}}]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": identifier, "content": "ok"}]}]}
+
+        first, renamed = history("call_a"), history("call_b")
+        self.assertEqual(canonical(first), canonical(renamed))
+        broken_link = deepcopy(first)
+        broken_link["messages"][1]["content"][0]["tool_use_id"] = "missing_call"
+        self.assertNotEqual(canonical(first), canonical(broken_link))
+        changed_argument = deepcopy(first)
+        changed_argument["messages"][0]["content"][0]["input"]["id"] = "changed-data"
+        self.assertNotEqual(canonical(first), canonical(changed_argument))
+
+    def test_messages_count_tokens_contract(self):
+        body = {"input_tokens": 318}
+        measured, fingerprint = summarize([(1, json.dumps(body).encode())], False, True,
+                                          ("/v1/messages/count_tokens", {}, 200))
+        self.assertEqual(measured, {"prompt_tokens": 318})
+        self.assertIsNotNone(fingerprint)
+        self.assertEqual(assert_count_response(body), 318)
+        for invalid in ({}, {"input_tokens": True}, {"input_tokens": -1},
+                        {"input_tokens": 3.5}, {"input_tokens": 318, "output_tokens": 0}):
+            with self.subTest(invalid=invalid), self.assertRaises(AssertionError):
+                summarize([(1, json.dumps(invalid).encode())], False, True,
+                          ("/v1/messages/count_tokens", {}, 200))
+        with self.assertRaises(AssertionError):
+            summarize([(1, json.dumps(body).encode())], False, False,
+                      ("/v1/messages/count_tokens", {}, 200))
+
+    def test_messages_count_tokens_includes_cached_prompt(self):
+        for usage in ({"input_tokens": 318},
+                      {"input_tokens": 18, "cache_read_input_tokens": 300},
+                      {"input_tokens": 0, "cache_read_input_tokens": 318},
+                      {"input_tokens": 18, "cache_creation_input_tokens": 300}):
+            with self.subTest(usage=usage):
+                assert_prompt_count(318, usage)
+                with self.assertRaises(AssertionError):
+                    assert_prompt_count(317, usage)
+        for value in (-1, True, 1.5, "318"):
+            with self.subTest(value=value), self.assertRaises(AssertionError):
+                assert_prompt_count(318, {"input_tokens": value})
+
+    def test_harness_hash_covers_imported_modules(self):
+        # Baselines are matched by harness_sha256, so modules reached only
+        # through imports must change the hash too.
+        hashed = {path.relative_to(ROOT).as_posix() for path in functional.harness_files()}
+        self.assertLessEqual({f"tests/functional/{name}" for name in functional.HARNESS_ROOTS},
+                             hashed)
+        self.assertLessEqual({"tests/functional/messages_tools.py",
+                              "tools/gufo/control_tokens.py"}, hashed)
+
     def test_continuation_restore_reports_observed_equality(self):
         import continuation
 
@@ -204,13 +262,14 @@ class FunctionalRunnerTest(unittest.TestCase):
                         worker.join(timeout=5)
 
     def test_image_inputs_require_a_projector_before_starting_a_server(self):
-        argv = ["run.py", "--output", "/unused", "--sampling-preset", "qwen38",
-                "--suite", "image-inputs", "--record-baseline", "--", "gufo", "serve", "llm"]
-        with patch.object(sys, "argv", argv), patch.object(functional, "server") as start, \
-                contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
-            functional.main()
-        self.assertEqual(error.exception.code, 2)
-        start.assert_not_called()
+        for suite in ("image-inputs", "image-count", "tool-images"):
+            argv = ["run.py", "--output", "/unused", "--sampling-preset", "qwen38",
+                    "--suite", suite, "--record-baseline", "--", "gufo", "serve", "llm"]
+            with patch.object(sys, "argv", argv), patch.object(functional, "server") as start, \
+                    contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                functional.main()
+            self.assertEqual(error.exception.code, 2)
+            start.assert_not_called()
 
     def test_image_inputs_cover_real_formats_and_require_the_correct_color(self):
         def image(color):
@@ -263,7 +322,7 @@ class FunctionalRunnerTest(unittest.TestCase):
                 assert_no_envelope_framing({**result, "text": text})
 
     def test_discovery_requires_an_explicit_expectation_before_starting_a_server(self):
-        for suite in ("discovery", "all"):
+        for suite in ("discovery", "messages-image-counts", "all"):
             argv = ["run.py", "--output", "/unused", "--sampling-preset", "qwen38",
                     "--suite", suite, "--record-baseline", "--", "gufo", "serve", "llm"]
             with self.subTest(suite=suite), patch.object(sys, "argv", argv), \
@@ -540,7 +599,8 @@ class FunctionalRunnerTest(unittest.TestCase):
                             "signature": ""}] if thinking else [])
                 return {"content": blocks + [{"type": "text", "text": "BETA"}],
                         "stop_reason": "end_turn",
-                        "usage": {"input_tokens": total, "cache_read_input_tokens": cached,
+                        "usage": {"input_tokens": total - cached,
+                                  "cache_read_input_tokens": cached,
                                   "output_tokens": 8},
                         "timings": {"prompt_n": total - cached}}
 
@@ -704,6 +764,90 @@ class FunctionalRunnerTest(unittest.TestCase):
     def test_cache_shared_prefix_rejects_grid_only_reuse(self):
         with self.assertRaisesRegex(AssertionError, "of the shared system prompt"):
             self.run_cache_shared_prefix(regress=True)
+
+    def run_cache_compaction(self, regression=None):
+        requests, checks, seen = [], {}, set()
+        stem_total = compact_total = None
+
+        def chat_result(client, body):
+            nonlocal stem_total, compact_total
+            requests.append(deepcopy(body))
+            messages = body["messages"]
+            cold = body.get("extra_body", {}).get("cache_prompt") is False
+            compacted = "Compacted archive summary:" in messages[1]["content"]
+            lines = sum(message.get("content", "").count(ARCHIVE_LINE)
+                        for message in messages if message["role"] == "tool")
+            total = 3000 + 12 * lines + (len(messages) - 2) * 24
+            if compacted:
+                total += 48
+                compact_total = compact_total or total
+            stem_total = stem_total or total
+            key = json.dumps(body, sort_keys=True)
+            repeated = key in seen and not cold
+            cached = (0 if cold or len(requests) == 1 else total if repeated
+                      else stem_total - 48 if len(messages) == 2
+                      else compact_total - 8 if compacted else stem_total - 16)
+            if compacted and not cold and not repeated:
+                if regression == "lost":
+                    cached = 0
+                elif regression == "false_hit":
+                    cached = stem_total + 1
+                elif regression == "pinned" and len(messages) > 2:
+                    cached = stem_total - 48
+            if repeated and regression == "retry_work":
+                cached -= 1
+            seen.add(key)
+            code = ("GAMMA" if messages[-1]["content"] == "Return exactly GAMMA."
+                    else "BETA" if compacted else "ALPHA")
+            if compacted and not cold and regression == "stale_answer":
+                code = "ALPHA"
+            return {"text": code, "reasoning": "", "tools": [], "finish": "stop",
+                    "usage": {"prompt_tokens": total, "cached_tokens": cached,
+                              "completion_tokens": 2,
+                              "gufo": {"prefill_tokens": total - cached}}}
+
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                check_cache_compaction(None, "fixture", checks, chat_result, 32768)
+        finally:
+            self.compaction_requests, self.compaction_checks = requests, checks
+        return requests, checks
+
+    def test_cache_compaction_keeps_system_tools_and_delays_controls(self):
+        requests, checks = self.run_cache_compaction()
+        self.assertEqual(len(requests), 16)
+        self.assertTrue(all(body.get("extra_body", {}).get("cache_prompt") is False
+                            for body in requests[8:]))
+        for body in requests:
+            self.assertEqual(body["messages"][0], requests[0]["messages"][0])
+            self.assertEqual(body["tools"], requests[0]["tools"])
+        self.assertEqual(requests[2]["messages"][2]["content"],
+                         checks["compaction_seed"]["text"])
+        self.assertEqual(requests[3], requests[4])
+        self.assertEqual(requests[5], requests[6])
+        self.assertEqual(len(requests[5]["messages"]), 2)
+        self.assertIn("Compacted archive summary:", requests[5]["messages"][1]["content"])
+        self.assertEqual(requests[7]["messages"][2]["content"],
+                         checks["compaction_summary"]["text"])
+        bounds = checks["compaction_boundaries"]
+        self.assertGreaterEqual(bounds["near_limit_tokens"], 32768 * .75)
+        self.assertGreaterEqual(bounds["dropped_tokens"], 32768 // 2)
+
+    def test_cache_compaction_rejects_misses_and_false_hits_after_controls(self):
+        for regression in ("lost", "false_hit", "pinned"):
+            with self.subTest(regression=regression), self.assertRaises(AssertionError):
+                self.run_cache_compaction(regression)
+            self.assertEqual(len(self.compaction_requests), 16)
+            self.assertTrue(self.compaction_checks["compaction_boundaries"]["failures"])
+
+    def test_cache_compaction_rejects_retry_work_and_abandoned_answers(self):
+        for regression in ("retry_work", "stale_answer"):
+            with self.subTest(regression=regression), self.assertRaises(AssertionError):
+                self.run_cache_compaction(regression)
+
+    def test_cache_compaction_requires_room_for_a_large_drop(self):
+        with self.assertRaisesRegex(ValueError, "at least 16384"):
+            check_cache_compaction(None, "fixture", {}, None, 8192)
 
     def run_cache_bridge(self, lost=False, restore_bytes=100, capacity=1000):
         requests = []
@@ -925,6 +1069,38 @@ class FunctionalRunnerTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_tool_events(events, {"output": []})
 
+    def test_partial_tool_arguments_require_an_interrupted_turn(self):
+        timing = {"prompt_n": 1, "prompt_ms": 2, "predicted_ms": 3,
+                  "cache_restore_ms": 0, "cache_snapshot_ms": 0,
+                  "cache_disk_enqueue_ms": 0, "queue_ms": 0, "ttft_ms": 2}
+        usage = {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3,
+                 "prompt_tokens_details": {"cached_tokens": 0}}
+        body = {"stream": True, "tools": [{"type": "function",
+                "function": {"name": "record", "parameters": {"type": "object"}}}]}
+        events = [
+            {"choices": [{"index": 0, "delta": {"tool_calls": [
+                {"index": 0, "id": "call1", "type": "function",
+                 "function": {"name": "record", "arguments": '{"text":"par'}}]}}]},
+            {"choices": [{"index": 0, "delta": {}, "finish_reason": "length"}],
+             "timings": timing},
+            {"choices": [], "usage": usage},
+        ]
+
+        def check(request):
+            data = b"".join(b"data: " + json.dumps(event).encode() + b"\n\n"
+                            for event in events) + b"data: [DONE]\n\n"
+            return summarize([(1, data)], True, True,
+                             ("/v1/chat/completions", request, 200))
+
+        check(body)
+        events[1]["choices"][0]["finish_reason"] = "stop"
+        check({**body, "stop": "STOP"})
+        with self.assertRaisesRegex(ValueError, "unfinished tool"):
+            check(body)
+        events[1]["choices"][0]["finish_reason"] = "tool_calls"
+        with self.assertRaisesRegex(ValueError, "unfinished tool"):
+            check(body)
+
     def test_mode_coverage_checks_loader_restart_and_executed_drafts(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -983,18 +1159,65 @@ class FunctionalRunnerTest(unittest.TestCase):
             self.assertEqual(measured["prefill_ms"], 2)
             self.assertIsNotNone(fingerprint)
 
+    def test_integer_usage_accepts_exponents_but_rejects_invalid_counts(self):
+        # The production serializer writes a 200K cache hit as 2e+05. JSON
+        # Schema's integer type describes the value, not Python's parsed type.
+        timing = {"prompt_n": 92.0, "prompt_ms": 2, "predicted_ms": 3,
+                  "cache_restore_ms": 0, "cache_snapshot_ms": 0,
+                  "cache_disk_enqueue_ms": 0, "queue_ms": 0, "ttft_ms": 2}
+        for endpoint in ("chat/completions", "completions", "responses"):
+            if endpoint == "responses":
+                usage = {"input_tokens": 200092.0, "output_tokens": 219.0,
+                         "total_tokens": 200311.0,
+                         "input_tokens_details": {"cached_tokens": 200000.0}}
+                response = {"status": "completed", "output": [], "usage": usage,
+                            "timings": timing}
+                input_key, output_key, details = "input_tokens", "output_tokens", "input_tokens_details"
+            else:
+                usage = {"prompt_tokens": 200092.0, "completion_tokens": 219.0,
+                         "total_tokens": 200311.0,
+                         "prompt_tokens_details": {"cached_tokens": 200000.0}}
+                response = {"choices": [{"index": 0, "finish_reason": "stop",
+                             "message": {"role": "assistant", "content": "ok"}}],
+                            "usage": usage, "timings": timing}
+                input_key, output_key, details = "prompt_tokens", "completion_tokens", "prompt_tokens_details"
+
+            def check(value):
+                raw = json.dumps(value).replace("200000.0", "2e+05").encode()
+                return summarize([(5, raw)], False, True, ("/v1/" + endpoint, {}, 200))
+
+            measured, fingerprint = check(response)
+            self.assertEqual(measured["cached_tokens"], 200000)
+            self.assertIsNotNone(fingerprint)
+            for bad in (True, False, -1, .5, "200000", None, float("nan"), float("inf")):
+                for path in (("usage", input_key), ("usage", output_key),
+                             ("usage", "total_tokens"), ("usage", details, "cached_tokens"),
+                             ("timings", "prompt_n")):
+                    with self.subTest(endpoint=endpoint, path=path, bad=bad):
+                        altered = deepcopy(response)
+                        target = altered
+                        for key in path[:-1]:
+                            target = target[key]
+                        target[path[-1]] = bad
+                        with self.assertRaises(ValueError):
+                            check(altered)
+            altered = deepcopy(response)
+            altered["usage"][details]["cached_tokens"] = 200093
+            with self.assertRaisesRegex(ValueError, "invalid cached token count"):
+                check(altered)
+
     def messages_fixture(self):
         request = {"model": "fixture", "max_tokens": 2, "temperature": 0, "seed": 31,
                    "stop_sequences": ["END", "HALT"],
                    "messages": [{"role": "user", "content": "Reply BETA."}]}
-        # Buffered Messages uses input_tokens including cached work, no total_tokens,
+        # Buffered Messages reports cache reads apart from input_tokens, no total_tokens,
         # ordered content blocks, and the separate GenerationTimings object.
         response = {"id": "msg_fixture", "type": "message", "role": "assistant",
                     "model": "fixture", "content": [
                         {"type": "thinking", "thinking": "The code is BETA.", "signature": ""},
                         {"type": "text", "text": "BETA"}],
                     "stop_reason": "end_turn", "stop_sequence": None,
-                    "usage": {"input_tokens": 10, "output_tokens": 2,
+                    "usage": {"input_tokens": 4, "output_tokens": 2,
                               "cache_creation_input_tokens": 0, "cache_read_input_tokens": 6},
                     "timings": {"prompt_n": 4, "prompt_ms": 2, "prompt_per_token_ms": .5,
                                 "prompt_per_second": 2000, "predicted_n": 2, "predicted_ms": 3,
@@ -1561,6 +1784,105 @@ class PiWatchdogTest(unittest.TestCase):
         self.assertEqual(repeated_actions(history([
             "missing module", "case 1 fails", "case 2 fails", "ok"])), 1)
 
+
+
+class ClaudeCodeAgentTest(unittest.TestCase):
+    @staticmethod
+    def events(outputs):
+        result = []
+        for index, output in enumerate(outputs):
+            result += [
+                {"type": "assistant", "message": {"content": [{
+                    "type": "tool_use", "id": str(index), "name": "Bash",
+                    "input": {"command": "python3 test.py"}}]}},
+                {"type": "user", "message": {"content": [{
+                    "type": "tool_result", "tool_use_id": str(index), "content": output}]}}]
+        return result
+
+    def test_repeated_command_can_make_progress(self):
+        from claude_code_agent import repeated_actions
+
+        self.assertEqual(repeated_actions(self.events(["same error"] * 6)), 6)
+        self.assertEqual(repeated_actions(self.events(["missing", "fails", "ok"])), 1)
+
+    def test_transcript_skips_a_partial_line_and_finds_calls(self):
+        from claude_code_agent import blocks, transcript
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "stdout.jsonl"
+            path.write_text("".join(json.dumps(e) + "\n" for e in self.events(["ok"]))
+                            + '{"type": "result", "subty')
+            events = transcript(path)
+        self.assertEqual(len(events), 2)
+        self.assertEqual([b["name"] for b in blocks(events, "assistant", "tool_use")], ["Bash"])
+        self.assertEqual(blocks(events, "user", "tool_result")[0]["content"], "ok")
+
+    def test_task_rejects_tool_framing_in_arguments(self):
+        from claude_code_agent import validate_task
+
+        events = self.events(["ok"])
+        events[0]["message"]["content"][0]["input"]["command"] = "cat x</parameter>"
+        events.append({"type": "result", "subtype": "success", "is_error": False, "result": "Done"})
+        with self.assertRaises(AssertionError):
+            validate_task("tools", Path("."), events)
+
+    @staticmethod
+    def validate_usage(usage, streaming):
+        from claude_code_agent import validate_requests
+
+        with tempfile.TemporaryDirectory() as directory:
+            body = Path(directory) / "request.json"
+            body.write_text(json.dumps({"tools": [{"name": "Read"}]}))
+            log = Path(directory) / "server.log"
+            log.write_text("event=completed request=r1 outcome=completed prompt_tokens=10 "
+                           "queue_ms=0 ttft_ms=1 duration_ms=2\n")
+            row = {"path": "/v1/messages", "status": 200, "request_id": "r1",
+                   "wall_ms": 3, "body": str(body)}
+            if streaming:
+                # The recording proxy extracts streamed usage into the row.
+                row["usage"] = usage
+            else:
+                body.with_suffix(".sse").write_text(json.dumps({"usage": usage}))
+            validate_requests([row], log)
+
+    def test_messages_usage_accepts_cache_reads_and_writes(self):
+        for streaming in (False, True):
+            for uncached, cached, created in ((10, 0, 0), (2, 8, 0),
+                                              (0, 10, 0), (0, 0, 10)):
+                with self.subTest(streaming=streaming, uncached=uncached,
+                                  cached=cached, created=created):
+                    self.validate_usage({
+                        "input_tokens": uncached, "cache_read_input_tokens": cached,
+                        "cache_creation_input_tokens": created, "output_tokens": 2,
+                    }, streaming)
+
+    def test_messages_usage_rejects_invalid_counts(self):
+        valid = {"input_tokens": 0, "cache_read_input_tokens": 10,
+                 "cache_creation_input_tokens": 0, "output_tokens": 2}
+        invalid = (
+            {"input_tokens": -1, "cache_read_input_tokens": 11},
+            {"input_tokens": 11, "cache_read_input_tokens": -1},
+            {"input_tokens": 1, "cache_creation_input_tokens": -1},
+            {"input_tokens": 0.0},
+            {"input_tokens": False},
+            {"cache_read_input_tokens": 0},
+            {"output_tokens": 0},
+        )
+        for streaming in (False, True):
+            for overrides in invalid:
+                with self.subTest(streaming=streaming, overrides=overrides):
+                    with self.assertRaises(AssertionError):
+                        self.validate_usage({**valid, **overrides}, streaming)
+
+    def test_messages_usage_must_match_server_prompt_total(self):
+        # The old double-counted usage is positive but describes 18 tokens
+        # for the server's actual ten-token prompt.
+        for streaming in (False, True):
+            with self.subTest(streaming=streaming):
+                with self.assertRaises(AssertionError):
+                    self.validate_usage({"input_tokens": 10, "cache_read_input_tokens": 8,
+                                         "cache_creation_input_tokens": 0, "output_tokens": 2},
+                                        streaming)
 
 if __name__ == "__main__":
     unittest.main()

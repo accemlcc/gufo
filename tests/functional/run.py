@@ -7,6 +7,7 @@ No weights are downloaded. Model checks are manual, not hosted CI workloads.
 """
 
 import argparse
+import ast
 import contextlib
 import http.client
 import hashlib
@@ -28,10 +29,10 @@ import zlib
 from metrics import compare, comparison_status, join_server_timings, timing_measurement
 
 TESTS = Path(__file__).resolve().parent
-SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "image-count", "structured", "structured-limits",
-          "tool-reasoning", "reasoning-separator",
+SUITES = ("discovery", "messages-count-tokens", "messages-image-counts", "responses", "stops", "conversation", "image-inputs", "image-count", "tool-images", "structured", "structured-limits",
+          "tool-reasoning", "tool-streaming", "reasoning-separator",
           "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
-          "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix", "cache-bridge", "system-injection", "cache")
+          "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix", "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "system-injection", "cache")
 SAMPLING = {
     "--temperature": ("temperature", float), "--top-p": ("top_p", float),
     "--top-k": ("top_k", int), "--min-p": ("min_p", float),
@@ -54,12 +55,41 @@ COMPARISON_FIELDS = ("comparison_command", "sampling_preset", "sampling_override
                      "expected_input_modalities")
 
 
+HARNESS_ROOTS = ("run.py", "metrics.py", "progress.py", "stream_start.py", "prefill_scheduling.py", "server_metrics.py", "openai_sdk.py", "continuation.py",
+                 "tool_reasoning.py", "tool_streaming.py", "tool_agent.py", "tool_native.py", "discovery.py", "image_inputs.py", "cache_edits.py", "cache_growth.py", "cache_depth.py", "cache_rotation.py", "cache_concurrency.py", "cache_shared_prefix.py", "cache_bridge.py", "system_injection.py",
+                 "cache_compaction.py", "cache_workloads.py", "cache_messages_loop.py",
+                 "cache_disk_spacing.py", "tool_images.py")
+
+
+def harness_files():
+    """The harness modules and every local module they import, transitively."""
+    search = (TESTS, TESTS.parents[1] / "tools")
+    pending, found = [TESTS / name for name in HARNESS_ROOTS], set()
+    while pending:
+        path = pending.pop()
+        if path in found:
+            continue
+        found.add(path)
+        for node in ast.walk(ast.parse(path.read_text(), str(path))):
+            if isinstance(node, ast.Import):
+                modules = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
+                modules = [node.module]
+            else:
+                continue
+            for module in modules:
+                for base in search:
+                    candidate = base.joinpath(*module.split(".")).with_suffix(".py")
+                    if candidate.is_file():
+                        pending.append(candidate)
+                        break
+    return sorted(found)
+
+
 def provenance():
     source = hashlib.sha256()
-    for name in ("run.py", "metrics.py", "progress.py", "stream_start.py", "prefill_scheduling.py", "server_metrics.py", "openai_sdk.py", "continuation.py",
-                 "tool_reasoning.py", "tool_agent.py", "tool_native.py", "discovery.py", "image_inputs.py", "cache_edits.py", "cache_growth.py", "cache_depth.py", "cache_rotation.py", "cache_concurrency.py", "cache_shared_prefix.py", "cache_bridge.py", "system_injection.py", "templates.py",
-                 "cache_disk_spacing.py"):
-        source.update((TESTS / name).read_bytes())
+    for path in harness_files():
+        source.update(path.read_bytes())
     lock = TESTS.parents[1] / "flake.lock"
     kernel_command = Path("/proc/cmdline")
     return {
@@ -159,7 +189,7 @@ def compare_runs(baseline_dir, candidate_dir):
 
 
 @contextlib.contextmanager
-def server(command, log_path, startup_timeout):
+def server(command, log_path, startup_timeout, environment=None):
     def interrupt(signum, frame):
         raise KeyboardInterrupt(f"signal {signum}")
 
@@ -169,7 +199,8 @@ def server(command, log_path, startup_timeout):
         try:
             previous_handlers = {signum: signal.signal(signum, interrupt)
                                  for signum in (signal.SIGTERM, signal.SIGHUP)}
-            process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
+            process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
+                                       env=environment)
             deadline = time.monotonic() + startup_timeout
             while time.monotonic() < deadline:
                 if process.poll() is not None:
@@ -234,8 +265,8 @@ def main():
     parser.add_argument("command", nargs=argparse.REMAINDER,
                         help="-- ./result/bin/gufo serve llm --model PATH [server options]")
     args = parser.parse_args()
-    if ("discovery" in args.suite or "all" in args.suite) and args.expected_input_modalities is None:
-        parser.error("discovery requires --expected-input-modalities text or text,image")
+    if set(args.suite) & {"discovery", "messages-image-counts", "all"} and args.expected_input_modalities is None:
+        parser.error("discovery and messages-image-counts require --expected-input-modalities text or text,image")
     if args.allow_missing_progress and not args.record_baseline:
         parser.error("--allow-missing-progress is only for --record-baseline")
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -247,14 +278,14 @@ def main():
             parser.error(f"the test runner owns {reserved}; omit it from the server command")
     if option(command, "--api-key") is not None:
         parser.error("omit --api-key for the isolated loopback test server")
-    if set(args.suite) & {"image-inputs", "image-count"} and option(command, "--mmproj") is None:
-        parser.error("image-inputs and image-count require --mmproj in the server command")
+    if set(args.suite) & {"image-inputs", "image-count", "tool-images"} and option(command, "--mmproj") is None:
+        parser.error("image-inputs, image-count and tool-images require --mmproj in the server command")
     selected = args.suite
     if "all" in selected:
         if len(selected) != 1:
             parser.error("all cannot be combined with other suites")
-        selected = [suite for suite in SUITES if suite not in ("auto-tools", "tool-native-types", "cache-bridge", "prefill-scheduling")
-                    and (suite not in ("image-inputs", "image-count")
+        selected = [suite for suite in SUITES if suite not in ("auto-tools", "tool-native-types", "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "prefill-scheduling")
+                    and (suite not in ("image-inputs", "image-count", "tool-images")
                          or option(command, "--mmproj") is not None)]
     selected = list(dict.fromkeys(selected))
     disk_enabled = bool(set(selected) & {"cache", "image-count"})
@@ -387,7 +418,7 @@ def main():
             arguments += ["--expected-input-modalities", args.expected_input_modalities]
         if option(command, "--think") is not None:
             arguments += ["--server-thinking", option(command, "--think")]
-        if suite == "cache-bridge" and configured:
+        if suite in ("cache-bridge", "cache-pressure") and configured:
             arguments += ["--snapshot-capacity-bytes", configured[1]]
         if suite == through_suite:
             arguments += ["--through-case", through_case]
@@ -421,7 +452,7 @@ def main():
                 report["snapshot_budget"] = check_snapshot_budget(
                     (output / "server.log").read_text(), available_before_load,
                     int(option(command, "--cache-ram-bytes", "0")), sessions)
-            configured = "cache-bridge" in selected and re.search(
+            configured = bool(set(selected) & {"cache-bridge", "cache-pressure"}) and re.search(
                 r"event=snapshot_cache_configured .*?\bcapacity_bytes=(\d+)\b",
                 (output / "server.log").read_text())
             for suite in selected:
