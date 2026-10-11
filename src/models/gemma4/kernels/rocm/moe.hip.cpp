@@ -635,12 +635,11 @@ __global__ void __launch_bounds__(kThreads)
   }
 }
 
-template<ExpertFormat F, bool kGeGlu, bool kDense = false>
+template<ExpertFormat F, bool kGeGlu>
 void LaunchRouted(const void* w, const std::int32_t* groups,
                   std::uint32_t max_groups, const float* x, std::uint32_t x_div,
                   float* y, std::uint32_t m, std::uint32_t k,
-                  hipStream_t stream, bool single,
-                  std::uint32_t dense_rows = 0) {
+                  hipStream_t stream, bool single) {
   constexpr int kRowsPerWave = kWave / Traits<F>::kTasks;
   const auto* weights = static_cast<const std::uint8_t*>(w);
   // A GeGLU launch covers m / 2 gate rows and their up rows.
@@ -650,13 +649,11 @@ void LaunchRouted(const void* w, const std::int32_t* groups,
     constexpr int kRows = kRowsPerWave * (kWaves / kSplit) / kShare;
     const dim3 grid((rows + kRows - 1) / kRows, max_groups);
     if (single) {
-      RoutedGemvKernel<F, kSplit, kGeGlu, 1, kDense>
-          <<<grid, kThreads, 0, stream>>>(weights, groups, x, x_div, y, m, k,
-                                          dense_rows);
+      RoutedGemvKernel<F, kSplit, kGeGlu, 1>
+          <<<grid, kThreads, 0, stream>>>(weights, groups, x, x_div, y, m, k);
     } else {
-      RoutedGemvKernel<F, kSplit, kGeGlu, kSlotsPerPass, kDense>
-          <<<grid, kThreads, 0, stream>>>(weights, groups, x, x_div, y, m, k,
-                                          dense_rows);
+      RoutedGemvKernel<F, kSplit, kGeGlu>
+          <<<grid, kThreads, 0, stream>>>(weights, groups, x, x_div, y, m, k);
     }
   };
   // Measured with cold experts on gfx1151: short reductions (the 704-wide
@@ -680,6 +677,45 @@ void LaunchRouted(const void* w, const std::int32_t* groups,
   } else {
     LaunchRouted<F, false>(w, groups, max_groups, x, x_div, y, m, k, stream,
                            single);
+  }
+}
+
+/// The dense GEMV: whole rows per wave, and one pass over every row of the
+/// forward (1, 4, 8 or 16 slots), so verification decodes each weight once.
+/// Cold 2816 x 2112 Q4_0 against four-wave splits and four-slot passes: one
+/// row 21.8 -> 19.1 us, five 35.1 -> 27.9, sixteen 77.4 -> 59.8. A slot's
+/// FMA chain is the same in every pass width.
+/// The dense GEMV: LaunchRouted's split over one implicit expert, with
+/// passes of up to eight rows (cold 2816 x 2112 Q4_0 / Q5_0 against four:
+/// five rows 35.0 -> 32.9 / 38.9 -> 35.7 us, sixteen 76.5 -> 74.0 / 81.8 ->
+/// 76.7; sixteen-row passes lose). A slot's FMA chain is the same in every
+/// pass width. Whole rows per wave were faster alone (one row 21.8 -> 19.1
+/// us) but change the summation order, hence the text MTP drafts against,
+/// and the dense MLP runs hidden beside the experts: no end-to-end gain.
+template<ExpertFormat F>
+void LaunchDense(const void* w, const float* x, float* y, std::uint32_t rows,
+                 std::uint32_t m, std::uint32_t k, hipStream_t stream) {
+  const auto with_split = [&]<int kSplit>() {
+    constexpr int kRows = kWave / Traits<F>::kTasks * (kWaves / kSplit);
+    const dim3 grid((m + kRows - 1) / kRows, 1);
+    const auto launch = [&]<int kSlots>() {
+      RoutedGemvKernel<F, kSplit, false, kSlots, true>
+          <<<grid, kThreads, 0, stream>>>(static_cast<const std::uint8_t*>(w),
+                                          nullptr, x, 1, y, m, k, rows);
+    };
+    if (rows == 1) {
+      launch.template operator()<1>();
+    } else if (rows <= 4) {
+      launch.template operator()<4>();
+    } else {
+      launch.template operator()<8>();
+    }
+  };
+  // LaunchRouted's split for the width.
+  if (k < 2048) {
+    with_split.template operator()<1>();
+  } else {
+    with_split.template operator()<4>();
   }
 }
 
@@ -956,8 +992,7 @@ bool LaunchDenseGemv(ExpertFormat format, const void* w, const float* x,
     if (!BlockwiseWidth<F>(k)) {
       return false;
     }
-    LaunchRouted<F, false, true>(w, nullptr, 1, x, 1, y, m, k, stream,
-                                 rows == 1, rows);
+    LaunchDense<F>(w, x, y, rows, m, k, stream);
     return true;
   };
   switch (format) {

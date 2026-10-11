@@ -232,13 +232,22 @@ __device__ __forceinline__ void DecodeQ5_1(const std::uint8_t* block,
   }
   const float d = HalfBits(dm);
   const float m = HalfBits(dm >> 16);
-  const auto* q = reinterpret_cast<const std::uint8_t*>(qs);
 #pragma unroll
-  for (int i = 0; i < 16; ++i) {
-    const int lo = (q[i] & 0xF) | static_cast<int>(((qh >> i) & 1U) << 4);
-    const int hi = (q[i] >> 4) | static_cast<int>(((qh >> (i + 16)) & 1U) << 4);
-    w[i] = __builtin_fmaf(d, static_cast<float>(lo), m);
-    w[i + 16] = __builtin_fmaf(d, static_cast<float>(hi), m);
+  for (int i = 0; i < 4; ++i) {
+    // As DecodeQ5_0: four fifth bits to bit 4 of the code bytes at once.
+    const std::uint32_t lo_bits =
+        (((qh >> (4 * i)) & 15U) * 0x00204081U & 0x01010101U) << 4;
+    const std::uint32_t hi_bits =
+        (((qh >> (16 + 4 * i)) & 15U) * 0x00204081U & 0x01010101U) << 4;
+    const std::uint32_t lo = (qs[i] & 0x0F0F0F0FU) | lo_bits;
+    const std::uint32_t hi = ((qs[i] >> 4) & 0x0F0F0F0FU) | hi_bits;
+#pragma unroll
+    for (int b = 0; b < 4; ++b) {
+      w[4 * i + b] =
+          __builtin_fmaf(d, static_cast<float>((lo >> (8 * b)) & 0xFFU), m);
+      w[16 + 4 * i + b] =
+          __builtin_fmaf(d, static_cast<float>((hi >> (8 * b)) & 0xFFU), m);
+    }
   }
 }
 
@@ -295,14 +304,24 @@ __device__ __forceinline__ void DecodeQ5_0(const std::uint8_t* block, bool odd,
   for (int i = 0; i < 4; ++i) {
     qs[i] = odd ? r[i + 2] : __builtin_amdgcn_alignbyte(r[i + 2], r[i + 1], 2);
   }
-  const auto* q = reinterpret_cast<const std::uint8_t*>(qs);
   const float offset = -16.0F * d;
 #pragma unroll
-  for (int i = 0; i < 16; ++i) {
-    const int lo = (q[i] & 0xF) | static_cast<int>(((qh >> i) & 1U) << 4);
-    const int hi = (q[i] >> 4) | static_cast<int>(((qh >> (i + 16)) & 1U) << 4);
-    w[i] = __builtin_fmaf(d, static_cast<float>(lo), offset);
-    w[i + 16] = __builtin_fmaf(d, static_cast<float>(hi), offset);
+  for (int i = 0; i < 4; ++i) {
+    // Fifth bits 4 i .. 4 i + 3 (16 further for the high nibbles) to bit 4
+    // of the four code bytes: one multiply spreads four bits to byte LSBs.
+    const std::uint32_t lo_bits =
+        (((qh >> (4 * i)) & 15U) * 0x00204081U & 0x01010101U) << 4;
+    const std::uint32_t hi_bits =
+        (((qh >> (16 + 4 * i)) & 15U) * 0x00204081U & 0x01010101U) << 4;
+    const std::uint32_t lo = (qs[i] & 0x0F0F0F0FU) | lo_bits;
+    const std::uint32_t hi = ((qs[i] >> 4) & 0x0F0F0F0FU) | hi_bits;
+#pragma unroll
+    for (int b = 0; b < 4; ++b) {
+      w[4 * i + b] = __builtin_fmaf(
+          d, static_cast<float>((lo >> (8 * b)) & 0xFFU), offset);
+      w[16 + 4 * i + b] = __builtin_fmaf(
+          d, static_cast<float>((hi >> (8 * b)) & 0xFFU), offset);
+    }
   }
 }
 

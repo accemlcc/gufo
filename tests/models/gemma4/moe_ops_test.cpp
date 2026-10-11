@@ -997,8 +997,11 @@ void CheckDenseGemv(const Format& f, std::uint32_t m, std::uint32_t k,
   };
   const double one = time(1);
   const double five = time(5);
+  const double eight = time(8);
+  const double sixteen = time(kRows);
   std::cout << name << ": error " << worst << "; 1 row " << one << " us ("
-            << bytes / one / 1e3 << " GB/s); 5 rows " << five << " us\n";
+            << bytes / one / 1e3 << " GB/s); 5 rows " << five << " us, 8 rows "
+            << eight << " us, 16 rows " << sixteen << " us\n";
   for (void* p : copies) {
     HIP_CHECK(hipFree(p));
   }
