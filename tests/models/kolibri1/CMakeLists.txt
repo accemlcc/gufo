@@ -12,4 +12,5 @@ function(add_kolibri1_test name library labels)
   add_dependencies(kolibri1_tests ${target})
 endfunction()
 
+add_kolibri1_test(artifact gufo_kolibri1 "cpu;external-model")
 add_kolibri1_test(config gufo_kolibri1 "cpu")

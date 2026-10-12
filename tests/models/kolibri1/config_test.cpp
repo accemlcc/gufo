@@ -1,4 +1,5 @@
 #include "src/models/kolibri1/config.hpp"
+#include "src/models/kolibri1/weights.hpp"
 
 #include <cstdint>
 #include <optional>
@@ -16,6 +17,9 @@ using gemma4_test::GgufImage;
 using gemma4_test::I32Array;
 using gemma4_test::Metadata;
 using gemma4_test::Require;
+using gemma4_test::TensorSpec;
+using gemma4_test::Tensors;
+using gufo::core::GgmlType;
 
 namespace {
 
@@ -55,6 +59,17 @@ Metadata Base() {
       {p + "expert_weights_norm", false},
       {p + "expert_gating_func", std::uint32_t{5}},
   };
+}
+
+/// The same miniature with widths that are multiples of the 256-element
+/// K-quant block, so the Q4_K/Q6_K mix of the released artifact is legal.
+Metadata QuantMetadata() {
+  Metadata m = Base();
+  const std::string p = "kolibri1.";
+  m[p + "embedding_length"] = std::uint32_t{256};
+  m[p + "expert_feed_forward_length"] = std::uint32_t{256};
+  m[p + "expert_shared_feed_forward_length"] = std::uint32_t{256};
+  return m;
 }
 
 std::optional<k1::Config> Parse(const Metadata& metadata,
@@ -224,6 +239,224 @@ void CheckRejections() {
   ExpectRejected(more_active_than_exist, "more active experts than exist");
 }
 
+std::vector<std::uint8_t> Zeros(std::size_t n) {
+  return std::vector<std::uint8_t>(n, 0);
+}
+
+/// The shape convention of these artifacts: two dimensions for a plain
+/// matrix, a third only where experts are stacked.
+std::vector<std::uint64_t> Dims(std::uint64_t cols, std::uint64_t rows,
+                                std::uint64_t experts) {
+  return experts == 1 ? std::vector<std::uint64_t>{cols, rows}
+                      : std::vector<std::uint64_t>{cols, rows, experts};
+}
+
+/// F32 payloads: a [cols, rows] matrix, optionally stacked along ne[2], and
+/// an [n] vector.
+TensorSpec Mat(std::uint64_t cols, std::uint64_t rows,
+               std::uint64_t experts = 1) {
+  return {Dims(cols, rows, experts), GgmlType::kF32,
+          Zeros(cols * rows * experts * 4)};
+}
+TensorSpec Vec(std::uint64_t n) {
+  return {{n}, GgmlType::kF32, Zeros(n * 4)};
+}
+/// K-quant payloads, optionally stacked along ne[2].
+TensorSpec Q4K(std::uint64_t cols, std::uint64_t rows,
+               std::uint64_t experts = 1) {
+  return {Dims(cols, rows, experts), GgmlType::kQ4_K,
+          Zeros(cols / 256 * 144 * rows * experts)};
+}
+TensorSpec Q6K(std::uint64_t cols, std::uint64_t rows,
+               std::uint64_t experts = 1) {
+  return {Dims(cols, rows, experts), GgmlType::kQ6_K,
+          Zeros(cols / 256 * 210 * rows * experts)};
+}
+/// A format outside the accepted set; 32-element blocks so the shape checks
+/// pass and only the format policy can refuse it.
+TensorSpec Q8(std::uint64_t cols, std::uint64_t rows,
+              std::uint64_t experts = 1) {
+  return {Dims(cols, rows, experts), GgmlType::kQ8_0,
+          Zeros(cols / 32 * 34 * rows * experts)};
+}
+
+/// The block tensors of every layer. With `quant` the widths of Base() become
+/// multiples of 256 through QuantMetadata(), and the K-quant mix of the
+/// artifact is reproduced: Q6_K on layer 0's V and down projections.
+Tensors Layers(const k1::Config& c, bool quant) {
+  const auto matrix = [&](std::uint64_t cols, std::uint64_t rows,
+                          std::uint64_t experts = 1) {
+    return quant ? Q4K(cols, rows, experts) : Mat(cols, rows, experts);
+  };
+  Tensors t;
+  for (std::uint32_t l = 0; l < c.num_layers; ++l) {
+    const std::string p = "blk." + std::to_string(l) + ".";
+    t[p + "attn_norm.weight"] = Vec(c.hidden_size);
+    t[p + "attn_q.weight"] = matrix(c.hidden_size, c.QDim());
+    t[p + "attn_k.weight"] = matrix(c.hidden_size, c.KvDim(l));
+    t[p + "attn_v.weight"] = quant && l == 0
+                                 ? Q6K(c.hidden_size, c.KvDim(l))
+                                 : matrix(c.hidden_size, c.KvDim(l));
+    t[p + "attn_q_norm.weight"] = Vec(c.head_dim);
+    t[p + "attn_k_norm.weight"] = Vec(c.head_dim);
+    t[p + "attn_output.weight"] = matrix(c.QDim(), c.hidden_size);
+    t[p + "post_attention_norm.weight"] = Vec(c.hidden_size);
+    t[p + "ffn_norm.weight"] = Vec(c.hidden_size);
+    t[p + "ffn_gate_inp.weight"] = Mat(c.hidden_size, c.num_experts);
+    t[p + "exp_probs_b.bias"] = Vec(c.num_experts);
+    t[p + "ffn_gate_exps.weight"] =
+        matrix(c.hidden_size, c.expert_ffn_size, c.num_experts);
+    t[p + "ffn_up_exps.weight"] =
+        matrix(c.hidden_size, c.expert_ffn_size, c.num_experts);
+    t[p + "ffn_down_exps.weight"] =
+        quant && l == 0
+            ? Q6K(c.expert_ffn_size, c.hidden_size, c.num_experts)
+            : matrix(c.expert_ffn_size, c.hidden_size, c.num_experts);
+    t[p + "ffn_gate_shexp.weight"] =
+        matrix(c.hidden_size, c.shared_expert_ffn_size);
+    t[p + "ffn_up_shexp.weight"] = matrix(c.hidden_size,
+                                          c.shared_expert_ffn_size);
+    t[p + "ffn_down_shexp.weight"] =
+        matrix(c.shared_expert_ffn_size, c.hidden_size);
+    t[p + "post_ffw_norm.weight"] = Vec(c.hidden_size);
+  }
+  return t;
+}
+
+Tensors Target(const k1::Config& c, std::uint64_t vocab, bool quant) {
+  Tensors t = Layers(c, quant);
+  t["token_embd.weight"] =
+      quant ? Q4K(c.hidden_size, vocab) : Mat(c.hidden_size, vocab);
+  t["output.weight"] =
+      quant ? Q6K(c.hidden_size, vocab) : Mat(c.hidden_size, vocab);
+  t["output_norm.weight"] = Vec(c.hidden_size);
+  return t;
+}
+
+void RejectsTensors(const Metadata& meta, const Tensors& tensors,
+                    const std::string& what) {
+  GgufImage image(meta, tensors);
+  Require(image.reader() != nullptr,
+          "in-memory GGUF rejected: " + image.error());
+  std::string error;
+  Require(!k1::ModelWeights::Bind(*image.reader(), &error).has_value(),
+          what + " accepted");
+  Require(!error.empty(), what + " rejected without a message");
+}
+
+void CheckWeights() {
+  std::string error;
+  const auto c = Parse(Base(), &error);
+  Require(c.has_value(), error);
+  const auto tensors = Target(*c, 96, false);
+  GgufImage image(Base(), tensors);
+  Require(image.reader() != nullptr,
+          "in-memory GGUF rejected: " + image.error());
+  const auto w = k1::ModelWeights::Bind(*image.reader(), &error);
+  Require(w.has_value(), "F32 miniature rejected: " + error);
+  Require(w->VocabSize() == 96 && !w->TiedOutput(), "untied LM head");
+  Require(w->layers.size() == c->num_layers, "layer count");
+  Require(w->layers[0].gate_exps.experts == c->num_experts &&
+              w->layers[0].down_exps.experts == c->num_experts,
+          "the expert stack must carry every routed expert");
+  Require(w->layers[0].gate_exps.ExpertBytes() ==
+              static_cast<std::size_t>(c->expert_ffn_size) * c->hidden_size *
+                  4,
+          "distance between two experts");
+  Require(w->layers[0].down_exps.SizeBytes() ==
+              static_cast<std::size_t>(c->expert_ffn_size) * c->hidden_size *
+                  c->num_experts * 4,
+          "expert payload");
+
+  // A tied artifact omits output.weight; the head then is the embedding.
+  Tensors tied = tensors;
+  tied.erase("output.weight");
+  GgufImage tied_image(Base(), tied);
+  Require(tied_image.reader() != nullptr, tied_image.error());
+  const auto t = k1::ModelWeights::Bind(*tied_image.reader(), &error);
+  Require(t.has_value(), "tied artifact rejected: " + error);
+  Require(t->TiedOutput(), "the tied head must be the embedding view");
+
+  auto missing = tensors;
+  missing.erase("blk.1.attn_v.weight");
+  RejectsTensors(Base(), missing, "layer without a V projection");
+  missing = tensors;
+  missing.erase("blk.0.exp_probs_b.bias");
+  RejectsTensors(Base(), missing, "router without its bias");
+  missing = tensors;
+  missing.erase("blk.0.ffn_down_shexp.weight");
+  RejectsTensors(Base(), missing, "layer without the shared expert");
+
+  // Router logits, the expert bias and every norm stay F32 in the artifact;
+  // a quantized router would change which experts the top-k picks.
+  auto quant_router = tensors;
+  quant_router["blk.0.ffn_gate_inp.weight"] = Q8(64, 8);
+  RejectsTensors(Base(), quant_router, "quantized router");
+  quant_router = tensors;
+  quant_router["blk.0.exp_probs_b.bias"] =
+      TensorSpec{{64}, GgmlType::kQ8_0, Zeros(64 / 32 * 34)};
+  RejectsTensors(Base(), quant_router, "quantized expert bias");
+
+  auto other_format = tensors;
+  other_format["blk.0.ffn_up_exps.weight"] = Q8(64, 32, 8);
+  RejectsTensors(Base(), other_format, "expert stack in an undecoded format");
+
+  // A payload that runs past the mapped region must never bind, whether the
+  // reader catches the short file while parsing or the binder does.
+  Tensors short_embd = tensors;
+  short_embd["token_embd.weight"] =
+      TensorSpec{{64, 96}, GgmlType::kF32, Zeros(64 * 96 * 4 - 128)};
+  {
+    GgufImage image(Base(), short_embd);
+    std::string error;
+    Require(image.reader() == nullptr ||
+                !k1::ModelWeights::Bind(*image.reader(), &error).has_value(),
+            "an embedding past the end of the region bound anyway");
+  }
+
+  auto few_experts = tensors;
+  few_experts["blk.0.ffn_up_exps.weight"] =
+      TensorSpec{{64, 32, 7}, GgmlType::kF32, Zeros(64 * 32 * 7 * 4)};
+  RejectsTensors(Base(), few_experts, "expert stack with one expert missing");
+
+  auto wrong_head = tensors;
+  wrong_head["output.weight"] = Mat(64, 95);
+  RejectsTensors(Base(), wrong_head, "LM head over another vocabulary");
+}
+
+/// The released artifact mixes Q4_K and Q6_K inside the same role from layer
+/// to layer, and the LM head outranks the embedding. That mix must survive
+/// binding instead of being normalised away.
+void CheckQuantWeights() {
+  std::string error;
+  const auto c = Parse(QuantMetadata(), &error);
+  Require(c.has_value(), error);
+  const auto tensors = Target(*c, 128, true);
+  GgufImage image(QuantMetadata(), tensors);
+  Require(image.reader() != nullptr,
+          "in-memory GGUF rejected: " + image.error());
+  const auto w = k1::ModelWeights::Bind(*image.reader(), &error);
+  Require(w.has_value(), "K-quant miniature rejected: " + error);
+  Require(w->layers[0].attn_v.type == GgmlType::kQ6_K &&
+              w->layers[1].attn_v.type == GgmlType::kQ4_K,
+          "per-layer V formats");
+  Require(w->layers[0].down_exps.type == GgmlType::kQ6_K &&
+              w->layers[1].down_exps.type == GgmlType::kQ4_K,
+          "per-layer down formats");
+  Require(w->layers[0].down_exps.ExpertBytes() == 256U * 210,
+          "one Q6_K expert of 256 x 256");
+  Require(w->layers[1].gate_exps.ExpertBytes() == 256U * 144,
+          "one Q4_K expert of 256 x 256");
+  Require(w->output.type == GgmlType::kQ6_K &&
+              w->token_embd.type == GgmlType::kQ4_K,
+          "the LM head keeps a higher quant than the embedding");
+
+  auto q4_0 = tensors;
+  q4_0["blk.0.ffn_up_exps.weight"] = TensorSpec{
+      {256, 256, 8}, GgmlType::kQ4_0, Zeros(256 / 32 * 16 * 256 * 8)};
+  RejectsTensors(QuantMetadata(), q4_0, "Q4_0 expert stack");
+}
+
 }  // namespace
 
 int main() {
@@ -232,5 +465,7 @@ int main() {
     CheckArtifactGeometry();
     CheckPerLayerValues();
     CheckRejections();
+    CheckWeights();
+    CheckQuantWeights();
   });
 }
