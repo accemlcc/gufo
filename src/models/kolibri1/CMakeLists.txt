@@ -6,10 +6,13 @@ add_library(gufo_kolibri1 STATIC chat_template.cpp config.cpp tokenizer.cpp
 target_include_directories(gufo_kolibri1 PUBLIC ${PROJECT_SOURCE_DIR})
 target_link_libraries(gufo_kolibri1 PUBLIC gufo_core Threads::Threads)
 
-# The device path: attention over the binary16 cache on the matrix cores.
+# The device path: attention over the binary16 cache on the matrix cores, and
+# the per-head norm, rotation and cache write in front of it.
 if (ENGINE_ENABLE_HIP)
-  target_sources(gufo_kolibri1 PRIVATE kernels/rocm/attention.hip.cpp)
+  target_sources(gufo_kolibri1 PRIVATE kernels/rocm/attention.hip.cpp
+                     kernels/rocm/qkv_post.hip.cpp)
   set_source_files_properties(kernels/rocm/attention.hip.cpp
+                              kernels/rocm/qkv_post.hip.cpp
     PROPERTIES LANGUAGE HIP)
 endif()
 
