@@ -33,6 +33,16 @@ if (ENGINE_ENABLE_HIP)
     COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off")
 endif()
 
+# The grouped projection and the embedding gather: one launch holds the rows of
+# a batch and the experts of a token. Both must round a slot's value the same
+# whoever else shares the launch, so the FMA order is the result and these files
+# keep strict floating-point semantics.
+if (ENGINE_ENABLE_HIP)
+  target_sources(gufo_kolibri1 PRIVATE kernels/rocm/gemv.hip.cpp)
+  set_source_files_properties(kernels/rocm/gemv.hip.cpp PROPERTIES
+    LANGUAGE HIP COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off")
+endif()
+
 # The oracle decodes every weight on the fly; unoptimized it is unusable even
 # as a reference, so it keeps -O2 in every configuration.
 add_library(gufo_kolibri1_reference STATIC EXCLUDE_FROM_ALL reference.cpp)
