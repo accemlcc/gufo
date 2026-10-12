@@ -267,15 +267,17 @@ void Executor::Experts(const DeviceLayer& l, const float* h,
               moe_ids_ + static_cast<std::size_t>(base) * used, w,
               moe_counts_, moe_groups_, n, d, experts, used},
              stream_);
-    // A grouped launch declines a shape it is not written for; running on
-    // without its output would mix stale activations into the residual.
     // The launch bound is the number of groups that can hold a slot at all,
     // not the number of experts: a grid over all 384 makes a decode step read
     // the count of 378 empty groups, which measured two to three times the
-    // cost of the projection itself.
+    // cost of the projection itself. That bound is only safe while the table
+    // lists a group per expert that was chosen - see moe.hpp - because blocks
+    // past the table's count return without writing their slots. A grouped
+    // launch that is not written for a shape declines it, and running on
+    // without its output would mix stale activations into the residual.
     const auto Routed = [&](const DeviceTensor& w, const float* in, float* out,
                             std::uint32_t m, std::uint32_t k) {
-      if (!GroupedGemv({w.quant(), w.data, moe_groups_, n * used, in, out, n,
+      if (!GroupedGemv({w.quant(), w.data, moe_groups_, slots, in, out, n,
                         used, m, k},
                        stream_)) {
         throw std::invalid_argument("kolibri1 has no grouped kernel for " +

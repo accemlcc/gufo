@@ -45,7 +45,11 @@ struct GroupedGemvArgs {
   const void* w;
   /// Group table: a count, then per group the expert, its slot count and the
   /// slot indices in increasing order. A slot s of row r reads x[r][0..k) with
-  /// r = s / slots_per_row and writes y[s][0..m).
+  /// r = s / slots_per_row and writes y[s][0..m). Every listed group holds at
+  /// least one slot, so the count is at most rows * slots_per_row and a caller
+  /// may use that product as its launch bound; a group for an expert that was
+  /// not chosen would push the count past the bound and the groups behind it
+  /// would never start.
   const std::int32_t* groups;
   std::uint32_t max_groups;  ///< launch bound; the table's count is <= this
   const float* x;            ///< [rows][k]
@@ -86,7 +90,10 @@ struct MoeRouteArgs {
   std::int32_t* ids;   ///< [rows][used]
   float* weights;      ///< [rows][used], sigmoid(logit) of the chosen expert
   std::uint32_t* counts;  ///< [experts] assignments, zeroed by the caller
-  std::int32_t* groups;   ///< table GroupTableInts(rows * used), or null
+  /// Group table GroupTableInts(rows * used), or null: one group per distinct
+  /// expert the rows chose, its slots the assignments of that expert in
+  /// increasing slot order, and no empty group.
+  std::int32_t* groups;
   std::uint32_t rows;
   std::uint32_t hidden;
   std::uint32_t experts;
