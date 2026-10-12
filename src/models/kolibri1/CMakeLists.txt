@@ -6,13 +6,16 @@ add_library(gufo_kolibri1 STATIC chat_template.cpp config.cpp tokenizer.cpp
 target_include_directories(gufo_kolibri1 PUBLIC ${PROJECT_SOURCE_DIR})
 target_link_libraries(gufo_kolibri1 PUBLIC gufo_core Threads::Threads)
 
-# The device path: attention over the binary16 cache on the matrix cores, and
-# the per-head norm, rotation and cache write in front of it.
+# The device path: attention over the binary16 cache on the matrix cores, the
+# per-head norm, rotation and cache write in front of it, and the router whose
+# group table a grouped projection consumes.
 if (ENGINE_ENABLE_HIP)
   target_sources(gufo_kolibri1 PRIVATE kernels/rocm/attention.hip.cpp
-                     kernels/rocm/qkv_post.hip.cpp)
+                     kernels/rocm/qkv_post.hip.cpp
+                     kernels/rocm/route.hip.cpp)
   set_source_files_properties(kernels/rocm/attention.hip.cpp
                               kernels/rocm/qkv_post.hip.cpp
+                              kernels/rocm/route.hip.cpp
     PROPERTIES LANGUAGE HIP)
 
   # The device-side model: the upload of the weights, the scratch arena and the
