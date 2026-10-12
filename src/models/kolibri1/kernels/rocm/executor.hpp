@@ -1,0 +1,133 @@
+#ifndef GUFO_MODELS_KOLIBRI1_KERNELS_ROCM_EXECUTOR_HPP_
+#define GUFO_MODELS_KOLIBRI1_KERNELS_ROCM_EXECUTOR_HPP_
+
+#include <hip/hip_runtime.h>
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <span>
+#include <string>
+#include <vector>
+
+#include "src/models/kolibri1/kernels/rocm/device_model.hpp"
+
+namespace gufo::models::kolibri1::rocm {
+
+/// Rows of one projection launch. A grouped launch reads the weights of every
+/// expert it touches, so it wants as many rows as it can get; a dense
+/// projection has no such trade-off and 16 rows is the widest shape the
+/// batch-invariant GEMV is written for. Prefill therefore walks its rows
+/// through the projections in steps of this size, which costs a re-read of the
+/// projection weights per step and nothing else.
+inline constexpr std::uint32_t kProjectRows = 16;
+
+/// One session's attention state. The ten layers without positional encoding
+/// keep every position of the context; the sliding layers keep a ring, so a
+/// long context costs the ten full caches and nothing else.
+struct KvCache {
+  ~KvCache();
+  void* allocation{nullptr};
+  std::size_t bytes{0};
+  std::uint32_t max_context{0};
+  /// Slots of the sliding layers' rings.
+  std::uint32_t ring{0};
+  /// Per layer, binary16, one row per position holding every key or value head.
+  std::vector<std::uint16_t*> k;
+  std::vector<std::uint16_t*> v;
+};
+
+/// Runs the Kolibri 1 graph on device-resident weights. Scratch is shared by
+/// every session of one executor and calls are serialized on one stream.
+class Executor {
+public:
+  /// `max_rows` bounds one forward (the prefill chunk); `max_logit_rows`
+  /// bounds how many rows of one forward ask for logits.
+  Executor(const DeviceModel& model, std::uint32_t max_rows,
+           std::uint32_t max_logit_rows, std::uint32_t max_context);
+  ~Executor();
+  Executor(const Executor&) = delete;
+  Executor& operator=(const Executor&) = delete;
+
+  /// Cache bytes for one session: the full-context layers at `max_context`
+  /// positions, the sliding ones at `RingSlots(...)`.
+  [[nodiscard]] static std::size_t CacheBytes(const Config& config,
+                                              std::uint32_t max_context,
+                                              std::uint32_t ring) noexcept;
+  /// Ring slots a sliding layer needs for a forward of `max_rows`: its own
+  /// window plus the rows written before any of them is read.
+  [[nodiscard]] static std::uint32_t RingSlots(const Config& config,
+                                               std::uint32_t max_rows) noexcept;
+
+  [[nodiscard]] std::unique_ptr<KvCache> CreateCache(
+      std::uint32_t max_context, std::string* error_msg = nullptr) const;
+
+  /// Evaluates `tokens` at positions [first_position, +tokens.size()) and
+  /// writes the logits of `logit_rows` (indices into `tokens`, in order) into
+  /// the device logits buffer; read them back with CopyLogits. Every earlier
+  /// position must already be in `cache`.
+  void Forward(KvCache& cache, std::span<const std::int32_t> tokens,
+               std::uint32_t first_position,
+               std::span<const std::uint32_t> logit_rows);
+
+  /// The logits of the last Forward, [rows][vocab].
+  void CopyLogits(std::size_t rows, std::vector<float>* out) const;
+
+  [[nodiscard]] hipStream_t stream() const noexcept { return stream_; }
+  [[nodiscard]] std::uint32_t max_rows() const noexcept { return max_rows_; }
+  [[nodiscard]] std::uint32_t ring() const noexcept { return ring_; }
+  [[nodiscard]] const DeviceModel& model() const noexcept { return model_; }
+
+private:
+  /// y[rows][w.rows] = x[rows][w.cols] . W^T in steps of kProjectRows, using
+  /// the prebuilt single-group table for that step's width.
+  void Project(const DeviceTensor& w, const float* x, std::uint32_t rows,
+               float* y);
+  /// The routed experts of one layer over the rows of `h`, writing
+  /// count * experts_used rows of expert output into `routed` and their routing
+  /// weights into `weights`.
+  void Experts(const DeviceLayer& l, const float* h, std::uint32_t count,
+               float* routed, float* weights);
+  /// The one ungated shared expert over `rows` rows of `h`.
+  void SharedExpert(const DeviceLayer& l, const float* h, std::uint32_t rows,
+                    float* out);
+
+  const DeviceModel& model_;
+  std::uint32_t max_rows_;
+  std::uint32_t max_logit_rows_;
+  std::uint32_t max_context_;
+  std::uint32_t ring_;
+  hipStream_t stream_{nullptr};
+
+  void* scratch_{nullptr};
+  std::int32_t* tokens_{nullptr};
+  float* x_{nullptr};
+  float* h_{nullptr};
+  float* q_{nullptr};
+  float* k_{nullptr};
+  float* v_{nullptr};
+  float* attn_{nullptr};
+  float* o_{nullptr};
+  float* dense_gate_{nullptr};
+  float* dense_up_{nullptr};
+  float* dense_act_{nullptr};
+  float* shared_{nullptr};
+  float* moe_gate_{nullptr};
+  float* moe_up_{nullptr};
+  float* moe_act_{nullptr};
+  float* moe_out_{nullptr};
+  float* moe_weights_{nullptr};
+  std::int32_t* moe_ids_{nullptr};
+  float* moe_logits_{nullptr};
+  std::uint32_t* moe_counts_{nullptr};
+  std::int32_t* moe_groups_{nullptr};
+  /// Single-group tables for one to kProjectRows rows, built once.
+  std::int32_t* dense_groups_{nullptr};
+  float* logits_{nullptr};
+  float* logit_x_{nullptr};
+  float* partials_{nullptr};
+};
+
+}  // namespace gufo::models::kolibri1::rocm
+
+#endif  // GUFO_MODELS_KOLIBRI1_KERNELS_ROCM_EXECUTOR_HPP_
