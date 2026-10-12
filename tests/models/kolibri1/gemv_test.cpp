@@ -103,9 +103,10 @@ struct Built {
 
 /// Random codes everywhere, then the scale fields of every block replaced by
 /// small positives: a random half would be an infinity, and the products have
-/// to stay near one for the reported errors to mean anything.
+/// to stay near one for the reported errors to mean anything. `decode` fills
+/// the FP32 copy the oracle dots against; a shape that is only timed skips it.
 Built Build(k::WeightFormat format, std::uint32_t experts, std::uint32_t m,
-            std::uint32_t kdim, std::mt19937& rng) {
+            std::uint32_t kdim, std::mt19937& rng, bool decode = true) {
   const std::size_t row = RowBytes(format, kdim);
   const std::size_t block_bytes =
       format == k::WeightFormat::kQ4_K ? sizeof(q::block_q4_K)
@@ -130,6 +131,9 @@ Built Build(k::WeightFormat format, std::uint32_t experts, std::uint32_t m,
         reinterpret_cast<q::block_q6_K*>(p)->d = ToHalf(0.25F * scale(rng));
       }
     }
+  }
+  if (!decode) {
+    return w;
   }
   w.decoded.resize(static_cast<std::size_t>(experts) * m * kdim);
   for (std::size_t r = 0; r < static_cast<std::size_t>(experts) * m; ++r) {
@@ -488,6 +492,71 @@ std::vector<std::int32_t> Count(std::int32_t from, std::int32_t to) {
   return v;
 }
 
+/// Reports the time of one launch and the weight bytes it moves. Not a gate:
+/// the numbers steer the launcher, and here they answer one question for the
+/// engine, whether binding a launch to every expert of the model instead of to
+/// the groups the table holds costs a decode step. A shared GPU reads these
+/// high rather than exact.
+void Timed(const char* name, k::WeightFormat format, std::uint32_t experts,
+           std::uint32_t m, std::uint32_t kdim, std::uint32_t rows,
+           std::uint32_t slots_per_row, const std::vector<Group>& groups,
+           std::uint32_t max_groups, std::mt19937& rng) {
+  const Built w = Build(format, experts, m, kdim, rng, false);
+  std::vector<float> x(static_cast<std::size_t>(rows) * kdim, 0.25F);
+  const std::vector<std::int32_t> table = MakeTable(groups);
+  std::vector<float> out(static_cast<std::size_t>(rows) * slots_per_row * m,
+                         0.0F);
+  k::GroupedGemvArgs args{};
+  args.format = format;
+  args.w = Device(w.bytes);
+  args.groups = Device(table);
+  args.max_groups = max_groups;
+  args.x = Device(x);
+  args.y = Device(out);
+  args.rows = rows;
+  args.slots_per_row = slots_per_row;
+  args.m = m;
+  args.k = kdim;
+  const auto launch_all = [&](int rounds) -> bool {
+    for (int i = 0; i < rounds; ++i) {
+      if (!k::GroupedGemv(args, nullptr)) {
+        return false;
+      }
+    }
+    return true;
+  };
+  if (!launch_all(2)) {
+    std::cout << "TIME " << name << "  refused\n";
+    ++failures;
+    FreeAll();
+    return;
+  }
+  HIP_CHECK(hipStreamSynchronize(nullptr));
+  hipEvent_t first = nullptr, last = nullptr;
+  HIP_CHECK(hipEventCreate(&first));
+  HIP_CHECK(hipEventCreate(&last));
+  constexpr int kRounds = 20;
+  HIP_CHECK(hipEventRecord(first, nullptr));
+  const bool ran = launch_all(kRounds);
+  HIP_CHECK(hipEventRecord(last, nullptr));
+  HIP_CHECK(hipEventSynchronize(last));
+  float ms = 0.0F;
+  HIP_CHECK(hipEventElapsedTime(&ms, first, last));
+  HIP_CHECK(hipEventDestroy(first));
+  HIP_CHECK(hipEventDestroy(last));
+  double read = 0.0;
+  for (const Group& g : groups) {
+    read += static_cast<double>(m) * RowBytes(format, kdim);
+  }
+  const double us = ms * 1000.0 / kRounds;
+  std::cout << (ran ? "TIME " : "FAIL ") << name << "  " << us << " us  "
+            << read / (us * 1.0e-6) / 1.0e9 << " GB/s of claimed experts\n";
+  if (!ran) {
+    ++failures;
+  }
+  FreeAll();
+}
+
 }  // namespace
 
 int main() {
@@ -665,6 +734,44 @@ int main() {
       ++failures;
     }
     FreeAll();
+  }
+
+  if (std::getenv("KOLIBRI_TIME") != nullptr) {
+    // Decode width: one row over six experts, the launch bound once to the six
+    // groups a row can hold and once to every expert of the model. The pair
+    // says what the blocks that find no group of theirs are worth.
+    const std::vector<Group> six{
+        {0, {0}}, {37, {1}}, {91, {2}}, {140, {3}}, {255, {4}}, {383, {5}}};
+    for (const k::WeightFormat f : formats) {
+      const char* fmt = f == k::WeightFormat::kQ4_K ? "Q4_K" : "Q6_K";
+      char name[96];
+      std::snprintf(name, sizeof(name), "%s expert 512x2560 bound 6", fmt);
+      Timed(name, f, 384, 512, 2560, 1, 6, six, 6, rng);
+      std::snprintf(name, sizeof(name), "%s expert 512x2560 bound 384", fmt);
+      Timed(name, f, 384, 512, 2560, 1, 6, six, 384, rng);
+      std::snprintf(name, sizeof(name), "%s expert 2560x512 bound 6", fmt);
+      Timed(name, f, 384, 2560, 512, 1, 6, six, 6, rng);
+      std::snprintf(name, sizeof(name), "%s expert 2560x512 bound 384", fmt);
+      Timed(name, f, 384, 2560, 512, 1, 6, six, 384, rng);
+    }
+
+    // A chunk of sixteen rows where every row chose different experts, which
+    // is the widest table one launch can be given: ninety-six groups is the
+    // most slots a batch can hold, so a bound above it only dispatches blocks
+    // that find no group.
+    std::vector<Group> wide;
+    for (std::int32_t s = 0; s < 96; ++s) {
+      wide.push_back({s, {s}});
+    }
+    for (const k::WeightFormat f : formats) {
+      const char* fmt = f == k::WeightFormat::kQ4_K ? "Q4_K" : "Q6_K";
+      char name[96];
+      std::snprintf(name, sizeof(name), "%s expert 512x2560 16r bound 96", fmt);
+      Timed(name, f, 384, 512, 2560, 16, 6, wide, 96, rng);
+      std::snprintf(name, sizeof(name), "%s expert 512x2560 16r bound 384",
+                    fmt);
+      Timed(name, f, 384, 512, 2560, 16, 6, wide, 384, rng);
+    }
   }
 
   if (failures != 0) {
