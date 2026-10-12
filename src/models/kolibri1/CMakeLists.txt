@@ -16,6 +16,18 @@ if (ENGINE_ENABLE_HIP)
     PROPERTIES LANGUAGE HIP)
 endif()
 
+# The block arithmetic every layer runs several times: the norms, the residual
+# add, the expert activation and the end of a mixture. Strict floating point,
+# because a row has to round the same whatever else shares its launch and a
+# batch boundary must not move its value.
+if (ENGINE_ENABLE_HIP)
+  target_sources(gufo_kolibri1 PRIVATE kernels/rocm/blocks.hip.cpp)
+  set_source_files_properties(kernels/rocm/blocks.hip.cpp
+    PROPERTIES LANGUAGE HIP)
+  set_source_files_properties(kernels/rocm/blocks.hip.cpp PROPERTIES
+    COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off")
+endif()
+
 # The oracle decodes every weight on the fly; unoptimized it is unusable even
 # as a reference, so it keeps -O2 in every configuration.
 add_library(gufo_kolibri1_reference STATIC EXCLUDE_FROM_ALL reference.cpp)
