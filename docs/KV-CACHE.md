@@ -16,6 +16,12 @@ the next turn of the same conversation does not recompute the prefix it shares
 with the previous one. This is what the rest of this document is about: the
 `ContinuationCache`, and the optional on-disk tier behind `--cache-disk`.
 
+Qwen3.8-Flash-Next no longer uses that cache: it serves through the component
+cache of the [cache redesign](cache-redesign/RFC.md), and its budgets are
+described under [Limits](#limits). The rest of this document describes the
+snapshot cache that the other models still use; its Flash-Next measurements
+predate the change.
+
 The second is where the important subtlety lives. What Gufo retains is **not**
 literally K/V tensors. It is an opaque snapshot owned by the model runner. For
 Qwen3.8-27B that payload happens to be attention KV. For Qwen3.8-Flash-Next it
@@ -341,6 +347,28 @@ captured; RAM-retained snapshots and their captures in progress share the RAM bu
 | Disk bytes | 8 GiB | `--cache-disk-bytes` |
 | Disk staging bytes | smaller of `MemAvailable / 8` and the disk budget | `--cache-disk-staging-bytes` |
 
+### Flash-Next budgets
+
+Flash-Next keeps the same options with these meanings:
+
+| Option | Meaning |
+| --- | --- |
+| `--cache-ram-bytes` | The automatic and explicit sizing above. The whole budget is committed at startup, after the execution sessions allocate, and holds checkpoint state, KV rows, partial tails, idle-session spill and metadata. There is no separate spill budget. |
+| `--cache-disk-bytes` | Counts referenced, temporary and orphaned files. A lower budget at startup removes temporaries and orphans, then the oldest checkpoints. |
+| `--cache-disk-staging-bytes` | Transfer buffer only, 1 MiB by default, allocated at startup. Checkpoints of any size stream through it. It must hold one cache row. |
+| `--cache-disk DIR` | Owned by one process; a second one fails at startup with an ownership error naming the directory. Earlier-release `*.kvc` files in it are removed. |
+
+The 128-record limit stays internal: private state, about 132 MB per
+checkpoint, bounds checkpoint density first. The startup line
+`schema=component-cache-v1 event=configured` reports `capacity_bytes`,
+`automatic_bytes`, `max_bytes`, `staging_capacity_bytes` and
+`disk_capacity_bytes`.
+
+Committing the budget at startup makes it resident immediately; the old cache
+reached the same footprint only as checkpoints accumulated. Co-resident
+servers started later see that memory as used, so the advice below on explicit
+budgets applies from the first request.
+
 `--cache-ram-bytes 0` selects automatic sizing. Zero does not disable reuse.
 A positive value replaces the automatic budget and may exceed it: it trades the
 free half of host RAM for retention, but always leaves 4 GiB to the OS and other
@@ -388,8 +416,9 @@ conversations:
   first.
 - Run fewer `--sessions`: each Flash-Next session at 262144 context holds about
   6.3 GB of state that the cache can use instead.
-- Add `--cache-disk` with `--cache-disk-staging-bytes` above the snapshot size,
-  so checkpoints that leave RAM can still be restored from disk.
+- Add `--cache-disk` so checkpoints that leave RAM can still be restored from
+  disk. The other models also need `--cache-disk-staging-bytes` above the
+  snapshot size; Flash-Next streams any size through its default buffer.
 
 See #343.
 
@@ -468,6 +497,8 @@ lookup for a single request. The result can still populate the cache.
 | Log line | Meaning |
 | --- | --- |
 | `event=snapshot_cache_configured` | retained capacity at startup, with the automatic budget and the most an explicit `--cache-ram-bytes` may claim |
+| `schema=component-cache-v1 event=configured` | Flash-Next: committed RAM, staging and disk budgets at startup, with the automatic budget and the most an explicit `--cache-ram-bytes` may claim |
+| `schema=component-cache-v1 event=disk_evicted reason=budget` | Flash-Next: startup removed the oldest checkpoints to fit a lowered `--cache-disk-bytes` |
 | `event=snapshot action=removed reason=entry_capacity` | a retained prefix was evicted because every entry was taken |
 | `event=snapshot action=skipped reason=entry_capacity` | no checkpoint record could be replaced safely for this capture |
 | `event=snapshot action=skipped reason=byte_capacity` | a checkpoint did not fit the RAM budget |

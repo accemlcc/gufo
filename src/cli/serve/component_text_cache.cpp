@@ -217,6 +217,20 @@ struct ComponentTextCache::Impl {
         static_cast<ssize_t>(nonce.size()))
       throw std::runtime_error("cannot obtain cache publication nonce");
     index.Register(identity, resources->adapter->Components(), digest);
+    if (options) {
+      // Disk transfers move whole rows per staging piece, so a smaller budget
+      // could never publish or restore a checkpoint.
+      std::size_t row_bytes{};
+      for (const auto& d : resources->adapter->Components())
+        if (d.kind == cache::ComponentKind::kAppendRows)
+          row_bytes = std::max(row_bytes, d.row_bytes);
+      if (ledger.Limits().staging_bytes < row_bytes)
+        throw std::invalid_argument(
+            "--cache-disk-staging-bytes " +
+            std::to_string(ledger.Limits().staging_bytes) +
+            " is smaller than one " + std::to_string(row_bytes) +
+            "-byte cache row");
+    }
     for (std::size_t i = 0; i < count; ++i) {
       auto entry = std::make_unique<Entry>();
       entry->preservation = Stream();
@@ -231,11 +245,15 @@ struct ComponentTextCache::Impl {
                                  }});
       entries.push_back(std::move(entry));
     }
+    std::size_t automatic_bytes{}, max_bytes{};
     if (resources->commit_backing) {
       const auto claim = this->runner->ResourceClaim();
       const auto automatic = claim.retained_snapshot_capacity_bytes.value_or(0);
       const auto ceiling =
           claim.retained_snapshot_ceiling_bytes.value_or(automatic);
+      automatic_bytes =
+          std::min(TextRunnerRamCacheOptions::kAutomaticMaxBytes, automatic);
+      max_bytes = ceiling;
       ram = std::min(ram, ceiling);
       if (automatic_ram)
         ram = std::min(ram, automatic);
@@ -260,6 +278,21 @@ struct ComponentTextCache::Impl {
       disk_capacity = options->capacity_bytes;
       disk_step = options->min_checkpoint_step_tokens;
       disk->ReclaimOrphans();
+      if (disk->Stats().managed_bytes > disk_capacity) {
+        // A lowered --cache-disk-bytes keeps its meaning: reclaim orphans and
+        // temporaries first, then evict the oldest checkpoints to fit.
+        disk->WaitForReclamation();
+        std::size_t evicted{};
+        while (disk->Stats().managed_bytes > disk_capacity &&
+               catalog->EvictOne())
+          ++evicted;
+        Logger::Info("cache",
+                     "schema=component-cache-v1 event=disk_evicted "
+                     "reason=budget entries=" +
+                         std::to_string(evicted) + " managed_bytes=" +
+                         std::to_string(disk->Stats().managed_bytes) +
+                         " capacity_bytes=" + std::to_string(disk_capacity));
+      }
       queue = std::make_unique<cache::PersistenceQueue>(
           ledger, *streaming, kPersistenceDepth, ram,
           [this] {
@@ -329,7 +362,10 @@ struct ComponentTextCache::Impl {
                      std::to_string(count) +
                      " snapshot_entries=128 capacity_bytes=" +
                      std::to_string(ram) + " staging_capacity_bytes=" +
-                     std::to_string(ledger.Limits().staging_bytes));
+                     std::to_string(ledger.Limits().staging_bytes) +
+                     " automatic_bytes=" + std::to_string(automatic_bytes) +
+                     " max_bytes=" + std::to_string(max_bytes) +
+                     " disk_capacity_bytes=" + std::to_string(disk_capacity));
   }
   ~Impl() {
     // Settle immutable-source readers before slots/resources/index unwind.

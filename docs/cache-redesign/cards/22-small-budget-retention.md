@@ -1,7 +1,8 @@
 # 22 · Retention under small RAM budgets
 
 **Milestone:** Switch-over review · **Depends on:** 07, 19, 21 · **Size:** M ·
-**Affects:** Flash-Next AR/MTP serving · **Status:** in progress
+**Affects:** Flash-Next AR/MTP serving · **Status:** in progress (correctness
+checks pass; the timing gate is open)
 
 ## Problem
 

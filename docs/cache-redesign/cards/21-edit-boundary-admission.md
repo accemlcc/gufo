@@ -1,7 +1,8 @@
 # 21 · Edit-boundary admission under byte pressure
 
 **Milestone:** Switch-over review · **Depends on:** 07, 19 · **Size:** S ·
-**Affects:** Flash-Next AR/MTP serving · **Status:** in progress
+**Affects:** Flash-Next AR/MTP serving · **Status:** in progress (correctness
+checks pass; the timing gate is open)
 
 ## Problem
 

@@ -2,7 +2,7 @@
 
 **Milestone:** Adapters · **Depends on:** 02, 06, 08 · **Size:** L (split:
 inventory, then AR, then MTP) · **Affects:** nothing served until card 19 ·
-**Status:** draft; model checks complete, HTTP timing inconclusive
+**Status:** done
 
 ## Goal
 
@@ -101,7 +101,7 @@ required (see the README).
 ## Review notes
 
 
-## Results (2026-10-10, draft)
+## Results (2026-10-10)
 
 Three independent reviews of committed adapter revisions are complete. The
 first found batch readiness admission could abort healthy peers; the fix and
@@ -218,6 +218,10 @@ beyond the margin. The original failed report remains retained; this evidence
 does not qualify that phase or imply a speedup. Snapshot allocation/copy code
 is unchanged, and no timing tolerance or numerical contract was relaxed.
 The new cache's HTTP path remains deferred until card 19 exists and attaches it.
+Card 19 ([PR #543](https://github.com/gufo-org/gufo/pull/543)) now attaches
+the adapter on `fedeizzo/cache-staging`; the unqualified HTTP timings carry
+over to its gates in [todo.md](todo.md). Both of this card's completion
+criteria are met, so the card is done (2026-10-12).
 
 Reproduction (select a mode and depth explicitly):
 

@@ -82,10 +82,15 @@ The supported modalities are LLM, image, video, and audio (TTS, ASR).
 
 - `cacheDisk` — enable an on-disk cache of computed prompt state, reused
   across requests and restarts. In practice: repeated or shared prompts get
-  much faster; costs disk space.
-- `cacheDiskBytes` — the maximum size of that cache on disk.
-- `cacheDiskStagingBytes` — scratch space used while writing new cache
-  entries. Must fit alongside `cacheDiskBytes`.
+  much faster; costs disk space. Give each Flash-Next server its own
+  directory: one process owns it, and a second one fails at startup.
+- `cacheDiskBytes` — the maximum size of that cache on disk, including
+  unfinished writes. Lowering it removes the oldest Flash-Next checkpoints at
+  the next start.
+- `cacheDiskStagingBytes` — RAM used to move cache entries to and from disk.
+  Flash-Next streams entries of any size through a 1 MiB buffer by default;
+  other models need it to hold a whole entry. See
+  [the server guide](SERVER.md) for the defaults.
 
 **Speculative decoding**
 
