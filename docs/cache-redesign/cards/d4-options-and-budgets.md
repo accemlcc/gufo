@@ -1,6 +1,7 @@
 # D4 · Options and budgets
 
-**Type:** decision · **Blocks:** 08, 10, 19 · **Status:** done
+**Type:** decision · **Blocks:** 08, 10, 19 · **Status:** done for Flash-Next
+(Qwen 27B and DeepSeek adopt it with cards 15–17 and 19)
 
 ## Question
 
@@ -125,7 +126,8 @@ above budget, refusing publication until retirement, and publishing again.
 Each new assertion fails on the preceding code: startup throws `cache
 directory exceeds disk budget`, and removing the staging check, the
 over-budget refusal or the early store opening each fails its assertion. All
-57 hosted contracts and the shared formatter pass.
+57 hosted contracts and the shared formatter pass. `cache_streaming_test`
+checks that `MinimumStagingBytes` takes the widest of differently sized rows.
 
 Production-build smoke runs (release `gufo serve llm`, one session, context
 16384) check the startup paths on gfx1151. In AR, the first server published
@@ -137,7 +139,7 @@ entries=1 managed_bytes=251707769`; the newer prompt then restored 4,736 tokens
 from disk and prefilled 5, and the evicted one prefilled all 4,741. A start
 with `--cache-disk-staging-bytes 1` exited 1 with `--cache-disk-staging-bytes 1
 is smaller than one 1024-byte cache row`. Model load took 21 s. These AR
-runs used `8397d793`. On the review revision (binary SHA-256 in the evidence directory), the same
+runs used `8397d793`. On `fafd0ed5` (binary SHA-256 in the evidence directory), the same
 MTP smoke run published 263,080,352-byte checkpoints, evicted one entry under a
 budget one byte below the 526,253,734 managed bytes, restored 4,736 tokens and
 prefilled 5 for the newer prompt, executed MTP draft rounds, and rejected

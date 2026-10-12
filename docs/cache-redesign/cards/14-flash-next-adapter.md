@@ -222,8 +222,11 @@ Card 19 ([PR #543](https://github.com/gufo-org/gufo/pull/543)) now attaches
 the adapter on `fedeizzo/cache-staging`, so HTTP qualification belongs to card
 19: its serving-latency and final-validation rows in [todo.md](todo.md)
 replace these pre-attachment observations, and restore latency from disk is
-not a merge gate there. Both of this card's completion criteria are met, so
-the card is done (2026-10-12).
+not a merge gate there. The capacity rows above used 4 GiB of committed
+backing; D4 now commits about 89% of the automatic budget at startup (14.4 GB
+in a one-session, 16K-context AR run), so re-confirming capacity at that
+budget is part of todo.md's resource gate. Both of this card's completion
+criteria are met, so the card is done (2026-10-12).
 
 Reproduction (select a mode and depth explicitly):
 

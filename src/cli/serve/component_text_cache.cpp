@@ -218,12 +218,8 @@ struct ComponentTextCache::Impl {
       throw std::runtime_error("cannot obtain cache publication nonce");
     index.Register(identity, resources->adapter->Components(), digest);
     if (options) {
-      // Restores and disk-only captures move whole rows per staging piece,
-      // so a smaller budget could never restore a checkpoint.
-      std::size_t row_bytes{};
-      for (const auto& d : resources->adapter->Components())
-        if (d.kind == cache::ComponentKind::kAppendRows)
-          row_bytes = std::max(row_bytes, d.row_bytes);
+      const auto row_bytes =
+          cache::MinimumStagingBytes(resources->adapter->Components());
       if (ledger.Limits().staging_bytes < row_bytes)
         throw std::invalid_argument(
             "--cache-disk-staging-bytes " +

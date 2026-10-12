@@ -230,7 +230,9 @@ unreferenced. Restarting with a lower budget removes those first, then the
 earliest-published checkpoints, until the directory fits; use history does not
 survive a restart. One Flash-Next server owns the directory: a second one fails
 at startup, after loading its model but before committing its RAM budget, with
-an ownership error naming the directory. Other models do not take this lock.
+an ownership error naming the directory. The lock does not wait: a restarted
+server fails if its predecessor is still draining disk writes when the new one
+finishes loading its model. Other models do not take this lock.
 The first start on a directory written by an earlier release removes its old
 checkpoint files (`*.kvc`), and the cache refills as conversations run. Do not
 share a directory between Flash-Next and other models; Flash-Next removes

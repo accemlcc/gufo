@@ -40,7 +40,7 @@ Changed lines, excluding generated files: **S** ≤ 300 · **M** 300–1,000 ·
 | [D1](d1-transition.md) | One cache at a time; a single switch-over at the end | agreed |
 | [D2](d2-first-mode.md) | Adapter order: Flash-Next, Qwen 27B AR, Qwen 27B DFlash2, DeepSeek | agreed |
 | [D3](d3-step-baselines.md) | Step baselines per card instead of upfront targets | agreed |
-| [D4](d4-options-and-budgets.md) | Options and budgets | done |
+| [D4](d4-options-and-budgets.md) | Options and budgets | done for Flash-Next |
 
 ## PR cards
 

@@ -1,6 +1,7 @@
 #include "src/cache/streaming.hpp"
 
 #include <algorithm>
+#include <array>
 #include <barrier>
 #include <cassert>
 #include <cstring>
@@ -972,7 +973,18 @@ void ConcurrentStop() {
   assert(ledger.Snapshot().persistence_pinned_bytes == 0);
 }
 }  // namespace
+void MinimumStagingHoldsWidestRow() {
+  // Private state streams in pieces of any size; rows never split.
+  const std::array<ComponentDescriptor, 3> mixed{{
+      {ComponentId{1}, 1, ComponentKind::kAppendRows, 4, 256, 0},
+      {ComponentId{2}, 1, ComponentKind::kAppendRows, 1024, 256, 0},
+      {ComponentId{3}, 1, ComponentKind::kPrivateState, 0, 0, 1 << 20},
+  }};
+  assert(MinimumStagingBytes(mixed) == 1024);
+  assert(MinimumStagingBytes(std::span(mixed).last(1)) == 1);
+}
 int main() {
+  MinimumStagingHoldsWidestRow();
   PrefetchDoesNotValidateOrAdmitPayload();
   RestoreGroupsAdjacentFilesWithinStaging();
   LiveRowsStreamWithoutWholeHistoryBacking();

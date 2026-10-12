@@ -420,8 +420,9 @@ Flash-Next keeps the same options with these meanings:
 | `--cache-disk-staging-bytes` | Transfer buffer only, 1 MiB by default, allocated at startup as pinned host memory. Checkpoints of any size stream through it. It must hold one cache row, 1,024 bytes on Flash-Next. |
 | `--cache-disk DIR` | Owned by one Flash-Next server. A second one fails at startup, before committing its RAM budget, with an ownership error naming the directory. Other models do not take this lock. Startup removes earlier-release `*.kvc` and `.tmp-*` files from the directory, including those of another model's server sharing it. |
 
-The 128-record limit stays internal: private state, about 132 MB per
-checkpoint, bounds checkpoint density first. The startup line
+The 128-record limit stays internal. Each checkpoint holds about 132 MB of
+private state, so below a budget of about 19 GB that state caps the checkpoint
+count under 128; only larger explicit budgets can reach the record limit. The startup line
 `schema=component-cache-v1 event=configured` reports `capacity_bytes`,
 `automatic_bytes`, `max_bytes`, `staging_capacity_bytes` and
 `disk_capacity_bytes`.
@@ -497,7 +498,7 @@ lookup for a single request. The result can still populate the cache.
 | Log line | Meaning |
 | --- | --- |
 | `event=snapshot_cache_configured` | retained capacity at startup, with the automatic budget and the most an explicit `--cache-ram-bytes` may claim |
-| `schema=component-cache-v1 event=configured` | Flash-Next: committed RAM, staging and disk budgets at startup, with the automatic budget and the most an explicit `--cache-ram-bytes` may claim |
+| `schema=component-cache-v1 event=configured` | Flash-Next: RAM, staging and disk budgets at startup, with the automatic budget and the most an explicit `--cache-ram-bytes` may claim |
 | `schema=component-cache-v1 event=disk_evicted reason=budget` | Flash-Next: startup removed the earliest-published checkpoints to fit a lowered `--cache-disk-bytes` |
 | `schema=component-cache-v1 event=disk_over_budget` | Flash-Next: the directory still exceeds `--cache-disk-bytes` after startup reclamation and eviction; publication is refused until it fits |
 | `event=snapshot action=removed reason=entry_capacity` | a retained prefix was evicted because every entry was taken |
