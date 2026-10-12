@@ -10,8 +10,10 @@
 #   - a fresh build directory needs HIP named explicitly, because the toolchain
 #     lives in a bind mount CMake does not search on its own:
 #       cmake -B build/gpu-test -G Ninja -DCMAKE_BUILD_TYPE=Release \
-#             -DENGINE_BUILD_TESTS=ON -DENGINE_ENABLE_HIP=ON \
+#             -DBUILD_TESTING=ON -DENGINE_ENABLE_HIP=ON \
 #             -DCMAKE_HIP_COMPILER=/opt/rocm/lib/llvm/bin/clang++
+#     BUILD_TESTING also decides whether the test targets exist at all, so a
+#     directory configured without it knows no kolibri1_*_test to build.
 #   - KOLIBRI_REMOTE_SRC and KOLIBRI_CONTAINER pick another source tree and
 #     container, which is how parallel work on the one GPU stays apart.
 #   - the model-backed checks read a 45 GB artifact that is not mounted into the
