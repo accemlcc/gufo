@@ -76,6 +76,10 @@ add_subdirectory(src/models/qwen38_flash_next)
 # Gemma 4 dense text models — model-private CPU reference plus ROCm runtime.
 add_subdirectory(src/models/gemma4)
 
+# Kolibri 1 MoE with sliding-window and global layers — model-private CPU
+# reference plus ROCm runtime.
+add_subdirectory(src/models/kolibri1)
+
 # Qwen3-TTS — CPU reference + HIP kernels (CustomVoice 12Hz).
 add_subdirectory(src/models/qwen3_tts)
 
@@ -480,6 +484,7 @@ if (BUILD_TESTING)
   add_subdirectory(tests/models/deepseek_v4_flash)
   add_subdirectory(tests/models/qwen38_flash_next)
   add_subdirectory(tests/models/gemma4)
+  add_subdirectory(tests/models/kolibri1)
 
   if(ENGINE_ENABLE_HIP)
     add_executable(chat_template_hf_token_golden_test
