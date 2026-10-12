@@ -13,12 +13,16 @@
 #   tools/kolibri/m1.sh build kolibri1_attention_test
 #   tools/kolibri/m1.sh test  kolibri1_chat_template
 #   tools/kolibri/m1.sh model-test kolibri1_artifact      # needs the artifact
+#   tools/kolibri/m1.sh gpu-test kolibri1_attention    # needs the matrix cores
 #   tools/kolibri/m1.sh suite                            # every cpu check
 set -euo pipefail
 
 remote="${KOLIBRI_REMOTE:-m1}"
 remote_src="${KOLIBRI_REMOTE_SRC:-/home/arnomatic/gufo-kolibri-src}"
 container="${KOLIBRI_CONTAINER:-gufokolibri}"
+# The build container has the toolchain but no render node; the checks that need
+# the matrix cores run in the container that has /dev/kfd.
+gpu_container="${KOLIBRI_GPU_CONTAINER:-gufokolibri-run}"
 build_dir="${KOLIBRI_BUILD:-build/gpu-test}"
 artifact="${KOLIBRI_ARTIFACT:-/home/arnomatic/models/Kolibri-1-GGUF/Kolibri-1-Q4_K_M.gguf}"
 root="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -59,6 +63,15 @@ case "$command" in
     in_container "cmake --build $build_dir --target ${1}_test -j8 2>&1 | tail -5"
     ssh "$remote" "LD_LIBRARY_PATH=/opt/rocm/lib GUFO_KOLIBRI1_MODEL=$artifact \
                    $remote_src/$build_dir/tests/models/kolibri1/${1}_test"
+    ;;
+  gpu-test)
+    # Build where the toolchain is, run where the GPU is: the binary goes from
+    # the build container's tree to a shared path and then into the other one.
+    sync
+    in_container "cmake --build $build_dir --target ${1}_test -j8 2>&1 | tail -8"
+    ssh "$remote" "cp $remote_src/$build_dir/tests/models/kolibri1/${1}_test /tmp/kolibri_test.bin && \
+                   podman cp /tmp/kolibri_test.bin $gpu_container:/tmp/kolibri_test && \
+                   podman exec -e KOLIBRI_TIME=${KOLIBRI_TIME:-0} $gpu_container bash -lc 'LD_LIBRARY_PATH=/opt/rocm/lib /tmp/kolibri_test'"
     ;;
   suite)
     sync
