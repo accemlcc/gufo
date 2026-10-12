@@ -14,6 +14,12 @@ if (ENGINE_ENABLE_HIP)
   set_source_files_properties(kernels/rocm/attention.hip.cpp
                               kernels/rocm/qkv_post.hip.cpp
     PROPERTIES LANGUAGE HIP)
+  # The projection and the embedding gather must round a slot's value the same
+  # whoever else is in the launch, so the FMA order is the result and this file
+  # keeps strict floating-point semantics.
+  target_sources(gufo_kolibri1 PRIVATE kernels/rocm/gemv.hip.cpp)
+  set_source_files_properties(kernels/rocm/gemv.hip.cpp PROPERTIES
+    LANGUAGE HIP COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off")
 endif()
 
 # The oracle decodes every weight on the fly; unoptimized it is unusable even
