@@ -16,12 +16,6 @@ the next turn of the same conversation does not recompute the prefix it shares
 with the previous one. This is what the rest of this document is about: the
 `ContinuationCache`, and the optional on-disk tier behind `--cache-disk`.
 
-Qwen3.8-Flash-Next no longer uses that cache: it serves through the component
-cache of the [cache redesign](cache-redesign/RFC.md), and its budgets are
-described under [Limits](#limits). The rest of this document describes the
-snapshot cache that the other models still use; its Flash-Next measurements
-predate the change.
-
 The second is where the important subtlety lives. What Gufo retains is **not**
 literally K/V tensors. It is an opaque snapshot owned by the model runner. For
 Qwen3.8-27B that payload happens to be attention KV. For Qwen3.8-Flash-Next it
@@ -32,6 +26,12 @@ That choice buys one retention, admission, eviction and persistence mechanism
 that is correct for every model, including hybrid-recurrent ones. It costs the
 ability to trim a checkpoint: a saved snapshot can only be reused **whole**,
 and only when its tokens are an exact prefix of the new prompt.
+
+Qwen3.8-Flash-Next no longer uses this snapshot cache: it serves through the
+component cache of the [cache redesign](cache-redesign/RFC.md), whose options
+are described under [Flash-Next budgets](#flash-next-budgets). The rest of this
+document describes the snapshot cache that the other models still use; its
+Flash-Next descriptions and measurements predate the change.
 
 ## Why it exists
 
@@ -347,28 +347,6 @@ captured; RAM-retained snapshots and their captures in progress share the RAM bu
 | Disk bytes | 8 GiB | `--cache-disk-bytes` |
 | Disk staging bytes | smaller of `MemAvailable / 8` and the disk budget | `--cache-disk-staging-bytes` |
 
-### Flash-Next budgets
-
-Flash-Next keeps the same options with these meanings:
-
-| Option | Meaning |
-| --- | --- |
-| `--cache-ram-bytes` | The automatic and explicit sizing above. The whole budget is committed at startup, after the execution sessions allocate, and holds checkpoint state, KV rows, partial tails, idle-session spill and metadata. There is no separate spill budget. |
-| `--cache-disk-bytes` | Counts referenced, temporary and orphaned files. A lower budget at startup removes temporaries and orphans, then the oldest checkpoints. |
-| `--cache-disk-staging-bytes` | Transfer buffer only, 1 MiB by default, allocated at startup. Checkpoints of any size stream through it. It must hold one cache row. |
-| `--cache-disk DIR` | Owned by one process; a second one fails at startup with an ownership error naming the directory. Earlier-release `*.kvc` files in it are removed. |
-
-The 128-record limit stays internal: private state, about 132 MB per
-checkpoint, bounds checkpoint density first. The startup line
-`schema=component-cache-v1 event=configured` reports `capacity_bytes`,
-`automatic_bytes`, `max_bytes`, `staging_capacity_bytes` and
-`disk_capacity_bytes`.
-
-Committing the budget at startup makes it resident immediately; the old cache
-reached the same footprint only as checkpoints accumulated. Co-resident
-servers started later see that memory as used, so the advice below on explicit
-budgets applies from the first request.
-
 `--cache-ram-bytes 0` selects automatic sizing. Zero does not disable reuse.
 A positive value replaces the automatic budget and may exceed it: it trades the
 free half of host RAM for retention, but always leaves 4 GiB to the OS and other
@@ -430,6 +408,28 @@ checkpoints at moderate depth without an explicit limit. See #259.
 
 RAM eviction follows the checkpoint priorities above. Disk eviction remains
 global least-recently-used, without conversation or rebuild-cost awareness.
+
+### Flash-Next budgets
+
+Flash-Next keeps the same options with these meanings:
+
+| Option | Meaning |
+| --- | --- |
+| `--cache-ram-bytes` | The automatic and explicit sizing above. After the execution sessions allocate, about 89% of the budget is committed at startup as pinned 64 KiB pages; the rest is reserved for cache metadata, which grows with use. The pages hold checkpoint state, KV rows, partial tails and idle-session spill. There is no separate spill budget. |
+| `--cache-disk-bytes` | Counts referenced, temporary and orphaned files. A lower budget at startup removes temporaries and orphans, then the earliest-published checkpoints: use history does not survive a restart. |
+| `--cache-disk-staging-bytes` | Transfer buffer only, 1 MiB by default, allocated at startup as pinned host memory. Checkpoints of any size stream through it. It must hold one cache row, 1,024 bytes on Flash-Next. |
+| `--cache-disk DIR` | Owned by one Flash-Next server. A second one fails at startup, before committing its RAM budget, with an ownership error naming the directory. Other models do not take this lock. Startup removes earlier-release `*.kvc` and `.tmp-*` files from the directory, including those of another model's server sharing it. |
+
+The 128-record limit stays internal: private state, about 132 MB per
+checkpoint, bounds checkpoint density first. The startup line
+`schema=component-cache-v1 event=configured` reports `capacity_bytes`,
+`automatic_bytes`, `max_bytes`, `staging_capacity_bytes` and
+`disk_capacity_bytes`.
+
+Committing the pages at startup makes them resident immediately; the old cache
+reached a similar footprint only as checkpoints accumulated. Co-resident
+servers started later see that memory as used, so the advice above on explicit
+budgets applies from the first request.
 
 ## The disk tier
 
@@ -498,7 +498,8 @@ lookup for a single request. The result can still populate the cache.
 | --- | --- |
 | `event=snapshot_cache_configured` | retained capacity at startup, with the automatic budget and the most an explicit `--cache-ram-bytes` may claim |
 | `schema=component-cache-v1 event=configured` | Flash-Next: committed RAM, staging and disk budgets at startup, with the automatic budget and the most an explicit `--cache-ram-bytes` may claim |
-| `schema=component-cache-v1 event=disk_evicted reason=budget` | Flash-Next: startup removed the oldest checkpoints to fit a lowered `--cache-disk-bytes` |
+| `schema=component-cache-v1 event=disk_evicted reason=budget` | Flash-Next: startup removed the earliest-published checkpoints to fit a lowered `--cache-disk-bytes` |
+| `schema=component-cache-v1 event=disk_over_budget` | Flash-Next: the directory still exceeds `--cache-disk-bytes` after startup reclamation and eviction; publication is refused until it fits |
 | `event=snapshot action=removed reason=entry_capacity` | a retained prefix was evicted because every entry was taken |
 | `event=snapshot action=skipped reason=entry_capacity` | no checkpoint record could be replaced safely for this capture |
 | `event=snapshot action=skipped reason=byte_capacity` | a checkpoint did not fit the RAM budget |

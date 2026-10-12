@@ -187,10 +187,11 @@ Disk staging is separate from this RAM budget, as are the other models'
 temporary disk-save buffers.
 The 128 checkpoint records are independent of `--sessions`; more than one can
 belong to a conversation.
-Qwen3.8-Flash-Next commits its whole budget at startup, after its execution
-sessions allocate. One pool holds checkpoint state and KV rows, partial
-tails, idle-session spill and cache metadata, so the budget is resident
-from startup instead of growing with use; there is no separate spill option.
+Qwen3.8-Flash-Next commits about 89% of its budget at startup as pinned
+pages, after its execution sessions allocate; the rest covers cache metadata
+as it grows. The pages hold checkpoint state and KV rows, partial tails and
+idle-session spill, so most of the budget is resident from startup instead of
+growing with use; there is no separate spill option.
 Other models allocate payloads only when captured. Under pressure, optional
 copies give way before another conversation's last useful checkpoint.
 
@@ -226,19 +227,20 @@ before exiting. `--cache-disk DIR` defaults to 8 GiB retained on disk.
 On Flash-Next, `--cache-disk-bytes` counts every file the cache manages,
 including temporary files of unfinished writes and files a crash left
 unreferenced. Restarting with a lower budget removes those first, then the
-oldest checkpoints, until the directory fits. One server process owns the
-directory: a second process using it fails at startup, after loading its
-model, with an ownership error naming the directory. The first start on a
-directory written by an earlier release removes its old checkpoint files
-(`*.kvc`), and the cache refills as conversations run. Do not share a
-directory between Flash-Next and other models; Flash-Next removes their
-checkpoint files too.
+earliest-published checkpoints, until the directory fits; use history does not
+survive a restart. One Flash-Next server owns the directory: a second one fails
+at startup, after loading its model but before committing its RAM budget, with
+an ownership error naming the directory. Other models do not take this lock.
+The first start on a directory written by an earlier release removes its old
+checkpoint files (`*.kvc`), and the cache refills as conversations run. Do not
+share a directory between Flash-Next and other models; Flash-Next removes
+their checkpoint and temporary files too, including writes in progress.
 `--cache-disk-staging-bytes` is Flash-Next's disk transfer buffer. Writes and
 restores stream each checkpoint through it piece by piece, so it no longer
 limits checkpoint size. `0` (the default) allocates 1 MiB of pinned host memory
 at startup; larger values allocate that much and are not needed for deep
-checkpoints. It must hold one cache row; startup reports the required size
-otherwise.
+checkpoints. It must hold one cache row (1,024 bytes); startup reports the
+required size otherwise.
 
 For the other models, `--cache-disk-staging-bytes 0` (the default) selects the
 smaller of one eighth of available host RAM after model/session loading

@@ -218,8 +218,8 @@ struct ComponentTextCache::Impl {
       throw std::runtime_error("cannot obtain cache publication nonce");
     index.Register(identity, resources->adapter->Components(), digest);
     if (options) {
-      // Disk transfers move whole rows per staging piece, so a smaller budget
-      // could never publish or restore a checkpoint.
+      // Restores and disk-only captures move whole rows per staging piece,
+      // so a smaller budget could never restore a checkpoint.
       std::size_t row_bytes{};
       for (const auto& d : resources->adapter->Components())
         if (d.kind == cache::ComponentKind::kAppendRows)
@@ -230,6 +230,10 @@ struct ComponentTextCache::Impl {
             std::to_string(ledger.Limits().staging_bytes) +
             " is smaller than one " + std::to_string(row_bytes) +
             "-byte cache row");
+      // Take directory ownership before slots and backing commit, so a
+      // second server fails without claiming its RAM budget first.
+      disk = std::make_unique<cache::DiskStore>(ledger, options->directory,
+                                                options->capacity_bytes);
     }
     for (std::size_t i = 0; i < count; ++i) {
       auto entry = std::make_unique<Entry>();
@@ -262,8 +266,6 @@ struct ComponentTextCache::Impl {
       resources->commit_backing(ram);
     }
     if (options) {
-      disk = std::make_unique<cache::DiskStore>(ledger, options->directory,
-                                                options->capacity_bytes);
       catalog = std::make_unique<cache::DiskCatalog>(ledger, *disk, index);
       for (const auto& durable : disk->Entries()) {
         cache::ExecutionHistory::ObserveDurableId(
@@ -280,18 +282,25 @@ struct ComponentTextCache::Impl {
       disk->ReclaimOrphans();
       if (disk->Stats().managed_bytes > disk_capacity) {
         // A lowered --cache-disk-bytes keeps its meaning: reclaim orphans and
-        // temporaries first, then evict the oldest checkpoints to fit.
+        // temporaries first, then evict the earliest-published checkpoints
+        // (startup has no use history) to fit.
         disk->WaitForReclamation();
         std::size_t evicted{};
         while (disk->Stats().managed_bytes > disk_capacity &&
                catalog->EvictOne())
           ++evicted;
-        Logger::Info("cache",
-                     "schema=component-cache-v1 event=disk_evicted "
-                     "reason=budget entries=" +
-                         std::to_string(evicted) + " managed_bytes=" +
-                         std::to_string(disk->Stats().managed_bytes) +
-                         " capacity_bytes=" + std::to_string(disk_capacity));
+        const auto managed = disk->Stats().managed_bytes;
+        const auto fields = " managed_bytes=" + std::to_string(managed) +
+                            " capacity_bytes=" + std::to_string(disk_capacity);
+        if (evicted)
+          Logger::Info("cache",
+                       "schema=component-cache-v1 event=disk_evicted "
+                       "reason=budget entries=" +
+                           std::to_string(evicted) + fields);
+        if (managed > disk_capacity)
+          Logger::Warn(
+              "cache",
+              "schema=component-cache-v1 event=disk_over_budget" + fields);
       }
       queue = std::make_unique<cache::PersistenceQueue>(
           ledger, *streaming, kPersistenceDepth, ram,

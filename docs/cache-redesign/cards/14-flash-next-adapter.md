@@ -219,9 +219,11 @@ does not qualify that phase or imply a speedup. Snapshot allocation/copy code
 is unchanged, and no timing tolerance or numerical contract was relaxed.
 The new cache's HTTP path remains deferred until card 19 exists and attaches it.
 Card 19 ([PR #543](https://github.com/gufo-org/gufo/pull/543)) now attaches
-the adapter on `fedeizzo/cache-staging`; the unqualified HTTP timings carry
-over to its gates in [todo.md](todo.md). Both of this card's completion
-criteria are met, so the card is done (2026-10-12).
+the adapter on `fedeizzo/cache-staging`, so HTTP qualification belongs to card
+19: its serving-latency and final-validation rows in [todo.md](todo.md)
+replace these pre-attachment observations, and restore latency from disk is
+not a merge gate there. Both of this card's completion criteria are met, so
+the card is done (2026-10-12).
 
 Reproduction (select a mode and depth explicitly):
 

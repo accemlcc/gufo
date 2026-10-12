@@ -62,69 +62,93 @@ card 19 branch. Qwen 27B and DeepSeek keep the legacy cache and its option
 meanings until their adapters land (cards 15–17); `--help`, `docs/SERVER.md`,
 `docs/KV-CACHE.md` and `docs/CLI.md` describe both.
 
-1. **RAM.** Card 19 already commits the budget at startup: serving allocates
+1. **RAM.** Card 19 already commits the backing at startup: serving allocates
    the execution slots, observes the remaining host RAM, lowers the ledger
-   limits, then commits the pool. The Flash-Next provider turns nine tenths of
-   the budget after 4 MiB into 64 KiB pages; the remainder holds index,
-   history, catalog and queue metadata. The startup line
-   (`schema=component-cache-v1 event=configured`) now also reports the
-   post-slot `automatic_bytes` and `max_bytes`, as the legacy line does, and
-   `disk_capacity_bytes`.
-2. **Staging.** The 1 MiB default came with card 12. A staging budget smaller
-   than the largest append row (1,024 bytes on Flash-Next) could
-   never publish or restore: every transfer piece holds whole rows, so each
-   publication failed as `persistence_incomplete`. Startup now rejects it
-   with the required size. The old advice to raise staging to the checkpoint
-   size for 262K Flash-Next contexts is removed: the buffer is pinned host
-   memory allocated at startup, so a large value only costs RAM.
+   limits, then commits the pool. The Flash-Next provider sizes 64 KiB pages
+   plus 1 KiB of allocator metadata each from nine tenths of the budget after
+   4 MiB, so about 89% of the budget is pinned at startup (14,350,483,456 of
+   16,198,375,424 bytes in the smoke run below). The rest is ledger headroom
+   for index, history, catalog and queue metadata, allocated as it grows. The
+   startup line (`schema=component-cache-v1 event=configured`) now also
+   reports the post-slot `automatic_bytes` and `max_bytes`, as the legacy line
+   does, and `disk_capacity_bytes`.
+2. **Staging.** The 1 MiB default came with card 12. Restores, and
+   disk-only captures of rows observed in place, move whole rows per staging
+   piece, so a budget below the largest append row (1,024 bytes on
+   Flash-Next) could never restore a checkpoint: RAM checkpoints still
+   published and used disk budget, but restores rejected them, and disk-only
+   captures failed. Startup now rejects such a budget with the required
+   size. The old advice to raise staging to the checkpoint size for 262K
+   Flash-Next contexts is removed: the buffer is pinned host memory allocated
+   at startup, so a large value only costs RAM.
 3. **Disk bytes.** The store already counted referenced, temporary and orphan
    files, but refused to open a directory above the budget, while the legacy
    store evicts to fit. A lowered `--cache-disk-bytes` now opens: serving
-   reclaims orphans and temporaries, then evicts the oldest checkpoints until
-   the directory fits, and logs `event=disk_evicted reason=budget`. The
-   publication check also refuses while the directory is above budget; it
-   previously subtracted the managed bytes from the budget unsigned, which
-   would have admitted any write.
-4. **Single process.** Card 10's `LOCK` file and `flock` already apply. A
-   second server fails at startup with `Error loading model '...': cache
+   reclaims orphans and temporaries, then evicts the earliest-published
+   checkpoints until the directory fits, and logs `event=disk_evicted
+   reason=budget` (or `event=disk_over_budget` if it cannot fit). Startup
+   evicts by publication order because the catalog does not persist use
+   history; the legacy store orders by file modification time. Opening above budget
+   made an unsigned underflow in the publication check reachable
+   (`budget - managed`), which would have admitted any write; the check now
+   refuses while the directory is above budget.
+4. **Single process.** Card 10's `LOCK` file and `flock` apply. A second
+   Flash-Next server fails at startup with `Error loading model '...': cache
    directory ownership unavailable (another process may own it): DIR` and
-   exit code 1, after loading its weights. The check stays where the store
-   opens rather than before weight loading: a restarted server would
-   otherwise fail immediately while its predecessor still drains accepted
-   disk writes.
+   exit code 1. The store now opens before the execution slots allocate and
+   the backing commits, so a losing server no longer claims its RAM budget
+   first. It still opens after the weights load. The lock does not wait, so a
+   restarted server whose predecessor is still draining disk writes fails
+   unless the predecessor finishes during the model load. Legacy-model
+   servers do not take this lock.
 5. **Records.** `RetentionPolicy::kRecordLimit` stays 128.
 
 Decisions on the open questions:
 
 - **Automatic RAM budget:** unchanged (half of the post-slot available RAM, at
-  most 32 GiB). Retention reaches the same footprint under the old cache once
-  enough checkpoints accumulate; committing at startup makes it visible
-  earlier, which is safer for co-resident servers that size themselves at
-  their own startup. `docs/KV-CACHE.md` says so next to the #556 advice to set
-  an explicit budget. Co-resident image, ASR and TTS capacity stays an open
-  resource gate in [todo.md](todo.md).
+  most 32 GiB). The old cache reached a similar footprint as checkpoints
+  accumulated; committing at startup makes it visible earlier, which is safer
+  for co-resident servers that size themselves at their own startup.
+  `docs/KV-CACHE.md` says so next to the #556 advice to set an explicit
+  budget. Co-resident image, ASR and TTS capacity stays an open resource gate
+  in [todo.md](todo.md). The 0.34 s commit-time estimate above was not
+  measured separately; the whole Flash-Next load took 21 s.
 - **Breaking change:** yes. PR #543 merged into `fedeizzo/cache-staging`
   without `!`; the pull request that brings the branch into `main` must carry
   `!` (recorded in the todo's final row).
 
 Checks: `component_text_cache_test` adds startup eviction under a lowered
-budget, the one-row staging floor and directory ownership through
-`TextRunnerPool`; `cache_disk_test` covers opening above budget, refusing
-publication until retirement, and publishing again. Each new assertion fails
-on the preceding code (startup throws `cache directory exceeds disk budget`;
-the staging check and the over-budget publication refusal were each removed
-to confirm their assertions fail). All 57 hosted contracts and the shared
-formatter pass.
+budget, the one-row staging floor with a publish/restore round trip at
+exactly one row, and directory ownership through `TextRunnerPool`, including
+that the losing server commits no backing. `cache_disk_test` covers opening
+above budget, refusing publication until retirement, and publishing again.
+Each new assertion fails on the preceding code: startup throws `cache
+directory exceeds disk budget`, and removing the staging check, the
+over-budget refusal or the early store opening each fails its assertion. All
+57 hosted contracts and the shared formatter pass.
 
-A production-build smoke run (Flash-Next AR, one session, context 16384,
-release `gufo serve llm`) checks the startup paths on gfx1151. The first
-server published two unrelated 4,741-token prompts as 251,663,008-byte
-checkpoints (503,415,538 managed bytes) and reported `capacity_bytes` and
-`automatic_bytes` 16,198,375,424 and `max_bytes` 28,101,783,552. A restart
-with `--cache-disk-bytes 503415537` logged `event=disk_evicted reason=budget
-entries=1 managed_bytes=251707769`. The newer prompt then restored 4,736 tokens
-from disk and prefilled 5, and the evicted one prefilled all 4,741. A start with
-`--cache-disk-staging-bytes 1` exited 1 with `--cache-disk-staging-bytes 1 is
-smaller than one 1024-byte cache row`. Model load took 21 s. These are
-startup and correctness observations, not timing qualification. No request
-path changes.
+Production-build smoke runs (release `gufo serve llm`, one session, context
+16384) check the startup paths on gfx1151. In AR, the first server published
+two unrelated 4,741-token prompts as 251,663,008-byte checkpoints (503,415,538
+managed bytes) and reported `capacity_bytes` and `automatic_bytes`
+16,198,375,424 and `max_bytes` 28,101,783,552. A restart with
+`--cache-disk-bytes 503415537` logged `event=disk_evicted reason=budget
+entries=1 managed_bytes=251707769`; the newer prompt then restored 4,736 tokens
+from disk and prefilled 5, and the evicted one prefilled all 4,741. A start
+with `--cache-disk-staging-bytes 1` exited 1 with `--cache-disk-staging-bytes 1
+is smaller than one 1024-byte cache row`. Model load took 21 s. These AR
+runs used `8397d793`. On the review revision (binary SHA-256 in the evidence directory), the same
+MTP smoke run published 263,080,352-byte checkpoints, evicted one entry under a
+budget one byte below the 526,253,734 managed bytes, restored 4,736 tokens and
+prefilled 5 for the newer prompt, executed MTP draft rounds, and rejected
+1-byte staging with the same message. The AR disk lifecycle runner
+(`cache_lifecycle.py`, context 32768, one session, default 2 GiB staging)
+passed restart, tiered, oversized (a 473,634,676-byte checkpoint through 1 MiB
+staging), crash and side-traffic. The AR `cache` suite (`run.py
+--record-baseline --suite cache`, two sessions, context 32768) passed all
+eight cases, including the disk variants.
+These are startup and correctness observations, not timing qualification;
+the request path is unchanged.
+
+Evidence: `/home/mixer/gufo-qualification/d4-options-2026-10-12` (`smoke.py`,
+`run-gpu.sh`, server logs, `results.json`, candidate binary and SHA-256).
