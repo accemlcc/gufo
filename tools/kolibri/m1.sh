@@ -7,6 +7,13 @@
 #   - /work inside the container is a bind mount of the source directory on the
 #     remote host, so a synced file is immediately visible to the compiler and
 #     the binary it produces also exists on the remote host.
+#   - a fresh build directory needs HIP named explicitly, because the toolchain
+#     lives in a bind mount CMake does not search on its own:
+#       cmake -B build/gpu-test -G Ninja -DCMAKE_BUILD_TYPE=Release \
+#             -DENGINE_BUILD_TESTS=ON -DENGINE_ENABLE_HIP=ON \
+#             -DCMAKE_HIP_COMPILER=/opt/rocm/lib/llvm/bin/clang++
+#   - KOLIBRI_REMOTE_SRC and KOLIBRI_CONTAINER pick another source tree and
+#     container, which is how parallel work on the one GPU stays apart.
 #   - the model-backed checks read a 45 GB artifact that is not mounted into the
 #     container. They run on the remote host instead, which has ROCm too.
 #
@@ -69,9 +76,11 @@ case "$command" in
     # the build container's tree to a shared path and then into the other one.
     sync
     in_container "cmake --build $build_dir --target ${1}_test -j8 2>&1 | tail -8"
-    ssh "$remote" "cp $remote_src/$build_dir/tests/models/kolibri1/${1}_test /tmp/kolibri_test.bin && \
-                   podman cp /tmp/kolibri_test.bin $gpu_container:/tmp/kolibri_test && \
-                   podman exec -e KOLIBRI_TIME=${KOLIBRI_TIME:-0} $gpu_container bash -lc 'LD_LIBRARY_PATH=/opt/rocm/lib /tmp/kolibri_test'"
+    # Named after the check so two people on the one GPU do not overwrite each
+    # other's binary on the way across.
+    ssh "$remote" "cp $remote_src/$build_dir/tests/models/kolibri1/${1}_test /tmp/${1}.bin && \
+                   podman cp /tmp/${1}.bin $gpu_container:/tmp/${1} && \
+                   podman exec -e KOLIBRI_TIME=${KOLIBRI_TIME:-0} $gpu_container bash -lc 'LD_LIBRARY_PATH=/opt/rocm/lib /tmp/${1}'"
     ;;
   suite)
     sync
