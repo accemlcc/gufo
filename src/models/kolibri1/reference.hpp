@@ -24,12 +24,9 @@ namespace gufo::models::kolibri1 {
 /// no renormalisation, and the one ungated shared expert added with weight 1.
 class Reference {
  public:
-  /// kFloat32 keeps K/V exact; kHalfKv rounds stored K/V through binary16 as
-  /// the GPU cache does; kQ8Activations additionally rounds every input of a
-  /// quantized projection to Q8_1 blocks (32 values, binary16 scale), the
-  /// activation format of the integer GEMV kernels. The last two separate
-  /// operator semantics from activation rounding.
-
+  /// K/V stays in double and activations are never rounded, so a difference
+  /// against the device path is the operators and the cache format, not the
+  /// arithmetic the kernels cannot avoid.
   explicit Reference(const ModelWeights& weights);
 
   /// Appends `tokens` (GGUF vocabulary ids) after the current position.
