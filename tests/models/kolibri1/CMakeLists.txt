@@ -14,3 +14,10 @@ endfunction()
 
 add_kolibri1_test(artifact gufo_kolibri1 "cpu;external-model")
 add_kolibri1_test(config gufo_kolibri1 "cpu")
+
+# The oracle is checked against a NumPy fixture of the same tiny artifact;
+# both must implement the graph independently, so the check is slow in
+# debug builds and keeps -O2.
+add_kolibri1_test(reference gufo_kolibri1_reference "cpu;slow")
+target_compile_definitions(kolibri1_reference_test PRIVATE
+  GUFO_KOLIBRI1_FIXTURES="${PROJECT_SOURCE_DIR}/tests/models/kolibri1/fixtures")
