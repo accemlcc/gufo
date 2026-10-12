@@ -269,9 +269,13 @@ void Executor::Experts(const DeviceLayer& l, const float* h,
              stream_);
     // A grouped launch declines a shape it is not written for; running on
     // without its output would mix stale activations into the residual.
+    // The launch bound is the number of groups that can hold a slot at all,
+    // not the number of experts: a grid over all 384 makes a decode step read
+    // the count of 378 empty groups, which measured two to three times the
+    // cost of the projection itself.
     const auto Routed = [&](const DeviceTensor& w, const float* in, float* out,
                             std::uint32_t m, std::uint32_t k) {
-      if (!GroupedGemv({w.quant(), w.data, moe_groups_, experts, in, out, n,
+      if (!GroupedGemv({w.quant(), w.data, moe_groups_, n * used, in, out, n,
                         used, m, k},
                        stream_)) {
         throw std::invalid_argument("kolibri1 has no grouped kernel for " +
