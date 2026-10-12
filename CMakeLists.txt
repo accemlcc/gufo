@@ -224,9 +224,10 @@ add_library(gufo_llm_cli STATIC
   src/cli/prompt/prompt.cpp)
 target_link_libraries(gufo_llm_cli PUBLIC gufo_core)
 if(ENGINE_ENABLE_HIP)
-  target_sources(gufo_llm_cli PRIVATE src/cli/prompt/gemma4_prompt.cpp)
+  target_sources(gufo_llm_cli PRIVATE src/cli/prompt/gemma4_prompt.cpp
+    src/cli/prompt/kolibri1_prompt.cpp)
   target_link_libraries(gufo_llm_cli PUBLIC gufo_deepseek_v4_flash
-    gufo_qwen38_flash_next gufo_gemma4)
+    gufo_qwen38_flash_next gufo_gemma4 gufo_kolibri1)
 endif()
 
 add_library(gufo_logging STATIC src/cli/serve/logging.cpp src/cli/serve/trace.cpp)

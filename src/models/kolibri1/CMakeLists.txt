@@ -18,7 +18,7 @@ if (ENGINE_ENABLE_HIP)
   # The device-side model: the upload of the weights, the scratch arena and the
   # order of a layer. Host code that calls the kernels above.
   target_sources(gufo_kolibri1 PRIVATE kernels/rocm/device_model.cpp
-                     kernels/rocm/executor.cpp)
+                     kernels/rocm/executor.cpp engine.cpp)
 endif()
 
 # The oracle decodes every weight on the fly; unoptimized it is unusable even

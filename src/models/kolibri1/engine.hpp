@@ -88,6 +88,11 @@ public:
   /// Evaluates `tokens` at the positions after the current frontier and leaves
   /// the logits of the last of them in `logits()`.
   void Append(std::span<const TokenId> tokens);
+  /// Forgets the conversation: back to position zero, so the next `Append`
+  /// writes the first positions again. A client that re-renders a whole
+  /// transcript per turn needs this, and without it the second turn would
+  /// append a copy of the first instead of replacing it.
+  void Reset() noexcept;
   /// The logits of `logits().size()` values, one per vocabulary entry, of the
   /// last evaluated position.
   [[nodiscard]] std::span<const float> logits() const noexcept {

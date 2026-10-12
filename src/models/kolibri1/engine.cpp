@@ -52,6 +52,14 @@ std::unique_ptr<Session> Model::CreateSession(std::string* error_msg) const {
 Session::Session(const Model& model, std::unique_ptr<rocm::KvCache> cache)
     : model_(model), cache_(std::move(cache)) {}
 
+void Session::Reset() noexcept {
+  // Nothing to free and no marker to clear: the cache holds no length, the
+  // attention kernels read exactly the positions a forward names, and the next
+  // Append starts writing at zero again.
+  tokens_.clear();
+  logits_.clear();
+}
+
 void Session::Append(std::span<const TokenId> tokens) {
   if (tokens.empty()) {
     return;
@@ -62,7 +70,7 @@ void Session::Append(std::span<const TokenId> tokens) {
                                 " position context");
   }
   const std::uint32_t chunk =
-      static_cast<std::uint32_t>(model_.executor().max_rows());
+      static_cast<std::uint32_t>(model_.executor()->max_rows());
   std::size_t done = 0;
   while (done < tokens.size()) {
     const std::size_t n = std::min<std::size_t>(chunk, tokens.size() - done);
@@ -73,13 +81,13 @@ void Session::Append(std::span<const TokenId> tokens) {
     const std::span<const std::uint32_t> rows =
         last ? std::span<const std::uint32_t>(&frontier, 1)
              : std::span<const std::uint32_t>{};
-    model_.executor().Forward(*cache_, tokens.subspan(done, n), position(),
+    model_.executor()->Forward(*cache_, tokens.subspan(done, n), position(),
                               rows);
     tokens_.insert(tokens_.end(), tokens.begin() + done,
                    tokens.begin() + done + n);
     done += n;
   }
-  model_.executor().CopyLogits(1, &logits_);
+  model_.executor()->CopyLogits(1, &logits_);
 }
 
 }  // namespace gufo::models::kolibri1

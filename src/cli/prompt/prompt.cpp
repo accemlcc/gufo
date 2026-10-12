@@ -2,6 +2,7 @@
 
 #if defined(ENGINE_ENABLE_HIP)
 #include "src/cli/prompt/gemma4_prompt.hpp"
+#include "src/cli/prompt/kolibri1_prompt.hpp"
 #endif
 
 #include <charconv>
@@ -1024,6 +1025,9 @@ int RunPrompt(std::span<const char* const> args) {
   if (IsGemma4(*reader)) {
     return RunGemma4Prompt(opt, model_load_start);
   }
+  if (IsKolibri1(*reader)) {
+    return RunKolibri1Prompt(opt, model_load_start);
+  }
   if (opt.image_tokens != 0) {
     std::cerr << "--image-tokens applies to Gemma 4 models\n";
     return 2;
@@ -1253,6 +1257,9 @@ int RunChat(std::span<const char* const> args) {
 #if defined(ENGINE_ENABLE_HIP)
   if (IsGemma4(*reader)) {
     return RunGemma4Chat(opt, model_load_start);
+  }
+  if (IsKolibri1(*reader)) {
+    return RunKolibri1Chat(opt, model_load_start);
   }
   if (opt.image_tokens != 0) {
     std::cerr << "--image-tokens applies to Gemma 4 models\n";
