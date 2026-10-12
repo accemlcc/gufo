@@ -218,10 +218,6 @@ std::optional<Config> Config::FromGguf(const core::GgufReader& gguf,
       return std::nullopt;
     }
   }
-  if (c.GlobalLayerCount() == 0 || c.GlobalLayerCount() == c.num_layers) {
-    r.Fail("kolibri1 targets need both sliding and global layers");
-    return std::nullopt;
-  }
 
   // Routing. Every layer routes `expert_used_count` of `expert_count` and
   // adds one ungated shared expert; the weights are the unbiased sigmoid of
