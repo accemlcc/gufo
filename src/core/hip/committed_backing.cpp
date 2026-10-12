@@ -2,6 +2,8 @@
 
 #include <hip/hip_runtime.h>
 
+#include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <stdexcept>
 #include <utility>
@@ -12,6 +14,7 @@ namespace detail {
 struct BackingState {
   cache::ResourceCharge metadata;
   std::vector<cache::ResourceCharge> blocks;
+  std::atomic<std::size_t> next{};
   std::size_t block_bytes{};
   void* data{};
   ~BackingState() {
@@ -42,10 +45,11 @@ BackingPin& BackingPin::operator=(BackingPin&& other) noexcept {
   return *this;
 }
 BackingBlock::BackingBlock(std::shared_ptr<detail::BackingState> state,
-                           std::size_t index,
+                           std::size_t index, std::size_t blocks,
                            cache::ResourceReservation reservation)
     : state_(std::move(state)),
       index_(index),
+      blocks_(blocks),
       reservation_(std::move(reservation)) {}
 BackingBlock& BackingBlock::operator=(BackingBlock&& other) noexcept {
   if (this != &other) {
@@ -53,6 +57,7 @@ BackingBlock& BackingBlock::operator=(BackingBlock&& other) noexcept {
     charge_ = {};
     state_ = std::move(other.state_);
     index_ = other.index_;
+    blocks_ = other.blocks_;
     reservation_ = std::move(other.reservation_);
     charge_ = std::move(other.charge_);
   }
@@ -62,7 +67,7 @@ std::span<std::byte> BackingBlock::Bytes() const {
   if (!state_)
     throw std::logic_error("empty backing block");
   return {static_cast<std::byte*>(state_->data) + index_ * state_->block_bytes,
-          state_->block_bytes};
+          blocks_ * state_->block_bytes};
 }
 cache::ResourceAllocationInfo BackingBlock::Info() const {
   return reservation_ ? reservation_.Info() : charge_.Info();
@@ -70,15 +75,23 @@ cache::ResourceAllocationInfo BackingBlock::Info() const {
 void BackingBlock::Convert() {
   charge_ = reservation_.Convert();
 }
+cache::Payload BackingBlock::TakePayload() && {
+  if (!charge_ || reservation_)
+    throw std::logic_error("backing capture has not completed");
+  const auto bytes = Bytes();
+  auto owner = std::shared_ptr<const void>(std::move(state_), bytes.data());
+  return cache::Payload::Committed(std::move(charge_), std::move(owner));
+}
 std::shared_ptr<cache::BorrowedRows> BackingBlock::Borrow(
     cache::SlotLease& lease, cache::ComponentId component, cache::Rows first,
-    cache::Rows end, std::size_t payload_bytes) && {
+    cache::Rows end, std::size_t payload_bytes,
+    std::span<const std::byte> source) && {
   auto buffer = Bytes();
   if (!reservation_ || payload_bytes > buffer.size())
     throw std::invalid_argument("invalid borrowed backing block");
   auto owner = std::shared_ptr<const void>(std::move(state_), buffer.data());
   return lease.Borrow(component, first, end, std::move(reservation_),
-                      std::move(owner), buffer.first(payload_bytes));
+                      std::move(owner), buffer.first(payload_bytes), source);
 }
 BackingPin BackingBlock::PinPersistence() const {
   return BackingPin(state_, reservation_ ? reservation_.PinPersistence()
@@ -135,19 +148,39 @@ CommittedBackingPool::CommittedBackingPool(cache::ResourceLedger& ledger,
   state_ = std::move(state);
 }
 std::optional<BackingBlock> CommittedBackingPool::TryAcquire(
-    cache::ResourceCategory category) {
-  // Validate even for an empty pool.
+    cache::ResourceCategory category, std::size_t payload_bytes) {
   if (category != cache::ResourceCategory::kBackingAssigned &&
       category != cache::ResourceCategory::kPrivateState &&
       category != cache::ResourceCategory::kPrivateTail)
     throw std::invalid_argument("invalid backing assignment category");
-  for (std::size_t i = 0; i < state_->blocks.size(); ++i) {
-    try {
-      return BackingBlock(state_, i,
-                          state_->blocks[i].ReserveBacking(category));
-    } catch (const std::bad_alloc&) {
-      // No payload allocation on exhaustion or an assignment race.
+  const auto count = state_->blocks.size();
+  const auto blocks =
+      payload_bytes ? 1 + (payload_bytes - 1) / state_->block_bytes : 1;
+  if (blocks > count)
+    return std::nullopt;
+  auto i = state_->next.load(std::memory_order_relaxed);
+  for (std::size_t tried = 0; tried < count;) {
+    // An occupied page rules out every candidate run that crosses it. Skip
+    // without allocating assignment bookkeeping, including full exhaustion.
+    std::size_t free = 0;
+    while (free < blocks && i + free < count &&
+           state_->blocks[i + free].Info().category ==
+               cache::ResourceCategory::kBackingFree)
+      ++free;
+    if (free == blocks) {
+      try {
+        auto reservation = cache::ResourceCharge::ReserveBacking(
+            std::span(state_->blocks).subspan(i, blocks), category);
+        state_->next.store(i + blocks == count ? 0 : i + blocks,
+                           std::memory_order_relaxed);
+        return BackingBlock(state_, i, blocks, std::move(reservation));
+      } catch (const std::bad_alloc&) {
+        // A racing assignment or injected bookkeeping failure is atomic.
+      }
     }
+    const auto step = free < blocks ? std::min(free + 1, count - i) : 1;
+    tried += step;
+    i = i + step >= count ? 0 : i + step;
   }
   return std::nullopt;
 }

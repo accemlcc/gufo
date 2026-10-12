@@ -19,6 +19,7 @@ using Category = cache::ResourceCategory;
 using Result = cache::TransferResult;
 namespace {
 std::atomic<std::size_t> allocations{};
+std::atomic<std::size_t> host_allocations{};
 std::atomic<std::size_t> max_piece{};
 bool fail_copy{}, fail_record{}, fail_query{}, fail_wait{}, fail_alloc{};
 int copies_before_failure{};
@@ -26,6 +27,7 @@ thread_local bool fail_stream_new{}, observe_allocation_cleanup{};
 std::atomic<unsigned> allocation_cleanup_drains{};
 }  // namespace
 void* operator new(std::size_t size) {
+  ++host_allocations;
   if (fail_stream_new && size == sizeof(hip::TransferStream)) {
     fail_stream_new = false;
     throw std::bad_alloc();
@@ -197,6 +199,34 @@ void Backing() {
     assert(empty.CommittedBytes() == 0 &&
            !empty.TryAcquire(Category::kPrivateTail));
   }
+  // Filling a large pool must not repeatedly allocate assignment tokens for
+  // its occupied prefix. Repeat after release to exercise cursor wraparound.
+  {
+    constexpr std::size_t count = 128;
+    constexpr std::size_t headroom = (count + 4) * 1024;
+    constexpr std::size_t capacity = count * block_bytes + headroom;
+    cache::ResourceLedger large_ledger(Limits(capacity));
+    hip::CommittedBackingPool large(large_ledger,
+                                    {capacity, block_bytes, headroom});
+    std::vector<hip::BackingBlock> held;
+    held.reserve(count);
+    for (unsigned iteration = 0; iteration < 3; ++iteration) {
+      const auto before_host = host_allocations.load();
+      for (std::size_t i = 0; i < count; ++i) {
+        auto block = large.TryAcquire(Category::kPrivateTail);
+        assert(block);
+        held.push_back(std::move(*block));
+      }
+      assert(host_allocations - before_host <= 2 * count);
+      const auto before_full = host_allocations.load();
+      assert(!large.TryAcquire(Category::kPrivateTail));
+      assert(host_allocations.load() == before_full);
+      held.clear();
+      assert(large_ledger.Snapshot()
+                 .bytes[static_cast<std::size_t>(Category::kBackingFree)] ==
+             count * block_bytes);
+    }
+  }
   // Competing borrowers may never own the same physical block.
   hip::CommittedBackingPool pool(ledger, {budget, block_bytes, metadata});
   std::atomic<unsigned> active{};
@@ -220,6 +250,69 @@ void Backing() {
   }
   threads.clear();
   assert(allocations == before);
+}
+void GroupedBacking() {
+  constexpr std::size_t pages = 12, headroom = 16 << 10;
+  constexpr std::size_t capacity = pages * block_bytes + headroom;
+  cache::ResourceLedger ledger(Limits(capacity));
+  std::optional<hip::BackingPin> pin;
+  std::byte* base{};
+  const auto physical = allocations.load();
+  {
+    hip::CommittedBackingPool pool(ledger, {capacity, block_bytes, headroom});
+    auto first = pool.TryAcquire(Category::kPrivateState, 3 * block_bytes - 1);
+    assert(first && first->Bytes().size() == 3 * block_bytes);
+    base = first->Bytes().data();
+    std::fill(first->Bytes().begin(), first->Bytes().end(), std::byte{42});
+    first->Convert();
+    auto second = pool.TryAcquire(Category::kBackingAssigned, 9 * block_bytes);
+    assert(second && second->Bytes().data() == base + 3 * block_bytes);
+    const auto full = host_allocations.load();
+    assert(!pool.TryAcquire(Category::kPrivateTail, 2 * block_bytes));
+    assert(host_allocations.load() == full);
+    first.reset();
+    auto reused = pool.TryAcquire(Category::kPrivateTail, 3 * block_bytes);
+    assert(reused && reused->Bytes().data() == base);
+    reused.reset();
+    second.reset();
+    // Capacity released by a row group immediately serves a larger private
+    // state, without another physical allocation or class-specific capacity.
+    auto whole = pool.TryAcquire(Category::kPrivateState, pages * block_bytes);
+    assert(whole && whole->Bytes().data() == base);
+    whole->Convert();
+    pin.emplace(whole->PinPersistence());
+    assert(ledger.Snapshot().persistence_pinned_bytes == pages * block_bytes);
+    whole.reset();
+    assert(!pool.TryAcquire(Category::kPrivateTail));
+    pin.reset();
+    std::atomic<unsigned> active{};
+    std::vector<std::jthread> threads;
+    for (int thread = 0; thread < 8; ++thread)
+      threads.emplace_back([&, thread] {
+        const auto n = 2 + thread % 2;
+        for (int iteration = 0; iteration < 100; ++iteration) {
+          auto group = pool.TryAcquire(Category::kPrivateTail, n * block_bytes);
+          if (!group)
+            continue;
+          const auto index = (group->Bytes().data() - base) / block_bytes;
+          const unsigned mask = ((1u << n) - 1) << index;
+          assert(!(active.fetch_or(mask) & mask));
+          group->Convert();
+          assert((active.fetch_and(~mask) & mask) == mask);
+        }
+      });
+    threads.clear();
+    assert(!active);
+    auto last = pool.TryAcquire(Category::kPrivateState, 4 * block_bytes);
+    last->Convert();
+    pin.emplace(last->PinPersistence());
+    assert(pool.PageCommitAllocations() == 1 && allocations == physical + 1);
+  }
+  // Every page and its physical owner survive destruction of the facade.
+  base[4 * block_bytes - 1] = std::byte{17};
+  assert(ledger.Snapshot().total_bytes == capacity);
+  pin.reset();
+  assert(ledger.Snapshot().total_bytes == 0);
 }
 void Transfers() {
   cache::ResourceLedger ledger(Limits());
@@ -418,6 +511,7 @@ int main() {
   assert(hipGetDeviceProperties(&properties, 0) == hipSuccess);
   assert(std::strncmp(properties.gcnArchName, "gfx1151", 7) == 0);
   Backing();
+  GroupedBacking();
   Transfers();
   LifetimeAndFailures();
   PendingStreams();

@@ -11,6 +11,7 @@
 #include "src/cache/disk.hpp"
 
 namespace gufo::cache {
+class BorrowedRows;
 inline constexpr std::size_t kDefaultDiskStagingBytes = 1ULL << 20;
 struct StagingAllocation {
   std::shared_ptr<void> owner;
@@ -25,10 +26,10 @@ struct TransferTiming {
   std::uint64_t yield_ns{}, bytes{}, pieces{};
   std::uint64_t staging_wait_ns{}, io_lock_ns{};
 };
-// The owner and charge describe committed immutable source storage, not a live
-// execution slot. A borrowed source must have completed preservation first.
-// Copy settles via Completion on a leased stream. Its callback and owner must
-// retain all source-specific metadata; no capture occurs in the queue worker.
+// Sources retain immutable storage, assigned spill backing or discardable
+// observations. Backed borrowers wait for preservation before disk work;
+// observations pin one native piece until its leased transfer completes.
+// Capture supplies private state/tails before submitting a job to the queue.
 class PersistenceSource {
 public:
   using Copy =
@@ -36,6 +37,17 @@ public:
   PersistenceSource(bool private_file, DiskFileId, std::uint64_t bytes,
                     std::size_t alignment, ResourceCharge,
                     std::shared_ptr<const void> owner, Copy);
+  PersistenceSource(bool private_file, DiskFileId, std::uint64_t bytes,
+                    std::size_t alignment, std::shared_ptr<BorrowedRows>);
+  // Discardable live rows, for histories exceeding RAM. Reads pin exactly
+  // one staging piece through completion; mutation retires unread sources.
+  // Private state/tails remain immutable committed copies. No publication
+  // completes with unread retired rows. No full-history backing is assigned.
+  using CopyRows = std::function<Completion(std::span<const std::byte>,
+                                            std::span<std::byte>, Stream&)>;
+  PersistenceSource(bool private_file, DiskFileId, std::uint64_t bytes,
+                    std::size_t alignment, std::shared_ptr<BorrowedRows>,
+                    std::size_t first_byte, CopyRows);
   PersistenceSource(PersistenceSource&&) noexcept = default;
   PersistenceSource& operator=(PersistenceSource&&) = delete;
   PersistenceSource(const PersistenceSource&) = delete;
@@ -44,9 +56,12 @@ private:
   friend class StreamedStore;
   friend class PersistenceJob;
   friend class PersistenceQueue;
+  [[nodiscard]] PersistencePin Pin() const;
+  [[nodiscard]] std::size_t Capacity() const;
   ResourceCharge charge_;
   PersistencePin pin_;
   std::shared_ptr<const void> owner_;
+  std::shared_ptr<BorrowedRows> rows_;
   Copy copy_;
   bool private_file_;
   DiskFileId file_;
@@ -99,9 +114,11 @@ private:
   DiskManifest manifest_;
   std::vector<PersistenceSource> sources_;
   std::size_t pinned_bytes_{};
+  std::uint64_t submitted_{};
 };
 struct PersistenceQueueStats {
-  std::uint64_t accepted{}, skipped{}, coalesced{}, completed{}, failed{};
+  std::uint64_t accepted{}, skipped{}, coalesced{}, superseded{}, completed{},
+      failed{};
   std::size_t pending{}, pinned_bytes{}, peak_pending{}, peak_pinned_bytes{};
   TransferTiming timing;
 };
@@ -110,11 +127,17 @@ struct PersistenceQueueStats {
 // joins. Callbacks must be thread-safe, nonblocking and outlive the queue.
 // Model idle is checked between pieces, without holding metadata or
 // device-source locks.
+// Keep the first pending boundary and coalesce later pending ancestors into
+// their newest descendant. Under pressure, recent jobs
+// may replace the oldest pending non-learned job; active writes are untouched.
+// Completion reports false for superseded work, outside the queue lock.
 class PersistenceQueue {
 public:
   PersistenceQueue(ResourceLedger&, StreamedStore&, std::size_t max_depth,
                    std::size_t max_pinned_bytes,
-                   std::function<bool()> model_idle);
+                   std::function<bool()> model_idle,
+                   std::function<void(CheckpointId, bool)> completed = {},
+                   std::function<bool(const DiskManifest&)> reclaim = {});
   ~PersistenceQueue();
   PersistenceQueue(const PersistenceQueue&) = delete;
   PersistenceQueue& operator=(const PersistenceQueue&) = delete;

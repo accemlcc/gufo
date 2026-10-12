@@ -6,6 +6,7 @@
 #include <optional>
 #include <span>
 
+#include "src/cache/checkpoint.hpp"
 #include "src/cache/ledger.hpp"
 #include "src/cache/slot.hpp"
 
@@ -41,20 +42,22 @@ public:
   [[nodiscard]] std::span<std::byte> Bytes() const;
   [[nodiscard]] cache::ResourceAllocationInfo Info() const;
   void Convert();
+  [[nodiscard]] cache::Payload TakePayload() &&;
   // Consume an unconverted assigned block as borrowed checkpoint backing.
   // Payload is a prefix of the block; accounting still charges full capacity.
   // The row handle retains the slab after this block/pool facade is destroyed.
   [[nodiscard]] std::shared_ptr<cache::BorrowedRows> Borrow(
       cache::SlotLease&, cache::ComponentId, cache::Rows first, cache::Rows end,
-      std::size_t payload_bytes) &&;
+      std::size_t payload_bytes, std::span<const std::byte> source = {}) &&;
   [[nodiscard]] BackingPin PinPersistence() const;
 
 private:
   friend class CommittedBackingPool;
-  BackingBlock(std::shared_ptr<detail::BackingState>, std::size_t,
+  BackingBlock(std::shared_ptr<detail::BackingState>, std::size_t, std::size_t,
                cache::ResourceReservation);
   std::shared_ptr<detail::BackingState> state_;
   std::size_t index_;
+  std::size_t blocks_;
   cache::ResourceReservation reservation_;
   cache::ResourceCharge charge_;
 };
@@ -73,7 +76,8 @@ public:
   // allocates and touches all payload pages. No refill or resize API exists.
   CommittedBackingPool(cache::ResourceLedger&, BackingPoolConfig);
   // Thread safe. Races/bad_alloc try other blocks, then decline capture.
-  [[nodiscard]] std::optional<BackingBlock> TryAcquire(cache::ResourceCategory);
+  [[nodiscard]] std::optional<BackingBlock> TryAcquire(
+      cache::ResourceCategory, std::size_t payload_bytes = 0);
   [[nodiscard]] std::size_t BlockCount() const noexcept;
   [[nodiscard]] std::size_t CommittedBytes() const noexcept;
   [[nodiscard]] std::size_t PageCommitAllocations() const noexcept;
