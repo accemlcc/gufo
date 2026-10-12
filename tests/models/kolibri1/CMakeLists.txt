@@ -14,6 +14,7 @@ endfunction()
 
 add_kolibri1_test(artifact gufo_kolibri1 "cpu;external-model")
 add_kolibri1_test(config gufo_kolibri1 "cpu")
+add_kolibri1_test(chat_template gufo_kolibri1 "cpu;tokenization")
 add_kolibri1_test(tokenizer gufo_kolibri1 "cpu;tokenization")
 add_kolibri1_test(tokenizer_model gufo_kolibri1
   "cpu;tokenization;external-model")

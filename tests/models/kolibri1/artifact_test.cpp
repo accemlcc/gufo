@@ -4,6 +4,7 @@
 //
 // Set GUFO_KOLIBRI1_MODEL to a Kolibri-1 GGUF; without it the check skips (77)
 // and the hosted suite never needs the file.
+#include "src/models/kolibri1/chat_template.hpp"
 #include "src/models/kolibri1/weights.hpp"
 
 #include <cstdint>
@@ -130,9 +131,16 @@ int main() {
     Require(reader != nullptr, error);
     const auto weights = k1::ModelWeights::Bind(*reader, &error);
     Require(weights.has_value(), "artifact rejected: " + error);
+    // The renderer is compiled against one revision of the template; a file
+    // carrying a different one must be refused at load, not silently rendered.
+    std::string template_error;
+    Require(k1::ChatTemplate::ValidateGgufTemplate(*reader, &template_error),
+            "chat template: " + template_error);
     CheckConfig(weights->config);
     CheckLayout(*weights);
     CheckQuantMix(*weights);
+    std::cout << "qualified chat template " << k1::ChatTemplate::TemplateId()
+              << "\n";
     std::cout << "bound " << weights->config.num_layers << " layers, "
               << weights->config.num_experts << " experts, vocab "
               << weights->VocabSize() << "\n";
