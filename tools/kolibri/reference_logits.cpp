@@ -13,8 +13,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "src/core/gguf_reader.hpp"
@@ -109,12 +111,26 @@ int main(int argc, char** argv) {
   if (!weights.has_value()) {
     return Fail("artifact rejected: " + error) ? 0 : 1;
   }
-  // GUFO_KOLIBRI_TRACE=dir writes the residual after every layer, which is how
-  // a divergence gets localised to one layer instead of the whole forward.
+  // The oracle is deliberately exact: dequantised weights read straight from
+  // the artifact, F64 accumulators, F32 cache. Measured against the patched
+  // llama.cpp build it differs by about 5e-4 relative per projection already in
+  // layer 0, and that grows to a logit spread of ~3 over the 50 layers, because
+  // llama's CPU matmul feeds its quantised weights an int8 copy of the
+  // activation. None of that is a semantics difference - on an all-F32 artifact
+  // the two agree per operator to ~1e-6 - so the oracle stays exact and the
+  // kernels are validated against it, not against llama's CPU rounding.
   gufo::models::kolibri1::Reference reference(*weights);
   const char* trace_dir = std::getenv("GUFO_KOLIBRI_TRACE");
   if (trace_dir != nullptr && *trace_dir != '\0') {
     reference.SetTrace(true);
+  }
+  // GUFO_KOLIBRI_STAGES=dir additionally dumps the named intermediates the
+  // reference graph traces, so a divergence can be pinned to one operator
+  // rather than to one layer. It reflects the last prompt, like the layer
+  // trace does.
+  const char* stage_dir = std::getenv("GUFO_KOLIBRI_STAGES");
+  if (stage_dir != nullptr && *stage_dir != '\0') {
+    reference.SetStageTrace(true);
   }
   const std::size_t vocab = weights->VocabSize();
 
@@ -199,6 +215,40 @@ int main(int argc, char** argv) {
     }
     layer_out << "]}\n";
     std::fprintf(stderr, "wrote %s\n", path.c_str());
+  }
+  if (stage_dir != nullptr && *stage_dir != '\0') {
+    // Same shape as the llama.cpp side writes, so one comparer can diff the
+    // two by name. Values are flat row-major [row][feature] like every tensor
+    // here except the weights.
+    const std::map<std::string, std::vector<float>>& stages =
+        reference.StageTrace();
+    const std::string path = std::string(stage_dir) + "/stages.json";
+    std::ofstream stage_out(path);
+    if (!stage_out) {
+      return Fail("cannot write " + path) ? 0 : 1;
+    }
+    stage_out.precision(9);
+    stage_out << "{\"rows\": " << prompts.back().size()
+              << ", \"hidden\": " << weights->config.hidden_size
+              << ", \"stages\": {";
+    bool first = true;
+    for (const auto& entry : stages) {
+      if (!first) {
+        stage_out << ", ";
+      }
+      first = false;
+      stage_out << '"' << entry.first << "\": [";
+      for (std::size_t i = 0; i < entry.second.size(); ++i) {
+        if (i != 0) {
+          stage_out << ',';
+        }
+        stage_out << entry.second[i];
+      }
+      stage_out << ']';
+    }
+    stage_out << "}}\n";
+    std::fprintf(stderr, "wrote %s (%zu stages)\n", path.c_str(),
+                 stages.size());
   }
   return 0;
 }

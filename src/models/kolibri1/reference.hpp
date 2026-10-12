@@ -2,7 +2,9 @@
 #define GUFO_MODELS_KOLIBRI1_REFERENCE_HPP_
 
 #include <cstdint>
+#include <map>
 #include <span>
+#include <string>
 #include <vector>
 
 #include "src/models/kolibri1/weights.hpp"
@@ -27,10 +29,8 @@ class Reference {
   /// quantized projection to Q8_1 blocks (32 values, binary16 scale), the
   /// activation format of the integer GEMV kernels. The last two separate
   /// operator semantics from activation rounding.
-  enum class Storage { kFloat32, kHalfKv, kQ8Activations };
 
-  explicit Reference(const ModelWeights& weights,
-                     Storage storage = Storage::kFloat32);
+  explicit Reference(const ModelWeights& weights);
 
   /// Appends `tokens` (GGUF vocabulary ids) after the current position.
   /// `logits` receives [tokens.size()][vocab] rows and `hidden` the post-norm
@@ -47,6 +47,20 @@ class Reference {
     return layer_trace_;
   }
 
+  /// Additionally records named intermediates under the names the reference
+  /// graph gives its callbacks: `attn_norm-<l>`, `Qcur_normed-<l>`,
+  /// `Qcur_rope-<l>`, `Kcur_normed-<l>`, `Kcur_rope-<l>`, `attn_out-<l>`,
+  /// `attn_post_norm-<l>`, `ffn_inp-<l>`, `ffn_norm-<l>`, `ffn_moe_out-<l>`,
+  /// `ffn_shexp-<l>`, `ffn_out-<l>`, `ffn_post_norm-<l>`, `l_out-<l>` and
+  /// `result_norm`. Each blob is row-major with the innermost axis matching
+  /// ggml's fastest axis, so a row of a llama.cpp tensor and a row here have
+  /// the same element order and one operator can be compared on its own.
+  void SetStageTrace(bool enabled) noexcept { stage_trace_enabled_ = enabled; }
+  [[nodiscard]] const std::map<std::string, std::vector<float>>& StageTrace()
+      const noexcept {
+    return stage_trace_;
+  }
+
   [[nodiscard]] std::uint32_t Position() const noexcept { return position_; }
   void Reset();
 
@@ -57,18 +71,23 @@ class Reference {
   /// Attention over the layer's cache, which already holds the new rows.
   void Attention(std::uint32_t layer, const float* q, std::size_t rows,
                  float* out) const;
-  /// Routed mixture plus the shared expert, written to `out`.
+  /// Routed experts into `routed` and the one shared expert into `shared`,
+  /// separately because the reference graph traces them separately. Either may
+  /// be null.
   void Mixture(const LayerWeights& w, const float* x, std::size_t rows,
-               float* out) const;
+               float* routed, float* shared) const;
+  /// Stores one named intermediate when stage tracing is on.
+  void Stage(const std::string& name, const float* data, std::size_t count);
 
   const ModelWeights& weights_;
-  Storage storage_;
   /// Per layer: [position][kv_heads][head_dim], K stored after RoPE.
   std::vector<std::vector<float>> keys_;
   std::vector<std::vector<float>> values_;
   std::vector<float> layer_trace_;
+  std::map<std::string, std::vector<float>> stage_trace_;
   std::uint32_t position_{0};
   bool trace_{false};
+  bool stage_trace_enabled_{false};
 };
 
 }  // namespace gufo::models::kolibri1

@@ -3,33 +3,12 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <string>
 
 #include "src/core/quant/ggml_gemm.hpp"
 
 namespace gufo::models::kolibri1 {
 namespace {
-
-/// Round-to-nearest-even through binary16, including subnormals.
-float RoundHalf(float x) {
-  return static_cast<float>(static_cast<_Float16>(x));
-}
-
-/// Q8_1 round trip: per 32 values d = amax / 127 (stored as binary16) and
-/// q = round(x / d), as ggml's quantize_row_q8_1.
-void RoundQ8(const float* x, std::size_t n, float* y) {
-  for (std::size_t b = 0; b < n; b += 32) {
-    float amax = 0.0F;
-    for (std::size_t i = b; i < b + 32; ++i) {
-      amax = std::max(amax, std::fabs(x[i]));
-    }
-    const float d = amax / 127.0F;
-    const float id = d != 0.0F ? 1.0F / d : 0.0F;
-    const float d_half = RoundHalf(d);
-    for (std::size_t i = b; i < b + 32; ++i) {
-      y[i] = std::round(x[i] * id) * d_half;
-    }
-  }
-}
 
 /// y = x * rsqrt(mean(x^2) + eps) * w; `w` null means an unweighted norm.
 void RmsNorm(const float* x, const float* w, std::size_t n, float eps,
@@ -82,8 +61,7 @@ double Silu(double x) { return x * Sigmoid(x); }
 
 }  // namespace
 
-Reference::Reference(const ModelWeights& weights, Storage storage)
-    : weights_(weights), storage_(storage) {
+Reference::Reference(const ModelWeights& weights) : weights_(weights) {
   Reset();
 }
 
@@ -92,21 +70,13 @@ void Reference::Reset() {
   keys_.assign(weights_.config.num_layers, {});
   values_.assign(weights_.config.num_layers, {});
   layer_trace_.clear();
+  stage_trace_.clear();
 }
 
 void Reference::MatMul(const TensorRef& weight, const float* x_in,
                        std::size_t rows, float* out) const {
   const std::size_t cols = weight.cols;
-  std::vector<float> rounded;
   const float* x = x_in;
-  if (storage_ == Storage::kQ8Activations &&
-      weight.type != core::GgmlType::kF32) {
-    rounded.resize(rows * cols);
-    for (std::size_t r = 0; r < rows; ++r) {
-      RoundQ8(x_in + r * cols, cols, rounded.data() + r * cols);
-    }
-    x = rounded.data();
-  }
   const std::size_t outputs = weight.rows;
   const std::size_t row_bytes = weight.RowBytes();
   std::vector<float> w(cols);
@@ -183,12 +153,20 @@ void Reference::Attention(std::uint32_t layer, const float* q, std::size_t rows,
   }
 }
 
+void Reference::Stage(const std::string& name, const float* data,
+                      std::size_t count) {
+  if (!stage_trace_enabled_) {
+    return;
+  }
+  stage_trace_[name].assign(data, data + count);
+}
+
 void Reference::Mixture(const LayerWeights& w, const float* x, std::size_t rows,
-                        float* out) const {
+                        float* routed, float* shared) const {
   const Config& c = weights_.config;
   const std::size_t d = c.hidden_size;
-  const std::size_t experts = c.num_experts;
   const std::size_t width = c.expert_ffn_size;
+  const std::size_t experts = c.num_experts;
 
   // The router scores every expert in F32. Its bias moves the selection only;
   // the weight a chosen expert contributes is the unbiased sigmoid.
@@ -196,7 +174,13 @@ void Reference::Mixture(const LayerWeights& w, const float* x, std::size_t rows,
   MatMul(w.router, x, rows, logits.data());
   const float* bias = Vec(w.router_bias);
 
-  std::fill(out, out + rows * d, 0.0F);
+  // Either output may be dropped; a null pointer gets a scratch buffer so the
+  // arithmetic below stays one path.
+  std::vector<float> scratch(rows * d);
+  if (routed == nullptr) {
+    routed = scratch.data();
+  }
+  std::fill(routed, routed + rows * d, 0.0F);
   std::vector<std::size_t> order(experts);
   std::vector<float> gate(width);
   std::vector<float> up(width);
@@ -223,8 +207,8 @@ void Reference::Mixture(const LayerWeights& w, const float* x, std::size_t rows,
       }
       MatMul(Slice(w.down_exps, e), act.data(), 1, down.data());
       for (std::size_t i = 0; i < d; ++i) {
-        out[r * d + i] =
-            static_cast<float>(static_cast<double>(out[r * d + i]) +
+        routed[r * d + i] =
+            static_cast<float>(static_cast<double>(routed[r * d + i]) +
                                weight * down[i]);
       }
     }
@@ -240,8 +224,8 @@ void Reference::Mixture(const LayerWeights& w, const float* x, std::size_t rows,
     sh_gate[i] = static_cast<float>(Silu(sh_gate[i]) * sh_up[i]);
   }
   MatMul(w.down_shexp, sh_gate.data(), rows, shared_out.data());
-  for (std::size_t i = 0; i < rows * d; ++i) {
-    out[i] = static_cast<float>(static_cast<double>(out[i]) + shared_out[i]);
+  if (shared != nullptr) {
+    std::copy(shared_out.begin(), shared_out.end(), shared);
   }
 }
 
@@ -276,7 +260,10 @@ void Reference::Forward(std::span<const std::int32_t> tokens,
   std::vector<float> v(n * c.KvDim(0));
   std::vector<float> attn(n * c.QDim());
   std::vector<float> branch(n * d);
+  std::vector<float> routed(n * d);
+  std::vector<float> shared(n * d);
   for (std::uint32_t l = 0; l < c.num_layers; ++l) {
+    const std::string at = "-" + std::to_string(l);
     const LayerWeights& w = weights_.layers[l];
     const std::size_t kv_heads = c.kv_heads[l];
     q.assign(n * c.QDim(), 0.0F);
@@ -286,55 +273,78 @@ void Reference::Forward(std::span<const std::int32_t> tokens,
     for (std::size_t r = 0; r < n; ++r) {
       RmsNorm(&x[r * d], Vec(w.attn_norm), d, eps, &h[r * d]);
     }
+    Stage("attn_norm" + at, h.data(), h.size());
     MatMul(w.attn_q, h.data(), n, q.data());
     MatMul(w.attn_k, h.data(), n, k.data());
     MatMul(w.attn_v, h.data(), n, v.data());
+    Stage("Vcur" + at, v.data(), v.size());
 
     // Per-head RMS norms over the head width, then RoPE where the layer has a
-    // window. V is neither normed nor rotated.
+    // window. V is neither normed nor rotated. The two passes are kept apart
+    // because the reference traces the normed and the rotated tensor apart.
     for (std::size_t r = 0; r < n; ++r) {
-      const auto pos = static_cast<std::uint32_t>(position_ + r);
       for (std::size_t hh = 0; hh < heads; ++hh) {
         float* head = &q[(r * heads + hh) * dim];
         RmsNorm(head, Vec(w.attn_q_norm), dim, eps, head);
-        if (c.UsesRope(l)) {
-          Rope(head, dim, pos, c.rope_theta);
-        }
       }
       for (std::size_t hh = 0; hh < kv_heads; ++hh) {
         float* kh = &k[(r * kv_heads + hh) * dim];
         RmsNorm(kh, Vec(w.attn_k_norm), dim, eps, kh);
-        if (c.UsesRope(l)) {
-          Rope(kh, dim, pos, c.rope_theta);
-        }
       }
     }
-    if (storage_ == Storage::kHalfKv) {
-      for (auto& value : k) value = RoundHalf(value);
-      for (auto& value : v) value = RoundHalf(value);
+    Stage("Qcur_normed" + at, q.data(), q.size());
+    Stage("Kcur_normed" + at, k.data(), k.size());
+    if (c.UsesRope(l)) {
+      for (std::size_t r = 0; r < n; ++r) {
+        const auto pos = static_cast<std::uint32_t>(position_ + r);
+        for (std::size_t hh = 0; hh < heads; ++hh) {
+          Rope(&q[(r * heads + hh) * dim], dim, pos, c.rope_theta);
+        }
+        for (std::size_t hh = 0; hh < kv_heads; ++hh) {
+          Rope(&k[(r * kv_heads + hh) * dim], dim, pos, c.rope_theta);
+        }
+      }
+      Stage("Qcur_rope" + at, q.data(), q.size());
+      Stage("Kcur_rope" + at, k.data(), k.size());
     }
     keys_[l].insert(keys_[l].end(), k.begin(), k.end());
     values_[l].insert(values_[l].end(), v.begin(), v.end());
 
     Attention(l, q.data(), n, attn.data());
     MatMul(w.attn_output, attn.data(), n, branch.data());
+    Stage("attn_out" + at, branch.data(), branch.size());
     // The sandwich norm sits on the branch output; the residual is added
     // after it and becomes the input of the mixture.
     for (std::size_t r = 0; r < n; ++r) {
       RmsNorm(&branch[r * d], Vec(w.post_attn_norm), d, eps, &branch[r * d]);
+    }
+    Stage("attn_post_norm" + at, branch.data(), branch.size());
+    for (std::size_t r = 0; r < n; ++r) {
       for (std::size_t i = 0; i < d; ++i) {
         x[r * d + i] += branch[r * d + i];
       }
       RmsNorm(&x[r * d], Vec(w.ffn_norm), d, eps, &h[r * d]);
     }
+    Stage("ffn_inp" + at, x.data(), x.size());
+    Stage("ffn_norm" + at, h.data(), h.size());
 
-    Mixture(w, h.data(), n, branch.data());
+    Mixture(w, h.data(), n, routed.data(), shared.data());
+    Stage("ffn_moe_out" + at, routed.data(), routed.size());
+    Stage("ffn_shexp" + at, shared.data(), shared.size());
+    for (std::size_t i = 0; i < n * d; ++i) {
+      branch[i] = static_cast<float>(static_cast<double>(routed[i]) + shared[i]);
+    }
+    Stage("ffn_out" + at, branch.data(), branch.size());
     for (std::size_t r = 0; r < n; ++r) {
       RmsNorm(&branch[r * d], Vec(w.post_ffn_norm), d, eps, &branch[r * d]);
+    }
+    Stage("ffn_post_norm" + at, branch.data(), branch.size());
+    for (std::size_t r = 0; r < n; ++r) {
       for (std::size_t i = 0; i < d; ++i) {
         x[r * d + i] += branch[r * d + i];
       }
     }
+    Stage("l_out" + at, x.data(), x.size());
     if (trace_) {
       std::copy(x.begin(), x.end(),
                 layer_trace_.begin() + static_cast<std::size_t>(l) * n * d);
@@ -344,6 +354,7 @@ void Reference::Forward(std::span<const std::int32_t> tokens,
   for (std::size_t r = 0; r < n; ++r) {
     RmsNorm(&x[r * d], Vec(weights_.output_norm), d, eps, &h[r * d]);
   }
+  Stage("result_norm", h.data(), h.size());
   if (hidden != nullptr) {
     *hidden = h;
   }

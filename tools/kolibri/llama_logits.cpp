@@ -11,45 +11,76 @@
 // Build: tools/kolibri/build_llama_logits.sh
 #include <llama.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <map>
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
 
-/// Residual stream after every block, collected from the graph callback. The
-/// model calls its per-layer output "l_out-<index>", which is what the callback
-/// name carries.
+/// Named intermediates collected from the graph callback. The oracle in
+/// src/models/kolibri1 records the same points under the same names, so a
+/// divergence can be attributed to one operator instead of to one layer. The
+/// model suffixes per-layer tensors with "-<index>" at build time and appends
+/// "-<il>" when the callback fires, so the keys here are already comparable.
 struct Trace {
-  std::vector<std::vector<float>> layers;
   uint32_t width{0};
+  std::map<std::string, std::vector<float>> stages;
 };
+
+constexpr std::string_view kStageNames[] = {
+    "attn_norm",  "Qcur_normed", "Qcur_rope",   "Kcur_normed",
+    "Kcur_rope",  "Vcur",        "attn_out",     "attn_post_norm",
+    "ffn_inp",    "ffn_norm",    "ffn_moe_out",  "ffn_shexp",
+    "ffn_out",    "ffn_post_norm", "l_out",      "result_norm",
+};
+
+/// Strips a trailing "-<digits>" layer suffix.
+bool SplitLayerSuffix(const std::string& name, std::string_view* base) {
+  const std::size_t dash = name.rfind('-');
+  if (dash == std::string::npos || dash + 1 >= name.size()) {
+    *base = name;
+    return false;
+  }
+  for (std::size_t i = dash + 1; i < name.size(); ++i) {
+    if (name[i] < '0' || name[i] > '9') {
+      *base = name;
+      return false;
+    }
+  }
+  *base = std::string_view(name).substr(0, dash);
+  return true;
+}
 
 bool TraceCallback(struct ggml_tensor* t, bool ask, void* user) {
   auto* trace = static_cast<Trace*>(user);
-  const std::string name = ggml_get_name(t);
-  constexpr std::string_view kPrefix = "l_out-";
-  if (name.rfind(kPrefix, 0) != 0 || t->type != GGML_TYPE_F32) {
+  if (t->type != GGML_TYPE_F32) {
     return ask ? false : true;
   }
-  if (ask) {
+  const std::string name = ggml_get_name(t);
+  std::string_view base;
+  SplitLayerSuffix(name, &base);
+  for (const std::string_view wanted : kStageNames) {
+    if (wanted != base) {
+      continue;
+    }
+    if (ask) {
+      return true;
+    }
+    std::vector<float>& dst = trace->stages[name];
+    dst.resize(static_cast<std::size_t>(ggml_nelements(t)));
+    ggml_backend_tensor_get(t, dst.data(), 0, dst.size() * sizeof(float));
+    trace->width = static_cast<uint32_t>(dst.size());
     return true;
   }
-  const auto layer = static_cast<std::size_t>(std::stoul(name.substr(kPrefix.size())));
-  if (trace->layers.size() <= layer) {
-    trace->layers.resize(layer + 1);
-  }
-  trace->width = static_cast<uint32_t>(t->ne[0]);
-  std::vector<float> data(ggml_nelements(t));
-  ggml_backend_tensor_get(t, data.data(), 0, data.size() * sizeof(float));
-  auto& dst = trace->layers[layer];
-  dst.insert(dst.end(), data.begin(), data.end());
-  return true;
+  return ask ? false : true;
 }
 
 [[noreturn]] void Die(const std::string& message) {
@@ -169,8 +200,10 @@ int main(int argc, char** argv) {
   std::fprintf(stderr, "kv cache: K=%s V=%s\n", ggml_type_name(context_params.type_k),
                ggml_type_name(context_params.type_v));
   const char* trace_path = std::getenv("GUFO_LLAMA_TRACE");
+  const char* stages_path = std::getenv("GUFO_LLAMA_STAGES");
   Trace trace;
-  if (trace_path != nullptr && *trace_path != '\0') {
+  if ((trace_path != nullptr && *trace_path != '\0') ||
+      (stages_path != nullptr && *stages_path != '\0')) {
     context_params.cb_eval = TraceCallback;
     context_params.cb_eval_user_data = &trace;
   }
@@ -188,9 +221,7 @@ int main(int argc, char** argv) {
     llama_memory_clear(llama_get_memory(ctx), /*data=*/true);
     // Keep only the latest prompt in the trace: the comparison runs one prompt
     // at a time.
-    for (auto& layer : trace.layers) {
-      layer.clear();
-    }
+    trace.stages.clear();
     // A manual batch so every position asks for logits; llama_batch_get_one
     // only flags the last one, which would hide a position-dependent mismatch.
     llama_batch batch =
@@ -264,23 +295,58 @@ int main(int argc, char** argv) {
   if (!out.good()) {
     Die("write failed");
   }
+  const std::size_t rows = prompts.back().size();
   if (trace_path != nullptr && *trace_path != '\0') {
     // Same JSON shape as reference_logits' GUFO_KOLIBRI_TRACE output: the last
     // prompt's residual stream, layer by layer.
-    const std::size_t rows = prompts.back().size();
     std::ofstream layer_out(trace_path);
     if (!layer_out) {
       Die(std::string("cannot write ") + trace_path);
     }
-    layer_out << "{\"layers\": " << trace.layers.size() << ", \"rows\": " << rows
-              << ", \"hidden\": " << trace.width << ", \"data\": [";
-    for (std::size_t i = 0; i < trace.layers.size(); ++i) {
-      for (std::size_t j = 0; j < trace.layers[i].size(); ++j) {
-        layer_out << (i == 0 && j == 0 ? "" : ",") << trace.layers[i][j];
+    std::size_t layers = 0;
+    while (trace.stages.count("l_out-" + std::to_string(layers)) != 0) {
+      ++layers;
+    }
+    const std::size_t hidden =
+        layers == 0
+            ? 0
+            : trace.stages.at("l_out-0").size() / std::max<std::size_t>(rows, 1);
+    layer_out << "{\"layers\": " << layers << ", \"rows\": " << rows
+              << ", \"hidden\": " << hidden << ", \"data\": [";
+    bool first = true;
+    for (std::size_t layer = 0; layer < layers; ++layer) {
+      for (const float value : trace.stages.at("l_out-" + std::to_string(layer))) {
+        layer_out << (first ? "" : ",") << value;
+        first = false;
       }
     }
     layer_out << "]}\n";
     std::fprintf(stderr, "wrote %s\n", trace_path);
+  }
+  if (stages_path != nullptr && *stages_path != '\0') {
+    // Field-for-field the same shape as GUFO_KOLIBRI_STAGES on the oracle, so
+    // compare_stages.py can diff the two engines operator by operator.
+    std::ofstream stages_out(stages_path);
+    if (!stages_out) {
+      Die(std::string("cannot write ") + stages_path);
+    }
+    stages_out.precision(9);
+    stages_out << "{\"rows\": " << rows << ", \"stages\": {";
+    bool first = true;
+    for (const auto& entry : trace.stages) {
+      if (!first) {
+        stages_out << ", ";
+      }
+      first = false;
+      stages_out << '"' << entry.first << "\": [";
+      for (std::size_t i = 0; i < entry.second.size(); ++i) {
+        stages_out << (i == 0 ? "" : ",") << entry.second[i];
+      }
+      stages_out << ']';
+    }
+    stages_out << "}}\n";
+    std::fprintf(stderr, "wrote %s (%zu stages)\n", stages_path,
+                 trace.stages.size());
   }
   llama_free(ctx);
   llama_model_free(model);
