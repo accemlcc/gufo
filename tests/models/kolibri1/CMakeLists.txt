@@ -14,6 +14,14 @@ endfunction()
 
 add_kolibri1_test(artifact gufo_kolibri1 "cpu;external-model")
 add_kolibri1_test(config gufo_kolibri1 "cpu")
+add_kolibri1_test(tokenizer gufo_kolibri1 "cpu;tokenization")
+add_kolibri1_test(tokenizer_model gufo_kolibri1
+  "cpu;tokenization;external-model")
+
+# The tokenizer contract reads the synthetic vocabulary, the goldens of the
+# reference implementation and the split expression they came from.
+target_compile_definitions(kolibri1_tokenizer_test PRIVATE
+  GUFO_KOLIBRI1_FIXTURES="${PROJECT_SOURCE_DIR}/tests/models/kolibri1/fixtures")
 
 # The oracle is checked against a NumPy fixture of the same tiny artifact;
 # both must implement the graph independently, so the check is slow in
