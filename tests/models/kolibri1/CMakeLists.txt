@@ -24,6 +24,7 @@ if (ENGINE_ENABLE_HIP)
   add_kolibri1_test(device_forward gufo_kolibri1_reference
     "hip;gpu;gfx1151;slow;external-model")
   add_kolibri1_test(qkv_post gufo_kolibri1 "hip;gpu;gfx1151")
+  add_kolibri1_test(blocks gufo_kolibri1 "hip;gpu;gfx1151")
 endif()
 add_kolibri1_test(tokenizer gufo_kolibri1 "cpu;tokenization")
 add_kolibri1_test(tokenizer_model gufo_kolibri1
