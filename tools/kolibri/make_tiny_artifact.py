@@ -189,11 +189,24 @@ def main() -> None:
         help="index of the single no-positional-encoding layer; an index "
         "outside the model makes every layer a windowed one",
     )
+    parser.add_argument(
+        "--zero",
+        action="append",
+        default=[],
+        metavar="NEEDLE",
+        help="write zeros into every tensor whose name contains NEEDLE; "
+        "repeated. Ablates one half of a block so a parity difference can be "
+        "attributed to attention (--zero .attn_) or to the experts "
+        "(--zero exps --zero shexp).",
+    )
     args = parser.parse_args()
     window = args.window
 
     rng = Random()
     specs = build_specs(rng, args.layers)
+    for needle in args.zero:
+        specs = [(name, shape, [0.0] * len(values) if needle in name else values)
+                 for name, shape, values in specs]
     tensor_info, payload, alignment = tensors(specs)
 
     # Lengths are the GGUF string-array element type; the sliding-window pattern

@@ -151,6 +151,23 @@ int main(int argc, char** argv) {
   context_params.n_batch = static_cast<uint32_t>(longest);
   context_params.n_ubatch = context_params.n_batch;
   context_params.n_seq_max = 1;
+  // Two knobs so a parity run can state which numeric path it measured.
+  // GUFO_LLAMA_KV=f32 pins the cache to f32 (the default f16 keeps keys and
+  // values at an 11-bit mantissa) and GUFO_LLAMA_FLASH=0 disables flash
+  // attention. Both were added while attributing the residual difference to
+  // the oracle; measured on the f32 artifact, neither of them is the cause —
+  // the numbers are recorded in tools/kolibri/run_parity.sh.
+  if (const char* kv = std::getenv("GUFO_LLAMA_KV");
+      kv != nullptr && std::string(kv) == "f32") {
+    context_params.type_k = GGML_TYPE_F32;
+    context_params.type_v = GGML_TYPE_F32;
+  }
+  if (const char* flash = std::getenv("GUFO_LLAMA_FLASH");
+      flash != nullptr && std::string(flash) == "0") {
+    context_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
+  }
+  std::fprintf(stderr, "kv cache: K=%s V=%s\n", ggml_type_name(context_params.type_k),
+               ggml_type_name(context_params.type_v));
   const char* trace_path = std::getenv("GUFO_LLAMA_TRACE");
   Trace trace;
   if (trace_path != nullptr && *trace_path != '\0') {
