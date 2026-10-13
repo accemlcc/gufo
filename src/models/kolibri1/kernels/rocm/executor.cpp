@@ -275,19 +275,28 @@ void Executor::Experts(const DeviceLayer& l, const float* h,
     // past the table's count return without writing their slots. A grouped
     // launch that is not written for a shape declines it, and running on
     // without its output would mix stale activations into the residual.
+    // `slots_per_row` says how many slots read the same row of `in`. The gate
+    // and the up half read their row's hidden state, so the six slots of a row
+    // share one input row; the down half reads the activation its own slot has
+    // just produced, so its input holds one row per slot. Handing `used` to the
+    // down half makes every slot of a row multiply the first slot's activation,
+    // which leaves only slot 0 of each row correct.
     const auto Routed = [&](const DeviceTensor& w, const float* in, float* out,
-                            std::uint32_t m, std::uint32_t k) {
+                            std::uint32_t m, std::uint32_t k,
+                            std::uint32_t shared_rows) {
       if (!GroupedGemv({w.quant(), w.data, moe_groups_, slots, in, out, n,
-                        used, m, k},
+                        shared_rows, m, k},
                        stream_)) {
         throw std::invalid_argument("kolibri1 has no grouped kernel for " +
                                     std::string(w.name));
       }
     };
     Routed(l.gate_exps, x,
-           moe_gate_ + static_cast<std::size_t>(base) * used * width, width, d);
+           moe_gate_ + static_cast<std::size_t>(base) * used * width, width, d,
+           used);
     Routed(l.up_exps, x,
-           moe_up_ + static_cast<std::size_t>(base) * used * width, width, d);
+           moe_up_ + static_cast<std::size_t>(base) * used * width, width, d,
+           used);
     GateUpAct({moe_gate_ + static_cast<std::size_t>(base) * used * width,
                moe_up_ + static_cast<std::size_t>(base) * used * width,
                moe_act_ + static_cast<std::size_t>(base) * used * width,
@@ -295,7 +304,7 @@ void Executor::Experts(const DeviceLayer& l, const float* h,
               stream_);
     Routed(l.down_exps,
            moe_act_ + static_cast<std::size_t>(base) * used * width,
-           routed + static_cast<std::size_t>(base) * used * d, d, width);
+           routed + static_cast<std::size_t>(base) * used * d, d, width, 1);
   }
 }
 

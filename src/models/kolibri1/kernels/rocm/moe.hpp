@@ -44,7 +44,7 @@ struct GroupedGemvArgs {
   /// one expert this is a plain [m][k] projection.
   const void* w;
   /// Group table: a count, then per group the expert, its slot count and the
-  /// slot indices in increasing order. A slot s of row r reads x[r][0..k) with
+  /// slot indices in increasing order. A slot s reads x[r][0..k) with
   /// r = s / slots_per_row and writes y[s][0..m). Every listed group holds at
   /// least one slot, so the count is at most rows * slots_per_row and a caller
   /// may use that product as its launch bound; a group for an expert that was
@@ -55,7 +55,10 @@ struct GroupedGemvArgs {
   const float* x;            ///< [rows][k]
   float* y;                  ///< [slots][m]
   std::uint32_t rows;
-  std::uint32_t slots_per_row;  ///< 6 for the routed experts, 1 when dense
+  std::uint32_t slots_per_row;  ///< slots sharing one input row: 6 for the
+                                ///< routed gate/up, 1 for a dense projection
+                                ///< and for the down half, whose input is the
+                                ///< activation of the slot itself
   std::uint32_t m;
   std::uint32_t k;
 };
