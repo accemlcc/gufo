@@ -100,6 +100,7 @@ prefill_tps decode_tps ttft_ms cache_restore_ms queue_ms`).
 | 39,292 cold | 158.8 | 51.1 | 247.5 s |
 | 39,292 cold, second context | 157.7 | 50.8 | 248.9 s |
 | 39,292, same context repeated | — | 51.9 | **180.7 ms** |
+| 108,627 cold, after a 9,940-token calibration leg | 97.9 | 31.8 | **1,109.7 s** |
 
 Depth costs: prefill falls from ~230 to ~159 tok/s between 2K and 39K, and decode
 from ~60 to ~51 — the quadratic patternless layers, visible only where depth was
@@ -107,6 +108,37 @@ actually measured twice. Reuse, at the same depth: 42 tokens (the conversation
 frame) reused and 39,250 prefilled for a same-length context with different
 bytes; the whole 39,292 reused for the conversation that had been seen, in 180.7
 ms against 247.5 s ([Quality](QUALITY.md)).
+
+Depth past 39K was predicted before it was measured, and the prediction is what
+the 108,627 row above tests. `T(n) = a*n + b*n^2` - a linear term for the
+bandwidth-bound pass, a quadratic one for the ten patternless layers attending
+the whole past - fitted to cold points in two variants:
+
+* two points, both served at forward width 16 and session width 131,072: 2,141
+  tokens at 9.111 s and 39,292 at 247.7 s, giving `a=4.14e-3 s/token` and
+  `b=5.51e-8 s/token^2`;
+* three points, adding 8,192 tokens at 33.97 s measured **engine-direct**
+  (`tools/kolibri/throughput`, chunk 16, width 131,072) - a different regime, no
+  HTTP and no scheduler, so the two sources are not interchangeable, giving
+  `a=3.63e-3` and `b=6.81e-8`.
+
+They predict 110,000 tokens at 1,122 s to 1,223 s, 90 to 98 tok/s. At the depth
+actually sent - 108,627 - they say 1,100 s and 1,197 s. Measured: 1,120.7 s at
+97.9 tok/s; the two-point fit was 2 % low, the three-point fit 6 % high.
+This is the only point beyond 39K, so every other point on that curve is
+extrapolation, and one consequence it implies is arithmetic rather than
+observation: the quadratic share grows from 34-42 % of the time at 39K to
+59-67 % at 110K. Decode at that depth is observed, not fitted: 31.8 tok/s
+against 59.6 at 512.
+
+The graded leg carries a condition worth keeping with its number. `serve_check
+recall` first sends a 9,940-token calibration prompt with `max_tokens=1` (47.2
+s at 210.8 tok/s), and its 200 filler lines are literally the first 200 lines of
+the graded prompt, so the graded prompt starts with a prefix the server had just
+been shown. It still reported `cache=miss cached_tokens=0
+prefill_tokens=108627`, and its own snapshot measured 8,246,862,228 bytes (8.2
+GB). Whether a checkpoint survives state of that size is an open question; what
+is measured is that this one was not reused.
 
 Loading the model over HTTP took 18.5 s for the 45 GiB file, against 12-42 s
 engine-direct depending on page-cache state.
@@ -141,7 +173,7 @@ gap, and it is the model's first performance item.
 | --- | --- |
 | Concurrency (2/4/8 users) | TODO — one session per forward today; `SupportedPlans` is serial width 1 |
 | Q6_K / Q8_0 / Q5_K_M | TODO |
-| Contexts beyond 39,292 | In progress — 108,627-token recall probe queued |
+| Contexts beyond 39,292 | Measured once, at 108,627 ([Served path](#served-path)); nothing between 39K and it |
 | Continuation cache, prefix reuse | Measured ([Served path](#served-path), [Quality](QUALITY.md)) |
 | Tool-call round-trip | Measured ([Quality](QUALITY.md)) |
 
