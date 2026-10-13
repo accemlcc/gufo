@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -81,6 +82,37 @@ private:
 /// One conversation: its tokens, its attention state, and the logits of its
 /// last position. Sampling is the caller's business - this class knows the
 /// graph, not the product's decoding rules.
+/// One image of a context: its tokens, the key/value rows a later token can
+/// still attend, and the logits of its last position. The rows stay on the
+/// device: on this unified-memory APU a device copy runs near memory bandwidth
+/// while a fresh host buffer pays first-touch page faults. A patternless layer
+/// contributes rows [0, position) and a sliding layer its whole ring exactly as
+/// the attention kernel stored it, so a restore reorders nothing and the
+/// destination must have the same geometry. Payload order: header, tokens, then
+/// K and V of each layer in layer order, then the logits.
+class SessionSnapshot final {
+public:
+  /// Hands the payload to `sink` in order, in pieces of at most 64 MiB.
+  using Sink = std::function<void(std::span<const std::uint8_t>)>;
+
+  ~SessionSnapshot();
+  SessionSnapshot(const SessionSnapshot&) = delete;
+  SessionSnapshot& operator=(const SessionSnapshot&) = delete;
+
+  [[nodiscard]] std::uint64_t SizeBytes() const noexcept;
+  /// Writes the payload; false on a size mismatch or a failed device copy.
+  [[nodiscard]] bool CopyTo(std::span<std::uint8_t> destination) const;
+  [[nodiscard]] bool Stream(const Sink& sink) const;
+
+private:
+  struct Impl;
+
+  SessionSnapshot() = default;
+
+  std::unique_ptr<Impl> impl_;
+  friend class Session;
+};
+
 class Session {
 public:
   Session(const Model& model, std::unique_ptr<rocm::KvCache> cache);
@@ -105,6 +137,26 @@ public:
   [[nodiscard]] std::uint32_t position() const noexcept {
     return static_cast<std::uint32_t>(tokens_.size());
   }
+
+  /// Payloads of this architecture. A store must reject another version rather
+  /// than read it as this one.
+  static constexpr std::uint32_t kSnapshotPayloadVersion = 1;
+  /// Bytes the payload of the current state takes: header, tokens, the rows of
+  /// every layer, logits. It does not depend on the cache's capacity, only on
+  /// the rows a token has written.
+  [[nodiscard]] std::uint64_t SnapshotBytes() const noexcept;
+  /// Freezes the context. Nullptr with `error_msg` set when a device copy fails.
+  [[nodiscard]] std::unique_ptr<SessionSnapshot> SaveSnapshot(
+      std::string* error_msg = nullptr) const;
+  /// Writes a snapshot over this context, whose geometry must match the one it
+  /// was taken from. False, leaving the context as it was, when the payload is
+  /// of another version or geometry.
+  [[nodiscard]] bool RestoreSnapshot(const SessionSnapshot& snapshot,
+                                     std::string* error_msg = nullptr);
+  /// The same from a payload read back, which is checked before anything is
+  /// written.
+  [[nodiscard]] bool RestoreSnapshot(std::span<const std::uint8_t> payload,
+                                     std::string* error_msg = nullptr);
 
 private:
   const Model& model_;

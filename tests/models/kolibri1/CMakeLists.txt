@@ -23,6 +23,10 @@ if (ENGINE_ENABLE_HIP)
   # the file, and the minutes the scalar path takes per token.
   add_kolibri1_test(device_forward gufo_kolibri1_reference
     "hip;gpu;gfx1151;slow;external-model")
+  # A saved context has to answer like the conversation it came from. Needs the
+  # device and the artifact, and the seconds it takes to fill a session to its
+  # bound, which is what the deep half of the check does.
+  add_kolibri1_test(snapshot gufo_kolibri1 "hip;gpu;gfx1151;slow;external-model")
   add_kolibri1_test(qkv_post gufo_kolibri1 "hip;gpu;gfx1151")
   add_kolibri1_test(blocks gufo_kolibri1 "hip;gpu;gfx1151")
   add_kolibri1_test(gemv gufo_kolibri1 "hip;gpu;gfx1151")
