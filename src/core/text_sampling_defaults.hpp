@@ -8,7 +8,14 @@
 
 namespace gufo::sampling {
 
-enum class TextModelPreset { kUnspecified, kQwen38, kDeepSeekV4Flash, kGemma4 };
+enum class TextModelPreset {
+  kUnspecified,
+  kQwen38,
+  kDeepSeekV4Flash,
+  kGemma4,
+  // Kolibri 1: 78B-A3.46B, German/English reasoning model.
+  kKolibri1
+};
 
 // Presence is independent of value: an explicit zero must override a preset.
 struct SamplingOverrides {
@@ -33,6 +40,8 @@ inline TextModelPreset TextPreset(const core::ModelConfig& config) {
     return TextModelPreset::kDeepSeekV4Flash;
   if (config.architecture == "gemma4")
     return TextModelPreset::kGemma4;
+  if (config.architecture == "kolibri1")
+    return TextModelPreset::kKolibri1;
   if (config.architecture == "qwen4exp" ||
       (config.num_layers == 64 && config.hidden_size == 5120 &&
        config.vocab_size == 248320))
@@ -55,6 +64,14 @@ inline SamplingConfig ResolveTextSampling(TextModelPreset model,
   // with or without thinking.
   if (model == TextModelPreset::kGemma4)
     result.top_k = 64;
+  // Kolibri 1: the upstream generation_config (temperature 1.0, top_p 0.97,
+  // top_k 128). The GGUF carries no `general.sampling.*` copy of it, so this
+  // is the only place those numbers live; the thinking pass reads them the
+  // same way, because the effort goes into the prompt, not the sampler.
+  if (model == TextModelPreset::kKolibri1) {
+    result.top_p = 0.97F;
+    result.top_k = 128;
+  }
   if (model == TextModelPreset::kQwen38) {
     result.top_k = 20;
     if (!thinking.value_or(true)) {
