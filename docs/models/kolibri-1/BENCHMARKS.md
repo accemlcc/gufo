@@ -191,12 +191,26 @@ Decode is bandwidth-bound on both sides: 3.46B active parameters spread over 6 o
 384 experts per layer, the shared expert, the attention projections and one
 untied 128,000-wide output row come to about 2 GB of weights per token, which
 puts Gufo near 118 GB/s and llama.cpp near 130 GB/s — one regime, 10 % apart.
-Prefill is not bandwidth-bound: at 253 tok/s this model would need some 500 GB/s,
-which the hardware does not have, so it is compute-bound, and 253 tok/s of a
-3.46B-active model is about 1.7 TFLOP/s against llama.cpp's 8.5. The reference
-runs prefill through hipBLASLt's tensor-core GEMM; this engine uses its own
-projection kernel and re-reads the expert table once per forward. That is the
-gap, and it is the model's first performance item.
+Prefill changes regime with the forward width, and the shipped width is the
+memory-bound one. Every matmul in this engine — q/k/v/o, the shared expert, all
+384 routed experts, the output head — is one kernel, `GroupedGemvKernel`
+(`kernels/rocm/gemv.hip.cpp:299`), a scalar dequant-then-FFMA dot product; the
+engine's only WMMA is attention (`attention.hip.cpp:58`) and it calls no
+hipBLASLt. A forward processes `kProjectRows = 16` rows at a time (`executor.hpp:23`,
+stepping loops `executor.cpp:223` and `executor.cpp:259`), so every step re-reads
+the ~30 MB of dense projection weights for its layer plus ~2.4 MB for each expert
+its 96 slots actually chose — a group with no slot returns immediately
+(`gemv.hip.cpp:309-311`), so traffic follows the *touched* experts per step, not
+the table.
+
+At width 16 that is 0.5-0.8 GB of weights per token, which at the measured ~250
+tok/s is 150-200 GB/s: at the shipped width prefill sits on the memory ceiling,
+not on arithmetic. From width 64 up the re-read amortises (371 MB/token at 128)
+and the 325 tok/s plateau is the FFMA kernel's own ceiling — 325 × 6.9 GFLOP ≈
+2.2 TFLOP/s against llama.cpp's 8.5 through hipBLASLt. This paragraph previously
+said prefill was never bandwidth-bound and needed ~500 GB/s at 253 tok/s; that
+was the arithmetic of a whole-table re-read, too high by about a factor three,
+and it hid the fact that width alone cannot pass 325.
 
 That verdict is worth exactly its own range. Both engines ran at 512 and 2,048
 prompt tokens; nothing on the reference side was ever run past 2,048, so −76 %
@@ -223,21 +237,57 @@ where long context is used. The cell that settles it is `llama-bench -ngl 99 -p
 | llama.cpp prefill beyond 2,048 | TODO — the table above stops at pp2048, so its ratio says nothing about depth; the reference build has never been run at 8K/32K/99K |
 | Continuation cache, prefix reuse | Measured ([Served path](#served-path), [Quality](QUALITY.md)) |
 | Tool-call round-trip | Measured ([Quality](QUALITY.md)) |
-| Functional suites (13) | Recorded, 6 pass / 7 fail, every failure with a cause ([Quality](QUALITY.md#functional-qualification)) |
+| Functional suites (13) | Recorded across three runs — 7 pass / 6 fail, every failure with a cause, four harness-side fixes landed but not re-run ([Quality](QUALITY.md#functional-qualification)) |
 
 ## Performance items
 
-1. **Forward width per prompt length.** 32 is 25 % ahead at chat length, 16 holds
-   the long-prompt case; one constant has to lose one of them. Nothing structural
-   blocks the split: the sliding ring is `next_pow2(513 + rows)` = 1,024 slots for
-   any width up to 511, so both widths reserve the same memory and only the
-   executor's scratch changes.
-2. **Prefill GEMM.** The reference's advantage is a tensor-core path, not a
-   better schedule.
-3. **Repeated-cell measurement protocol.** `~/kolibri-stats.py` exists; the
+1. **Forward width is a prerequisite, not the win.** 32 is 25 % ahead at chat
+   length and 128 reaches the 325 plateau, but that plateau is the GEMV's FP32
+   ceiling, so more width alone buys nothing past it. Nothing structural blocks
+   widening: the sliding ring is `next_pow2(513 + rows)` = 1,024 slots for any
+   width to 511 (`executor.cpp:52-61`), so memory is unchanged; what has to move
+   is the geometry caps — `kProjectRows` (`executor.hpp:23`), `kMaxGroupSlots = 16`
+   and `kGroupInts` (`moe.hpp:31-34`), the prebuilt dense tables
+   (`executor.cpp:162-170`) and `MoeRoute`'s 16-row refusal (`route.hip.cpp:293-296`).
+   One caveat with a cost attached: `prefill_chunk_rows` is part of the served
+   disk-cache identity (`inference_backend.cpp:348`, `:4479-4491`), so a new width
+   re-prefills every existing cache tree once.
+2. **The prefill GEMM: tensor cores in two steps, both already in this repo.**
+   The reference's advantage is a tensor-core path, not a better schedule, and the
+   ladder is measurable in front of us — `gemma4` was cut from the same GEMV and
+   already switched above 16 rows (`gemma4/kernels/rocm/executor.cpp:476-540`),
+   and `qwen38_flash_next` runs dense on F16/int8 WMMA and hipBLASLt with routed
+   experts on compacted buckets (`qwen38/kernels/rocm/executor.cpp:1543-1621`,
+   `:2504-2575`).
+   - **a) Dense projections and the shared expert** (30 of the ~56 MB per layer
+     read at width 16, 3.1 of 6.9 GFLOP/token) through the vendored
+     `qwen::hip::ops::LaunchBatchedQuantGEMMPreQuantized`, which takes Q4_K and
+     Q6_K with pre-quantised activations (`qwen/hip/ops/gemm.hpp:279`, dispatch
+     `qwen/hip/prefill_quant_gemm.hip:1479-1491`). Expected ~550-600 tok/s at
+     width 128-256.
+   - **b) Routed experts** (2.4 of 6.9 GFLOP, ~90 % of the bytes) as a WMMA tile
+     over per-expert padded buckets — `gemma4/kernels/rocm/moe_prefill.hip.cpp`
+     is Q4_K/Q6_K → binary16 already, and `MoeRoute` emits the `counts` such a
+     `RoutedCompact` needs (`route.hip.cpp:216-220`). With every expert read once
+     per ≥256-row chunk, traffic drops to 93-184 MB/token, a memory floor of
+     800-1600 tok/s, and the tensor core supplies the FLOPs. This is the step that
+     reaches the reference's 1,217 pp, and it inherits the accuracy review that
+     gemma4 already accepted: Q4_K products rounded through binary16.
+   Neither is bit-identical to the decode GEMV, whose batch-invariance contract
+   (`gemv.hip.cpp:11-27`, compiled `-ffp-contract=off`) must stay for decode;
+   prompt and decode rounding already differ in Qwen and gemma4.
+3. **Two grid and allocation wastes to sweep up while in there.**
+   `AttentionQueryRowsPerBlock()` returns 32 while the kernel advances 64 rows per
+   block (`attention.hpp:59-61` against `attention.hip.cpp:131-133`), so at width
+   16 three of four in-block row groups are masked-idle and up to half the launched
+   blocks do nothing (coverage is still complete). And `MoeRoute` does a
+   `hipMallocAsync`/`hipFreeAsync` pair plus a single-block top-6 kernel **per
+   16-row step** (`route.hip.cpp:232`, `:330-340`) — ~25,600 of both per 8,192-token
+   prompt. Effect sizes not measured.
+4. **Repeated-cell measurement protocol.** `~/kolibri-stats.py` exists; the
    engine-direct harness should run n repetitions itself rather than leave it to
    the caller's shell loop.
-4. **The patternless layers' KV is now the bandwidth bill.** 2.07 GiB per
+5. **The patternless layers' KV is now the bandwidth bill.** 2.07 GiB per
    generated token at 108,627 positions, against ~2 GB of weights — the reason
    decode falls 59.6 → 51.1 → 31.8 tok/s with depth. Binary8 KV, or sharing heads
    across the ten full-attention layers, is the only lever that keeps decode flat
