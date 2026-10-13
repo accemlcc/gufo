@@ -653,8 +653,11 @@ window with the device to itself.
     atomic per slot and one serialized launch per layer; a wide forward still
     zeroes before it gathers, since the memset lives in the same place for it.
     Effect size unmeasured — the ring's `memset=` segment is what would price it.
-  - **The split at `k=512`**, 4 % on Q4_K and 12 % on Q6_K down, behind a golden
-    re-check because it reorders a reduction.
+  - **The split at `k=512`**: 4 % on the shipped Q4_K down, 12 % on a Q6_K one.
+    The artifact's routed down is Q4_K — 13.2 MB per layer only adds up as three
+    launches of 4.42 MB — so the larger number belongs to a build still on the
+    list above. Both sit behind a golden re-check, because a split reorders a
+    reduction.
   - **The router**, if the ring says the time is in `RouterKernel` and not in the
     single-block `SelectKernel`: 3.93 MB of F32 gate matrix per layer is a
     bandwidth item of ~20 µs at the machine's rate, so only a narrower gate
