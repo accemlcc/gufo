@@ -111,7 +111,8 @@ instead of off `usage`.
   accepts Q4_K, Q6_K and F32 rows and names the tensor it rejects, so an
   unexpected per-tensor layout fails loudly rather than silently — but that is
   a load-time guarantee, not a correctness measurement.
-- **Depth beyond this box.** The cache geometry supports the full 262,144. The
-  served recall probe reached 108,627 tokens — past every ring and past the
-  8,192 of every other measurement — and that run's numbers are in
-  [BENCHMARKS.md](BENCHMARKS.md); nothing deeper has been tried.
+- **Depth beyond 108,627 served.** Recall has been scored cold at 39,292 and at
+  108,627 prompt tokens — every planted fact at 10/50/90 % of a prompt that is
+  twenty times the sliding window, so all forty rings are behind the facts and
+  the ten patternless layers are the only thing that can carry them. The cache
+  geometry supports 262,144; nothing has been scored between 108,627 and that.

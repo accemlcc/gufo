@@ -132,13 +132,20 @@ observation: the quadratic share grows from 34-42 % of the time at 39K to
 against 59.6 at 512.
 
 The graded leg carries a condition worth keeping with its number. `serve_check
-recall` first sends a 9,940-token calibration prompt with `max_tokens=1` (47.2
-s at 210.8 tok/s), and its 200 filler lines are literally the first 200 lines of
-the graded prompt, so the graded prompt starts with a prefix the server had just
-been shown. It still reported `cache=miss cached_tokens=0
-prefill_tokens=108627`, and its own snapshot measured 8,246,862,228 bytes (8.2
-GB). Whether a checkpoint survives state of that size is an open question; what
-is measured is that this one was not reused.
+recall` first sends a calibration prompt of its own — 200 filler lines asked with
+`max_tokens=1` (9,940 tokens, 47.2 s at 210.8 tok/s) — and that prompt plants its
+own needles at 10/50/90 % of *its* 200 lines. So the two texts part company at
+line 20: calibration breaks into a needle there, the graded prompt keeps counting
+filler until line 221. The log states exactly that distance —
+`common_prefix_tokens=934`, which is nineteen lines at the probe's own 49.7
+tokens per line — while the only checkpoint the calibration turn left sat at
+9,940 (`nearest_checkpoint_tokens=9940`). A checkpoint longer than the shared
+prefix cannot be applied to a new prompt, so
+`cache=miss cached_tokens=0 prefill_tokens=108627` is what the geometry requires
+here, not evidence about whether checkpoints survive 8.2 GB of snapshot. The
+probe now calibrates without needles, which makes the calibration a real prefix of
+the graded prompt; whether a deep leg then reuses its 9,900 tokens is the test
+that question actually needs, and it has not been run.
 
 Loading the model over HTTP took 18.5 s for the 45 GiB file, against 12-42 s
 engine-direct depending on page-cache state.

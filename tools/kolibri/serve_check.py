@@ -226,13 +226,19 @@ def filler(line_no: int) -> str:
     )
 
 
-def build_long_prompt(lines: int, offset: int = 0) -> str:
+def build_long_prompt(lines: int, offset: int = 0, needles: bool = True) -> str:
     """Filler with one needle per entry at 10/50/90% depth.
 
     `offset` shifts the numbering, which gives a same-sized context whose prefix
     differs from the first token — the control the reuse probe needs.
+
+    `needles=False` yields pure filler: the same lines, numbered from the same
+    start, without the three planted facts. That is what the sizing calibration
+    wants, because a needle inside it ends the shared prefix at 10% of its own
+    length and leaves the graded prompt with nothing long enough to reuse.
     """
-    marks = {int(lines * f): i for i, f in enumerate((0.10, 0.50, 0.90))}
+    marks = ({int(lines * f): i for i, f in enumerate((0.10, 0.50, 0.90))}
+             if needles else {})
     parts = []
     for i in range(1, lines + 1):
         hit = marks.get(i)
@@ -252,7 +258,9 @@ def prompt_with_needles(target_tokens: int, offset: int = 0):
     The rings are a token distance, so the probe has to report how deep it
     actually went; and a 100k-token calibration run would cost minutes per try.
     """
-    probe = build_long_prompt(200)
+    # Needle-free, so the calibration's 200 lines are a real prefix of the graded
+    # prompt: a deep leg then either reuses them or shows why it could not.
+    probe = build_long_prompt(200, needles=False)
     payload, _ = chat([{"role": "system", "content": probe}], max_tokens=1)
     got = prompt_tokens(payload)
     if not got:
