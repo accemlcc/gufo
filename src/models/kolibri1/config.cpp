@@ -1,5 +1,6 @@
 #include "src/models/kolibri1/config.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <string_view>
 #include <utility>
@@ -168,6 +169,17 @@ std::optional<Config> Config::FromGguf(const core::GgufReader& gguf,
   const auto pattern = r.U64Array("attention.sliding_window_pattern");
   if (r.ok && pattern.size() != c.num_layers) {
     r.Fail("attention.sliding_window_pattern must describe every layer");
+  }
+  // A pattern that marks no layer sliding is not something this engine runs:
+  // the sliding rings, and the boundary snapshots snap down to, are built from
+  // the sliding layers, and no artifact without one has ever been computed.
+  // Checking only the length lets an all-global pattern through, which is what
+  // it took upstream's 8- and 16-bit array decoding (#532) to expose: before
+  // that, the boolean pattern read as an empty array and the length check
+  // rejected it for the wrong reason.
+  if (r.ok && !std::any_of(pattern.begin(), pattern.end(),
+                           [](std::uint64_t value) { return value != 0; })) {
+    r.Fail("attention.sliding_window_pattern marks no sliding layer");
   }
   if (!r.ok) {
     return std::nullopt;
