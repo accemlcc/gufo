@@ -3779,16 +3779,17 @@ private:
 // sized for `prefill_chunk` rows, so two requests must never be inside one at
 // the same time; the scheduler's single worker already serialises them, which
 // is also why this runner offers no batched plan.
-// Width is a model constant, measured 2026-10-13 on m1 against the engine
-// directly (`tools/kolibri/throughput`, 45,254 MiB of weights pinned): at chat
-// length (pp 512, context 640) 16 prefills 249 tok/s, 32 gives 333, 128 gives
-// 269; at pp 8192 the curve climbs to 225, 279, 254, 298 for 16/32/64/128 at
-// context 8320 and 241/254/324 for 16/64/128 at 131072. 32 is the width that
-// is never far off — 128 loses 19 % at chat length, 16 loses 25 % on a long
-// prompt, and 64 sits under 32 wherever both were measured. Decode ignores the
-// reservation (55.4 tok/s at 8320 against 55.7 at 131072, chunk 64), so this
-// buys prefill only.
-constexpr std::uint32_t kKolibriPrefillChunk = 32;
+// Width is a model constant, not a per-request knob: it sizes the executor's
+// scratch and it is part of the disk-cache identity, so changing it invalidates
+// every tree preprocessed under another value. The value here is the width the
+// engine was qualified at. Single runs on m1 (2026-10-13,
+// `tools/kolibri/throughput`, 45,254 MiB of weights pinned) spread 15-30 %
+// inside one cell - pp 512 at context 640 gave 249-340 tok/s at a fixed width,
+// and at pp 8192, context 131072, 16 measured 231 and 268 against 32's 249 and
+// 250 - so no ordering of 16/32/64/128 is established by measurement, and this
+// number carries none. Decode stayed between 55 and 60 tok/s in all thirteen
+// cells whatever context was reserved, so width can only buy prefill.
+constexpr std::uint32_t kKolibriPrefillChunk = 16;
 
 using KolibriModel = models::kolibri1::Model;
 using KolibriSession = models::kolibri1::Session;
@@ -4469,12 +4470,11 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
     // The rows of one forward decide three things at once: the routed experts
     // are re-read per chunk, the executor's scratch is allocated for exactly
     // that many rows, and a sliding layer's ring is the 513-token window
-    // rounded up past them. The width is the model constant above - 32 rows,
-    // fastest at chat length and ahead of 16 on a long prompt too, decode
-    // unmoved (docs/models/kolibri-1/BENCHMARKS.md). Since `prefill_chunk_rows=`
-    // is part of the state identity, a `--cache-disk` tree written at another
-    // width is refused and re-prefilled instead of restored into geometry the
-    // snapshot never had; that is a re-prefill cost, not a correctness risk.
+    // rounded up past them. The width is the model constant above, and because
+    // `prefill_chunk_rows=` is part of the state identity, a `--cache-disk` tree
+    // written under another value is refused and re-prefilled rather than
+    // restored into geometry the snapshot never had — a re-prefill cost, not a
+    // correctness risk.
     // The engine hands out a uniquely-owned model; the pool needs shared
     // ownership, because every session state and every snapshot keeps one.
     std::shared_ptr<models::kolibri1::Model> model(
