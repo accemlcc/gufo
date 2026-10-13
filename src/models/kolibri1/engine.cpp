@@ -75,9 +75,12 @@ void Session::Append(std::span<const TokenId> tokens) {
   while (done < tokens.size()) {
     const std::size_t n = std::min<std::size_t>(chunk, tokens.size() - done);
     // Only the very last row of the whole append is asked for logits: the rows
-    // before it feed nothing.
+    // before it feed nothing. The executor numbers the rows it gathers within
+    // the forward it is running, not within the append, so the frontier of the
+    // final chunk is that chunk's last row - `done + n - 1` would name a row
+    // past a chunk shorter than the append, and the forward rejects that.
     const bool last = done + n == tokens.size();
-    const std::uint32_t frontier = static_cast<std::uint32_t>(done + n) - 1;
+    const std::uint32_t frontier = static_cast<std::uint32_t>(n) - 1;
     const std::span<const std::uint32_t> rows =
         last ? std::span<const std::uint32_t>(&frontier, 1)
              : std::span<const std::uint32_t>{};

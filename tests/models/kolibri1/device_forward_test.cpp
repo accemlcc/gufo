@@ -227,6 +227,34 @@ int main() {
   reference.Forward({&next, 1}, &oracle_next);
   Report("decode step", Compare(device_next, oracle_next), 0.5, 0.02);
 
+  // A chunk boundary must not move the answer. The prompt above is shorter
+  // than one chunk, so it never crosses one; this one is longer than two. The
+  // pass width of the grouped projection follows the batch, so a split-K
+  // reduction sums in another order across a boundary and bit equality is not
+  // what is claimed - the same winner and a small drift is.
+  {
+    const std::size_t chunk = model->executor()->max_rows();
+    std::vector<std::int32_t> longer = tokens;
+    while (longer.size() <= chunk * 2) {
+      const auto more =
+          model->tokenizer().Encode(" Berlin ist eine Stadt an der Spree,",
+                                    false, true);
+      longer.insert(longer.end(), more.begin(), more.end());
+    }
+    session->Reset();
+    session->Append(longer);
+    const std::vector<float> whole(session->logits().begin(),
+                                   session->logits().end());
+    session->Reset();
+    session->Append({longer.data(), chunk});
+    session->Append({longer.data() + chunk, longer.size() - chunk});
+    const std::vector<float> split(session->logits().begin(),
+                                   session->logits().end());
+    std::cout << "prefill of " << longer.size() << " tokens across a chunk of "
+              << chunk << "\n";
+    Report("chunked prefill", Compare(whole, split), 0.02, 0.002);
+  }
+
   if (failures != 0) {
     std::cout << failures << " device checks failed\n";
     return 1;
