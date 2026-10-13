@@ -101,6 +101,121 @@ def prompt_tokens(payload):
     return int((payload.get("usage") or {}).get("prompt_tokens", 0))
 
 
+# The server's own accounting, for the run where a client-side number and the
+# answer disagree: only the log says which tier served a request and how many
+# tokens it really prefilled. Pass --log with the path the server writes to.
+LOG_PATH = ""
+
+
+def log_mark():
+    try:
+        with open(LOG_PATH, "r", errors="replace") as handle:
+            return sum(1 for _ in handle)
+    except OSError:
+        return 0
+
+
+KEEP = ("request", "duration_ms", "prompt_tokens", "prefill_tokens",
+        "cached_tokens", "cache_restore_ms", "prefill_tps", "decode_tps")
+
+
+def log_since(mark):
+    """The server's completed-request lines after `mark`, as field dicts."""
+    if not LOG_PATH:
+        return []
+    entries = []
+    try:
+        with open(LOG_PATH, "r", errors="replace") as handle:
+            for _ in range(mark):
+                next(handle, None)
+            for line in handle:
+                if "event=completed" not in line:
+                    continue
+                entries.append(dict(
+                    pair.split("=", 1)
+                    for pair in line.split()
+                    if "=" in pair
+                ))
+    except OSError:
+        return []
+    return entries
+
+
+def show_log(entries):
+    for entry in entries:
+        print("      log " + " ".join(
+            f"{key}={entry[key]}" for key in KEEP if key in entry))
+
+
+def check_accounting(entries, label):
+    """Assert `prefill_tokens + cached_tokens == prompt_tokens`.
+
+    The client only sees `usage.cached_tokens`, and on its own that number can
+    say "everything was reused" while the request visibly prefilled for three
+    minutes. Which of the two it was decides whether a probe found a cache bug
+    or an accounting bug, so the invariant is checked where both numbers are
+    written down together.
+    """
+    bad = []
+    for entry in entries:
+        try:
+            prompt = int(entry["prompt_tokens"])
+            prefill = int(entry["prefill_tokens"])
+            hit = int(entry["cached_tokens"])
+        except (KeyError, ValueError):
+            continue
+        if prompt and prefill + hit != prompt:
+            bad.append(f"{entry.get('request', '?')}: prefill={prefill}"
+                       f" cached={hit} prompt={prompt}")
+    if bad:
+        print(f"  FEHLER: {label} — Abrechnung passt nicht: " + "; ".join(bad))
+    return bad
+
+def log_int(entry, key):
+    try:
+        return int(entry[key])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def check_reuse(label, client_cached, server_prefill, depth, want):
+    """Judge reuse by the work that was done, not by one reported field.
+
+    `want="cold"`: the prompt was never seen, so full prefill is the correct
+    outcome. `want="warm"`: the opposite. With `--log` the server's own
+    `prefill_tokens` decides. Without it the client field is all there is and a
+    hit stays an error — that is what caught the 40 K control in the first place.
+    When the two disagree, the run prints an accounting complaint and keeps its
+    verdict with the work, because a request that took three minutes did not
+    reuse anything no matter what the usage object claims.
+    """
+    if server_prefill is None:
+        hit = client_cached > 0.05 * depth
+        if want == "cold" and hit:
+            print(f"  FEHLER: {label}: nie gesehen, usage.cached="
+                  f"{client_cached} von {depth}")
+            return [f"{label}-hit"]
+        if want == "warm" and not hit:
+            print(f"  FEHLER: {label}: keine Wiederverwendung "
+                  f"(usage.cached={client_cached} von {depth})")
+            return [f"{label}-miss"]
+        return []
+    if want == "cold":
+        if server_prefill < 0.5 * depth:
+            print(f"  FEHLER: {label}: fremder Praefix wurde wirklich "
+                  f"uebersprungen (prefill={server_prefill} von {depth})")
+            return [f"{label}-hit"]
+        if client_cached > 0.05 * depth:
+            print(f"  WARN: {label}: usage.cached={client_cached} meldt "
+                  f"Treffer, der Server lief {server_prefill} Tokens — "
+                  "usage-Feld beschreibt etwas anderes als die Arbeit")
+        return []
+    if server_prefill > 0.1 * depth:
+        print(f"  FEHLER: {label}: kein uebersprungener Praefix "
+              f"(prefill={server_prefill} von {depth})")
+        return [f"{label}-miss"]
+    return []
+
 def filler(line_no: int) -> str:
     return (
         f"Zeile {line_no:05d}: Aktenzeichen {line_no % 9973:04d}-"
@@ -257,36 +372,53 @@ def cmd_prefix(target_tokens: int) -> int:
     context, _ = prompt_with_needles(target_tokens, offset=7_000_000)
     first = [{"role": "system", "content": context},
              {"role": "user", "content": summarize}]
+    mark = log_mark()
     cold, t_cold = chat(first, max_tokens=32)
+    cold_log = log_since(mark)
     depth = prompt_tokens(cold)
     warm = first + [cold["choices"][0]["message"],
                     {"role": "user",
                      "content": "Und welches Kennwort taucht am haeufigsten auf?"}]
+    mark = log_mark()
     warm_p, t_warm = chat(warm, max_tokens=32)
+    warm_log = log_since(mark)
     other_ctx, _ = prompt_with_needles(target_tokens, offset=10_000_000)
+    mark = log_mark()
     other_p, t_other = chat([{"role": "system", "content": other_ctx},
                              {"role": "user", "content": summarize}],
                             max_tokens=32)
+    other_log = log_since(mark)
+
+    def server_prefill(entries):
+        """Tokens the server says it actually ran, or None without --log."""
+        return log_int(entries[-1], "prefill_tokens") if entries else None
 
     print(f"tiefe  {depth} prompt_tokens")
-    print(f"kalt   {t_cold:6.2f}s cached={cached(cold)}")
-    print(f"warm   {t_warm:6.2f}s cached={cached(warm_p)}")
-    print(f"fremd  {t_other:6.2f}s cached={cached(other_p)}")
+    for label, elapsed, payload, entries in (
+            ("kalt", t_cold, cold, cold_log),
+            ("warm", t_warm, warm_p, warm_log),
+            ("fremd", t_other, other_p, other_log)):
+        ran = server_prefill(entries)
+        print(f"{label}  {elapsed:6.2f}s usage.cached={cached(payload)}"
+              + (f" server.prefill={ran}" if ran is not None else ""))
+        show_log(entries)
+
     failed = []
-    if cached(cold) > 0.05 * depth:
-        print(f"FEHLER: nie gesehener Prafix traf den Cache "
-              f"({cached(cold)} von {depth})")
-        failed.append("cold-hit")
-    if cached(warm_p) < 0.9 * depth:
-        print(f"FEHLER: warme Wiederverwendung zu klein "
-              f"({cached(warm_p)} von {depth})")
-        failed.append("warm-miss")
+    # Reuse is only real if the work was skipped. `usage.cached_tokens` alone
+    # cannot tell a taken cache from a field that counts the retained prefix, so
+    # the verdict needs the cost: a warm leg finishes in a heartbeat, a cold one
+    # pays per token. Where the log is available it decides, together with the
+    # prefill + cached == prompt invariant.
+    failed += check_accounting(cold_log + warm_log + other_log, "prefix")
+    failed += check_reuse("kalt", cached(cold),
+                          server_prefill(cold_log), depth, want="cold")
+    failed += check_reuse("warm", cached(warm_p),
+                          server_prefill(warm_log), depth, want="warm")
+    failed += check_reuse("fremd", cached(other_p),
+                          server_prefill(other_log), depth, want="cold")
     if t_warm >= t_cold:
         print("FEHLER: warm war nicht schneller als kalt")
         failed.append("warm-time")
-    if cached(other_p) > 0.05 * depth:
-        print("FEHLER: fremder Prafix traf den Cache")
-        failed.append("cold-cache")
     print("PREFIX " + ("FEHLER: " + ",".join(failed) if failed else "OK"))
     return 1 if failed else 0
 
@@ -344,12 +476,16 @@ def cmd_coldpair() -> int:
 
 
 def main() -> int:
+    global LOG_PATH
     ap = argparse.ArgumentParser()
     ap.add_argument("mode",
                     choices=("recall", "sessions", "prefix", "coldpair", "all"))
     ap.add_argument("--tokens", type=int, default=110_000,
                     help="approximate prompt size for recall/prefix probes")
+    ap.add_argument("--log", default=os.environ.get("KOLIBRI_LOG", ""),
+                    help="server log file; enables prefill/cached accounting")
     args = ap.parse_args()
+    LOG_PATH = args.log
     rc = 0
     if args.mode in ("recall", "all"):
         rc |= cmd_recall(args.tokens)

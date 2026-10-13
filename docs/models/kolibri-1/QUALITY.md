@@ -100,5 +100,7 @@ server has never seen, so a cache hit cannot be explained by an earlier run).
   accepts Q4_K, Q6_K and F32 rows and names the tensor it rejects, so an
   unexpected per-tensor layout fails loudly rather than silently — but that is
   a load-time guarantee, not a correctness measurement.
-- **Depth beyond this box.** The cache geometry supports the full 262,144; the
-  recall probe below reports what was actually measured at 128 K.
+- **Depth beyond this box.** The cache geometry supports the full 262,144. The
+  served recall probe reached 108,627 tokens — past every ring and past the
+  8,192 of every other measurement — and that run's numbers are in
+  [BENCHMARKS.md](BENCHMARKS.md); nothing deeper has been tried.

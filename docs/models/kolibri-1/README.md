@@ -139,7 +139,7 @@ Measured on this box: `gufo serve llm --context 131072 --sessions 1` holds
 patternless-layer cache at 131,072 positions, the rings and the launch scratch.
 That is the number a co-resident engine has to leave room for.
 
-On the box that runs this daily, `scripts/kolibri-gufo.sh start|stop|status|logs`
-on M1 stops the co-resident gufo container first (the two do not fit in one
-128 GiB UMA), refuses to start below 16 GiB of available memory, and waits for
-`/health` before reporting ready.
+`scripts/kolibri-gufo.sh start|stop|status|logs` drives that box: it refuses to
+start below 16 GiB of available memory **and** while more than 8 GiB of GTT is
+already resident, naming the holder (`amd-smi process`) instead of stopping a
+container on a guess, and it waits for `/health` before reporting ready.
