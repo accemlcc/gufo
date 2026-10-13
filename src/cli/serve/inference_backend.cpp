@@ -44,6 +44,8 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include "src/models/gemma4/vision/encoder.hpp"
 #endif
+#include "src/models/kolibri1/chat_template.hpp"
+#include "src/models/kolibri1/engine.hpp"
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
 #include "src/models/qwen/hip/executor.hpp"
@@ -311,6 +313,48 @@ std::vector<std::uint8_t> Gemma4CompatibilityIdentity(
   return {canonical.begin(), canonical.end()};
 }
 #endif
+
+constexpr std::string_view kKolibriStateAbi = "kolibri1-rocm-session-v1";
+
+std::vector<std::uint8_t> KolibriCompatibilityIdentity(
+    std::string_view artifact_fingerprint, std::uint32_t max_context,
+    std::uint32_t ring, std::uint32_t prefill_chunk) {
+  if (!IsSha256Hex(artifact_fingerprint)) {
+    throw std::invalid_argument(
+        "Kolibri 1 disk cache requires an artifact fingerprint");
+  }
+  std::ostringstream identity;
+  identity << "schema=gufo-text-continuation-v2\n"
+           << "model_kind=kolibri1\n"
+           << "artifact_id=" << core::kGgufIdentityScheme << ':'
+           << artifact_fingerprint << '\n'
+           << "tokenizer=gpt2-byte-level-bpe-kolibri1-pre-v1\n"
+           << "chat_template=" << models::kolibri1::ChatTemplate::TemplateId()
+           << '\n'
+           << "chat_template_reference_sha256="
+           << models::kolibri1::ChatTemplate::TemplateSha256() << '\n'
+           << "state_abi=" << kKolibriStateAbi << '\n'
+           << "payload_layout=kolibri1-rocm-session-snapshot-v"
+           << models::kolibri1::Session::kSnapshotPayloadVersion << '\n'
+           << "kv_layout=b16-full-context+sliding-ring-as-stored\n"
+           // A restore copies a sliding layer's whole ring exactly as the
+           // attention kernel left it and reorders nothing, so the ring width
+           // is part of the state's identity. The rows of one forward decide
+           // it - window 513 rounded up past them, which came out 1,024 for
+           // every width measured here - and the width is named alongside
+           // because a snapshot is only valid for the forward geometry that
+           // produced it.
+           << "sliding_ring_slots=" << ring << '\n'
+           << "prefill_chunk_rows=" << prefill_chunk << '\n'
+           << "context_tokens=" << max_context << '\n'
+           // Only the sliding layers are rotated; the ten patternless ones
+           // attend the whole past with no positional encoding at all, so a
+           // restored frontier means something else than under RoPE.
+           << "position_policy=rope-sliding-layers-only-v1\n"
+           << "adapters=none\n";
+  const std::string canonical = identity.str();
+  return {canonical.begin(), canonical.end()};
+}
 
 std::vector<std::uint8_t> QwenCompatibilityIdentity(
     std::string_view artifact_fingerprint,
@@ -3727,6 +3771,407 @@ private:
 };
 #endif
 
+
+#if defined(ENGINE_ENABLE_HIP)
+// One Kolibri 1 session owns its attention state - the ten patternless layers
+// at the whole context, the forty sliding ones at a ring of 1,024 - and its
+// snapshots. The forwards themselves run on one executor whose scratch is
+// sized for `prefill_chunk` rows, so two requests must never be inside one at
+// the same time; the scheduler's single worker already serialises them, which
+// is also why this runner offers no batched plan.
+// Width is a model constant, measured 2026-10-13 on m1 against the engine
+// directly (`tools/kolibri/throughput`, 45,254 MiB of weights pinned): at chat
+// length (pp 512, context 640) 16 prefills 249 tok/s, 32 gives 333, 128 gives
+// 269; at pp 8192 the curve climbs to 225, 279, 254, 298 for 16/32/64/128 at
+// context 8320 and 241/254/324 for 16/64/128 at 131072. 32 is the width that
+// is never far off — 128 loses 19 % at chat length, 16 loses 25 % on a long
+// prompt, and 64 sits under 32 wherever both were measured. Decode ignores the
+// reservation (55.4 tok/s at 8320 against 55.7 at 131072, chunk 64), so this
+// buys prefill only.
+constexpr std::uint32_t kKolibriPrefillChunk = 32;
+
+using KolibriModel = models::kolibri1::Model;
+using KolibriSession = models::kolibri1::Session;
+
+std::int32_t KolibriEngineToken(TextRunnerToken token) {
+  if (token >
+      static_cast<TextRunnerToken>(std::numeric_limits<std::int32_t>::max())) {
+    throw std::invalid_argument("Kolibri 1 token ID exceeds engine range");
+  }
+  return static_cast<std::int32_t>(token);
+}
+
+class KolibriTextRunnerState final : public TextRunnerState {
+public:
+  KolibriTextRunnerState(const std::shared_ptr<KolibriModel>& model,
+                         std::size_t state_bytes) {
+    std::string error;
+    // The session's cache is as wide as the model's context; the server asked
+    // for that context at load and cannot narrow it afterwards.
+    session_ = model->CreateSession(&error);
+    if (session_ == nullptr) {
+      throw std::runtime_error("Failed to create Kolibri 1 session: " + error);
+    }
+    state_bytes_ = state_bytes;
+  }
+  void Invalidate() noexcept override { session_->Reset(); }
+  void SetCancellationCheck(const CancellationCheck&) override {}
+  [[nodiscard]] TextRunnerMeasuredResources MeasuredResources()
+      const noexcept override {
+    return {.per_request_state_bytes = state_bytes_,
+            .temporary_scratch_bytes = 0};
+  }
+  [[nodiscard]] KolibriSession& session() const { return *session_; }
+
+private:
+  std::unique_ptr<KolibriSession> session_;
+  std::size_t state_bytes_{0};
+};
+
+class KolibriTextRunnerSnapshot final : public TextRunnerSnapshot {
+public:
+  KolibriTextRunnerSnapshot(
+      std::shared_ptr<KolibriModel> model,
+      std::unique_ptr<models::kolibri1::SessionSnapshot> snapshot,
+      std::size_t position)
+      : model(std::move(model)),
+        snapshot(std::move(snapshot)),
+        position(position) {}
+  [[nodiscard]] std::size_t PayloadBytes() const noexcept override {
+    return snapshot == nullptr
+               ? 0
+               : static_cast<std::size_t>(snapshot->SizeBytes());
+  }
+  std::shared_ptr<KolibriModel> model;
+  std::unique_ptr<models::kolibri1::SessionSnapshot> snapshot;
+  std::size_t position;
+};
+
+KolibriTextRunnerState& RequireKolibriState(TextRunnerState& state) {
+  auto* kolibri = dynamic_cast<KolibriTextRunnerState*>(&state);
+  if (kolibri == nullptr) {
+    throw std::logic_error("text runner state is not Kolibri 1");
+  }
+  return *kolibri;
+}
+
+const KolibriTextRunnerState& RequireKolibriState(
+    const TextRunnerState& state) {
+  const auto* kolibri = dynamic_cast<const KolibriTextRunnerState*>(&state);
+  if (kolibri == nullptr) {
+    throw std::logic_error("text runner state is not Kolibri 1");
+  }
+  return *kolibri;
+}
+
+class KolibriTextRunner final : public TextModelRunner {
+public:
+  /// The tool syntax needs no case of its own: the model writes a JSON object
+  /// between the ordinary call tags, which is exactly what the adapter's
+  /// plain-JSON arm already parses once `ToolFormat()` keeps its JSON default.
+  /// The reasoning channel is spelled the same way `OutputMarkup` already
+  /// defaults to, so `Markup()` keeps its default too.
+  KolibriTextRunner(std::shared_ptr<KolibriModel> model, std::string model_id,
+                    std::string artifact_fingerprint = {})
+      : model_(std::move(model)),
+        model_id_(std::move(model_id)),
+        max_context_(model_->max_context()),
+        session_bytes_(
+            models::kolibri1::rocm::Executor::CacheBytes(
+                model_->config(), max_context_, model_->executor()->ring()) +
+            model_->tokenizer().VocabSize() * sizeof(float)) {
+    if (!artifact_fingerprint.empty()) {
+      persistence_ = TextRunnerPersistenceDescriptor{
+          .compatibility_identity =
+              KolibriCompatibilityIdentity(artifact_fingerprint, max_context_,
+                                           model_->executor()->ring(),
+                                           kKolibriPrefillChunk),
+          .payload_version = KolibriSession::kSnapshotPayloadVersion,
+      };
+    }
+  }
+
+  [[nodiscard]] TextRunnerDescriptor Descriptor() const override {
+    return {
+        .model_id = model_id_,
+        .state_abi = std::string(kKolibriStateAbi),
+        .max_context = max_context_,
+        .capabilities =
+            TextRunnerCapabilities{
+                .incremental_prefill = true,
+                .snapshot = true,
+                .fork = true,
+                .final_token_advance_required = false,
+                .incremental_text_is_exact = true,
+                .prefix_reuse = true,
+            },
+        .persistence = persistence_,
+    };
+  }
+
+  [[nodiscard]] TextRunnerResourceClaim ResourceClaim() const override {
+    std::size_t free_bytes = 0;
+    std::size_t total_bytes = 0;
+    std::optional<std::size_t> capacity;
+    if (hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
+      capacity = free_bytes;
+    }
+    return {
+        .resident_weights_bytes = model_->resident_bytes(),
+        .state_capacity_bytes = capacity,
+        .per_request_state_bytes = session_bytes_,
+        .temporary_scratch_bytes = 0,
+        .retained_snapshot_capacity_bytes = HostSnapshotBudgetBytes(),
+        .retained_snapshot_ceiling_bytes = HostSnapshotCeilingBytes(),
+        .requires_device_runtime_lock = true,
+    };
+  }
+
+  [[nodiscard]] std::vector<TextExecutionPlan> SupportedPlans() const override {
+    // One forward at a time; see the note above the prefill chunk.
+    return {{.kind = TextExecutionPlanKind::kSerial, .physical_width = 1}};
+  }
+
+  [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
+      std::string_view text) const override {
+    // Control tokens in the text are matched as specials, which is what makes
+    // a role marker one token. No BOS is requested: this vocabulary names none,
+    // so a raw prompt and a rendered one are tokenized the same way.
+    const auto tokens = model_->tokenizer().Encode(text, false, true);
+    return {tokens.begin(), tokens.end()};
+  }
+
+  [[nodiscard]] std::optional<std::vector<TextRunnerToken>> RenderAndTokenize(
+      const ChatRequest& request) const override {
+    const auto prepared = PreparePrompt(request);
+    if (!prepared) {
+      return std::nullopt;
+    }
+    return prepared->tokens;
+  }
+
+  [[nodiscard]] std::optional<TextPreparedPrompt> PreparePrompt(
+      const ChatRequest& request) const override {
+    if (std::ranges::any_of(request.messages,
+                            [](const auto& m) { return !m.images.empty(); })) {
+      throw std::invalid_argument("model does not support image input");
+    }
+    std::string error;
+    const auto rendered = models::kolibri1::ChatTemplate::Render(
+        request.messages, Tools(request),
+        models::kolibri1::ResolveChatOptions(request.reasoning), &error);
+    if (!rendered) {
+      throw std::invalid_argument("Kolibri 1 chat template: " + error);
+    }
+    TextPreparedPrompt prepared;
+    prepared.tokens = Tokenize(rendered->text);
+    // The reusable prefix stops before the mutable part of the request, and
+    // what follows it opens with a control token, so it tokenizes apart.
+    if (rendered->stable_prefix_offset < rendered->text.size()) {
+      const auto suffix = Tokenize(std::string_view(rendered->text)
+                                       .substr(rendered->stable_prefix_offset));
+      if (suffix.size() < prepared.tokens.size() &&
+          std::equal(suffix.begin(), suffix.end(),
+                     prepared.tokens.end() -
+                         static_cast<std::ptrdiff_t>(suffix.size()))) {
+        prepared.cache_prefix_tokens = prepared.tokens.size() - suffix.size();
+      }
+    }
+    return prepared;
+  }
+
+  [[nodiscard]] std::shared_ptr<const sampling::ConstraintVocabulary>
+  BuildConstraintVocabulary() const override {
+    return std::make_shared<const sampling::ConstraintVocabulary>(
+        model_->tokenizer().VocabSize(), [this](std::uint32_t id) {
+          const auto token = static_cast<std::int32_t>(id);
+          return sampling::ConstraintVocabulary::Piece{
+              model_->tokenizer().TokenText(token, false),
+              model_->tokenizer().IsEndOfGeneration(token)};
+        });
+  }
+
+  [[nodiscard]] std::string Decode(
+      std::span<const TextRunnerToken> tokens) const override {
+    std::vector<std::int32_t> converted;
+    converted.reserve(tokens.size());
+    for (const auto token : tokens) {
+      converted.push_back(KolibriEngineToken(token));
+    }
+    return model_->tokenizer().Decode(converted, false);
+  }
+
+  [[nodiscard]] std::unique_ptr<TextRunnerState> CreateState() const override {
+    return std::make_unique<KolibriTextRunnerState>(model_, session_bytes_);
+  }
+
+  void PreparePrefixReuse(
+      TextRunnerState& state,
+      std::span<const TextRunnerToken> prefix) const override {
+    if (RequireKolibriState(state).session().position() != prefix.size()) {
+      throw std::logic_error("Kolibri 1 reused prefix does not match checkpoint");
+    }
+  }
+
+  [[nodiscard]] TextPrefillStep Prefill(
+      TextRunnerState& state, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t max_input_tokens) const override {
+    auto& session = RequireKolibriState(state).session();
+    if (offset != session.position() || offset >= prompt.size()) {
+      throw std::logic_error("Kolibri 1 prefill offset does not match state");
+    }
+    const std::size_t end =
+        offset + std::min(max_input_tokens, prompt.size() - offset);
+    std::vector<std::int32_t> chunk;
+    chunk.reserve(end - offset);
+    for (const auto token : prompt.subspan(offset, end - offset)) {
+      chunk.push_back(KolibriEngineToken(token));
+    }
+    try {
+      // The session walks the chunk through the projections itself, one
+      // forward of `prefill_chunk` rows at a time, and keeps only the last
+      // row's logits.
+      session.Append(chunk);
+    } catch (...) {
+      // Half a chunk is a context no later token can be appended to correctly.
+      session.Reset();
+      throw;
+    }
+    return {.consumed_tokens = end - offset,
+            .decode_ready = end == prompt.size()};
+  }
+
+  [[nodiscard]] TextDecodeSelection SelectNext(
+      TextRunnerState& state, sampling::SamplerState& sampler) const override {
+    auto& session = RequireKolibriState(state).session();
+    if (session.position() >= max_context_) {
+      return {.stop = true, .piece = {}};
+    }
+    const auto logits = session.logits();
+    if (logits.empty()) {
+      throw std::runtime_error("Kolibri 1 token selection has no logits");
+    }
+    const auto token = static_cast<std::int32_t>(sampler.Sample(logits));
+    if (state.stop_at_eos() && model_->tokenizer().IsEndOfGeneration(token)) {
+      return {.stop = true, .token = 0, .piece = {}};
+    }
+    return {.stop = false,
+            .token = static_cast<TextRunnerToken>(token),
+            .piece = model_->tokenizer().TokenText(token, false)};
+  }
+
+  void Advance(TextRunnerState& state, TextRunnerToken token) const override {
+    // The token just drawn is the next row; the cache already holds every
+    // position before it.
+    const std::int32_t engine_token = KolibriEngineToken(token);
+    RequireKolibriState(state).session().Append(
+        std::span<const std::int32_t>(&engine_token, 1));
+  }
+
+  [[nodiscard]] std::optional<TextDecodeSelection> PreviewFirstToken(
+      TextRunnerState& state, sampling::SamplerState& sampler) const override {
+    return SelectNext(state, sampler);
+  }
+
+  [[nodiscard]] std::size_t CheckpointPosition(
+      const TextRunnerState& state) const override {
+    return RequireKolibriState(state).session().position();
+  }
+
+  [[nodiscard]] std::size_t SnapshotPayloadBytes(
+      const TextRunnerState& state) const override {
+    return static_cast<std::size_t>(
+        RequireKolibriState(state).session().SnapshotBytes());
+  }
+
+  [[nodiscard]] std::unique_ptr<TextRunnerSnapshot> Snapshot(
+      const TextRunnerState& state) const override {
+    const auto& session = RequireKolibriState(state).session();
+    std::string error;
+    auto snapshot = session.SaveSnapshot(&error);
+    if (snapshot == nullptr) {
+      throw std::runtime_error("Kolibri 1 snapshot failed: " + error);
+    }
+    return std::make_unique<KolibriTextRunnerSnapshot>(
+        model_, std::move(snapshot), session.position());
+  }
+
+  void RestoreOrFork(TextRunnerState& state,
+                     const TextRunnerSnapshot& snapshot) const override {
+    const auto& owned = Owned(snapshot);
+    auto& restored = RequireKolibriState(state);
+    std::string error;
+    if (!restored.session().RestoreSnapshot(*owned.snapshot, &error)) {
+      restored.Invalidate();
+      throw std::runtime_error("Kolibri 1 snapshot restore failed: " + error);
+    }
+  }
+
+  [[nodiscard]] std::size_t PersistentSnapshotPayloadBytes(
+      const TextRunnerSnapshot& snapshot) const override {
+    return Owned(snapshot).PayloadBytes();
+  }
+
+  [[nodiscard]] std::size_t SerializePersistentSnapshot(
+      const TextRunnerSnapshot& snapshot,
+      std::span<std::uint8_t> destination) const override {
+    const auto& owned = Owned(snapshot);
+    if (destination.size() != owned.PayloadBytes() ||
+        !owned.snapshot->CopyTo(destination)) {
+      throw std::invalid_argument(
+          "Kolibri 1 persistent snapshot serialization failed");
+    }
+    return destination.size();
+  }
+
+  void StreamPersistentSnapshot(const TextRunnerSnapshot& snapshot,
+                                const SnapshotSink& sink) const override {
+    if (!Owned(snapshot).snapshot->Stream(sink)) {
+      throw std::runtime_error("Kolibri 1 persistent snapshot copy failed");
+    }
+  }
+
+  void RestorePersistentSnapshot(
+      TextRunnerState& state,
+      std::span<const std::uint8_t> payload) const override {
+    auto& restored = RequireKolibriState(state);
+    std::string error;
+    if (!restored.session().RestoreSnapshot(payload, &error)) {
+      restored.Invalidate();
+      throw std::runtime_error("Kolibri 1 persistent snapshot restore failed: " +
+                               error);
+    }
+  }
+
+private:
+  [[nodiscard]] const KolibriTextRunnerSnapshot& Owned(
+      const TextRunnerSnapshot& snapshot) const {
+    const auto* owned =
+        dynamic_cast<const KolibriTextRunnerSnapshot*>(&snapshot);
+    if (owned == nullptr || owned->model.get() != model_.get() ||
+        owned->snapshot == nullptr) {
+      throw std::invalid_argument(
+          "Kolibri 1 snapshot does not belong to this model");
+    }
+    return *owned;
+  }
+  /// A request that asks for no tools gets no schema block, as in the other
+  /// runners: the template renders the tool list into the system turn.
+  static std::span<const tokenization::ChatTool> Tools(
+      const ChatRequest& request) {
+    return request.tool_choice == ChatRequest::ToolChoice::kNone
+               ? std::span<const tokenization::ChatTool>{}
+               : std::span<const tokenization::ChatTool>{request.tools};
+  }
+
+  std::shared_ptr<KolibriModel> model_;
+  std::string model_id_;
+  std::uint32_t max_context_;
+  std::size_t session_bytes_;
+  std::optional<TextRunnerPersistenceDescriptor> persistence_;
+};
+#endif
+
 }  // namespace
 
 struct InferenceBackend::Impl {
@@ -4011,6 +4456,51 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                 prefill_policy, scheduler_policy, speculative_config,
                 std::move(resolved_disk_cache_config), std::move(vision),
                 image_tokens, ram_cache_config);
+  }
+  if (reader->GetMetadataString("general.architecture") == "kolibri1") {
+    if (!vision_model_path.empty()) {
+      SetError(error, "Kolibri 1 does not support --mmproj");
+      return false;
+    }
+    if (speculative_config.backend != TextSpeculativeBackend::kDisabled) {
+      SetError(error, "Kolibri 1 has no draft model; drop --speculative");
+      return false;
+    }
+    // The rows of one forward decide three things at once: the routed experts
+    // are re-read per chunk, the executor's scratch is allocated for exactly
+    // that many rows, and a sliding layer's ring is the 513-token window
+    // rounded up past them. The width is the model constant above - 32 rows,
+    // fastest at chat length and ahead of 16 on a long prompt too, decode
+    // unmoved (docs/models/kolibri-1/BENCHMARKS.md). Since `prefill_chunk_rows=`
+    // is part of the state identity, a `--cache-disk` tree written at another
+    // width is refused and re-prefilled instead of restored into geometry the
+    // snapshot never had; that is a re-prefill cost, not a correctness risk.
+    // The engine hands out a uniquely-owned model; the pool needs shared
+    // ownership, because every session state and every snapshot keeps one.
+    std::shared_ptr<models::kolibri1::Model> model(
+        models::kolibri1::Model::Load(
+            model_path,
+            models::kolibri1::ModelOptions{
+                .max_context = max_context,
+                .prefill_chunk = kKolibriPrefillChunk,
+            },
+            &load_error));
+    if (model == nullptr) {
+      SetError(error, "Failed to create Kolibri 1 model: " + load_error);
+      return false;
+    }
+    if (DiskCacheEnabled(resolved_disk_cache_config) &&
+        resolved_disk_cache_config.model_artifact_fingerprint.empty() &&
+        !FingerprintArtifact(
+            "Kolibri 1", *reader,
+            &resolved_disk_cache_config.model_artifact_fingerprint, error)) {
+      return false;
+    }
+    const auto name = reader->GetMetadataString("general.name");
+    return load(std::move(model), error, max_context, session_count,
+                prefill_policy, scheduler_policy, speculative_config,
+                std::move(resolved_disk_cache_config), ram_cache_config,
+                name ? std::string(*name) : std::string("kolibri1"));
   }
   if (reader->GetMetadataString("general.architecture") == "qwen4exp") {
     if (speculative_config.backend != TextSpeculativeBackend::kDisabled &&
@@ -4500,6 +4990,77 @@ bool InferenceBackend::load(
         disk_cache_config.model_artifact_fingerprint,
         disk_cache_config.draft_model_artifact_fingerprint, std::move(vision),
         image_tokens);
+    new_state->model_id = runner->Descriptor().model_id;
+    new_state->max_context = max_context;
+    std::optional<TextRunnerDiskCacheOptions> runner_disk_cache;
+    if (DiskCacheEnabled(disk_cache_config)) {
+      runner_disk_cache = TextRunnerDiskCacheOptions{
+          .directory = std::move(disk_cache_config.directory),
+          .capacity_bytes = disk_cache_config.capacity_bytes,
+          .staging_capacity_bytes = disk_cache_config.staging_capacity_bytes,
+      };
+    }
+    auto runner_pool = std::make_shared<TextRunnerPool>(
+        std::move(runner), session_count, std::move(runner_disk_cache),
+        ram_cache_config);
+    new_state->scheduler = std::make_shared<TextGenerationScheduler>(
+        std::move(runner_pool), prefill_policy, scheduler_policy);
+    {
+      const std::lock_guard<std::mutex> lock(impl_->state_mutex);
+      impl_->state = std::move(new_state);
+    }
+    return true;
+  } catch (const std::exception& exception) {
+    SetError(error, exception.what());
+    return false;
+  }
+}
+#endif
+
+#if defined(ENGINE_ENABLE_HIP)
+bool InferenceBackend::load(
+    std::shared_ptr<models::kolibri1::Model> model, std::string* error,
+    std::uint32_t max_context, std::size_t session_count,
+    TextPrefillPolicy prefill_policy, TextSchedulerPolicy scheduler_policy,
+    TextSpeculativeConfig speculative_config,
+    TextDiskCacheConfig disk_cache_config,
+    TextRunnerRamCacheOptions ram_cache_config, std::string model_id) {
+  if (model == nullptr) {
+    SetError(error, "Kolibri 1 model must not be null");
+    return false;
+  }
+  // A session's cache is allocated to the context the model itself was loaded
+  // with, so the server's --context has to be that context; nothing here can
+  // narrow it per session the way a runner with its own cache sizing can.
+  if (max_context == 0)
+    max_context = model->max_context();
+  if (session_count == 0 || max_context == 0 ||
+      max_context != model->max_context()) {
+    SetError(error,
+             "Kolibri 1 HTTP sessions or context do not match the loaded "
+             "model's context");
+    return false;
+  }
+  if (speculative_config.backend != TextSpeculativeBackend::kDisabled) {
+    SetError(error, "Kolibri 1 has no draft model");
+    return false;
+  }
+  if (DiskCacheEnabled(disk_cache_config) &&
+      (!IsSha256Hex(disk_cache_config.model_artifact_fingerprint) ||
+       disk_cache_config.capacity_bytes == 0)) {
+    SetError(error, "Kolibri 1 persistent disk cache configuration is invalid");
+    return false;
+  }
+  try {
+    auto new_state = std::make_shared<Impl::State>();
+    // The artifact carries no `general.sampling.*`; the preset holds the
+    // numbers from the upstream generation config.
+    new_state->sampling_defaults.model = sampling::TextModelPreset::kKolibri1;
+    new_state->sampling_defaults.supplied = {};
+    auto runner = std::make_shared<KolibriTextRunner>(
+        std::move(model),
+        model_id.empty() ? std::string("kolibri1") : std::move(model_id),
+        disk_cache_config.model_artifact_fingerprint);
     new_state->model_id = runner->Descriptor().model_id;
     new_state->max_context = max_context;
     std::optional<TextRunnerDiskCacheOptions> runner_disk_cache;

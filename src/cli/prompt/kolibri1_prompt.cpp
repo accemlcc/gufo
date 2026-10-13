@@ -4,13 +4,14 @@
 #include <exception>
 #include <iostream>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
-#include "src/cli/tokenization/chat_tokenization.hpp"
 #include "src/core/sampling.hpp"
 #include "src/models/kolibri1/chat_template.hpp"
 #include "src/models/kolibri1/engine.hpp"
+#include "src/models/qwen/chat_template.hpp"
 
 namespace gufo::cli {
 namespace {
@@ -31,12 +32,13 @@ double Elapsed(std::chrono::steady_clock::time_point since) {
 [[nodiscard]] std::unique_ptr<k1::Model> LoadModel(
     const PromptOptions& opt, std::chrono::steady_clock::time_point load_start) {
   std::string error;
-  const auto model = k1::Model::Load(opt.model_path,
-                                     k1::ModelOptions{
-                                         .max_context = kKolibriContext,
-                                         .prefill_chunk = 16,
-                                     },
-                                     &error);
+  auto model = k1::Model::Load(
+      opt.model_path,
+      k1::ModelOptions{
+          .max_context = kKolibriContext,
+          .prefill_chunk = 16,
+      },
+      &error);
   if (!model) {
     std::cerr << "Kolibri 1 load failed: " << error << '\n';
     return nullptr;
@@ -80,14 +82,20 @@ int Generate(const PromptOptions& opt, const k1::Model& model,
               << "Prompt tokens: " << prompt.size() << '\n'
               << "--- Generation Output ---\n";
   }
-  sampling::SamplerState sampler(opt.sampling,
-                                 std::span<const sampling::TokenId>(
-                                     prompt.data(), prompt.size()));
+  // The sampler works in unsigned token ids and the engine in signed ones, so
+  // the prompt is handed over as a copy rather than a view.
+  std::vector<sampling::TokenId> history;
+  history.reserve(prompt.size());
+  for (const k1::TokenId token : prompt) {
+    history.push_back(static_cast<sampling::TokenId>(token));
+  }
+  sampling::SamplerState sampler(opt.sampling, history);
   const auto decode_start = std::chrono::steady_clock::now();
   std::size_t generated = 0;
   for (; generated < opt.max_tokens; ++generated) {
-    const k1::TokenId token = sampler.Sample(session.logits());
-    sampler.Accept(token);
+    const k1::TokenId token =
+        static_cast<k1::TokenId>(sampler.Sample(session.logits()));
+    sampler.Accept(static_cast<sampling::TokenId>(token));
     if (model.tokenizer().IsEndOfGeneration(token)) {
       break;
     }

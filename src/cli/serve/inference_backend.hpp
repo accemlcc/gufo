@@ -29,6 +29,10 @@ class Encoder;
 }  // namespace vision
 }  // namespace gufo::models::gemma4
 
+namespace gufo::models::kolibri1 {
+class Model;
+}
+
 namespace gufo::models::qwen38_flash_next {
 class Model;
 }
@@ -143,6 +147,21 @@ public:
             std::shared_ptr<models::gemma4::vision::Encoder> vision = {},
             std::uint32_t image_tokens = 0,
             TextRunnerRamCacheOptions ram_cache_config = {});
+
+  /// Installs a previously loaded Kolibri 1 model with request-owned sessions
+  /// and host/disk continuation snapshots. The model owns its tokenizer and the
+  /// compiled chat template, and every session it hands out is sized by the
+  /// context the model itself was loaded with. `model_id` names the served
+  /// model: the artifact's `general.name`, which the loader reads, since this
+  /// model class keeps no name of its own. Empty selects "kolibri1".
+  bool load(std::shared_ptr<models::kolibri1::Model> model, std::string* error,
+            std::uint32_t max_context = 0, std::size_t session_count = 1,
+            TextPrefillPolicy prefill_policy = {},
+            TextSchedulerPolicy scheduler_policy = {},
+            TextSpeculativeConfig speculative_config = {},
+            TextDiskCacheConfig disk_cache_config = {},
+            TextRunnerRamCacheOptions ram_cache_config = {},
+            std::string model_id = {});
 #endif
 
   /// Stable model identifier used in API responses.

@@ -355,6 +355,29 @@ std::unique_ptr<Model> Model::Load(const std::string& path,
   if (!m->device_) {
     return nullptr;
   }
+  // The logits are as wide as the output layer, the ids as long as the
+  // tokenizer's list, and constrained sampling refuses a mask that does not fit
+  // the row it masks. A file whose output layer is padded past its token list
+  // would fail only on the first structured request, with a complaint about a
+  // mask - so the two widths are tied together here, where the answer is still
+  // "that artifact is not for this engine".
+  if (m->tokenizer_->VocabSize() != m->device_->vocab_size()) {
+    Fail(error_msg, "kolibri1 vocabulary lists " +
+                       std::to_string(m->tokenizer_->VocabSize()) +
+                       " entries, the output layer scores " +
+                       std::to_string(m->device_->vocab_size()));
+    return nullptr;
+  }
+  // Positions past the trained length are nothing to try: the ten global layers
+  // carry no positional encoding at all, so outside the trained range not even
+  // the sliding layers' relative positions have a reference. Refuse before the
+  // cache is allocated at a width the model was never shown.
+  if (options.max_context > m->weights_->config.context_length) {
+    Fail(error_msg, "kolibri1 context " + std::to_string(options.max_context) +
+                       " exceeds the trained " +
+                       std::to_string(m->weights_->config.context_length));
+    return nullptr;
+  }
   m->executor_ = std::make_shared<rocm::Executor>(*m->device_,
                                                    options.prefill_chunk, 1,
                                                    options.max_context);
