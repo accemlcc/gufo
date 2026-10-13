@@ -3781,14 +3781,20 @@ private:
 // is also why this runner offers no batched plan.
 // Width is a model constant, not a per-request knob: it sizes the executor's
 // scratch and it is part of the disk-cache identity, so changing it invalidates
-// every tree preprocessed under another value. The value here is the width the
-// engine was qualified at. Single runs on m1 (2026-10-13,
-// `tools/kolibri/throughput`, 45,254 MiB of weights pinned) spread 15-30 %
-// inside one cell - pp 512 at context 640 gave 249-340 tok/s at a fixed width,
-// and at pp 8192, context 131072, 16 measured 231 and 268 against 32's 249 and
-// 250 - so no ordering of 16/32/64/128 is established by measurement, and this
-// number carries none. Decode stayed between 55 and 60 tok/s in all thirteen
-// cells whatever context was reserved, so width can only buy prefill.
+// every tree preprocessed under another value. Measured on m1 (2026-10-13,
+// `tools/kolibri/throughput`, 45,254 MiB of weights pinned, median over
+// repeated cells): short prompts favour 32 measurably - pp 512 at context 640
+// gives 253.2 +/- 6.3 tok/s at 16 against 317.8 +/- 22.0 at 32 (n=9) - while
+// pp 8192 at context 131072 is not separable (245.4 +/- 21.2 against
+// 250.3 +/- 5.6), and the stricter n=5 set turns even that one the other way
+// (265.4 +/- 1.3 for 16 against 245.3 +/- 2.4 for 32). 16 stays because it is
+// the width the engine was qualified at, and the short-prompt lead given up
+// there is a deliberate choice that costs chat prefill. The width buys no
+// memory either way: the ring is `next_pow2(513 + rows)`, so anything up to
+// 511 rows keeps 1,024 slots, and only the scratch grows - which makes a width
+// chosen per prompt length the next step, not this constant. Decode held flat
+// across every cell (59.6 tok/s at pp 512, 55.5 at pp 8192, MAD <= 0.2), so
+// this number can only ever move prefill.
 constexpr std::uint32_t kKolibriPrefillChunk = 16;
 
 using KolibriModel = models::kolibri1::Model;
