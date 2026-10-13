@@ -8,6 +8,14 @@ import openai
 from metrics import validate_tool_events
 from templates import HIDES_NON_STRING_CONST, MAY_SKIP_THINKING
 
+# A marker envelope is parsed as JSON, and that parser holds an argument back
+# until a value is complete: the deltas on the wire follow the values, not the
+# chunk grid, so one delta carrying the whole object is what a correct stream
+# looks like. gemmlib's typed call syntax has no such binding and generates
+# argument bytes as they decode, so there a single fragment is buffering — the
+# failure this suite was written to catch.
+RELEASES_ARGUMENT_ON_VALUE = {"qwen38", "deepseek4", "kolibri1"}
+
 
 TEXT = (
     'First line: preserve "quotes", backslashes \\, and café.\n'
@@ -169,8 +177,20 @@ def check_tool_streaming(client, model, checks, chat_result, preset=None):
             assert not result["content"].strip(), result
             if not thinking or preset not in MAY_SKIP_THINKING:
                 assert bool(result["reasoning"].strip()) == thinking, result
-            assert len(result["fragments"]) > 3, ("tool arguments were buffered", result)
-            assert result["fragments"][0]["ms"] < result["fragments"][-1]["ms"] < result["terminal_ms"], result
+            if preset in RELEASES_ARGUMENT_ON_VALUE:
+                # The JSON parser of a marker envelope releases an argument
+                # when a value is complete, not on the chunk grid, and the
+                # gemmlib parser of gemma4 has no such binding. What has to
+                # hold either way is that argument bytes reached the wire
+                # before the turn closed; how many pieces they came in is the
+                # parser's business, and only the streaming parser promises a
+                # number.
+                assert result["fragments"], ("no argument delta reached the wire", result)
+                assert result["fragments"][-1]["ms"] < result["terminal_ms"], result
+            else:
+                assert len(result["fragments"]) > 3, ("tool arguments were buffered", result)
+                assert (result["fragments"][0]["ms"] < result["fragments"][-1]["ms"]
+                        < result["terminal_ms"]), result
 
         body = request(model, api, preset=preset)
         phase = "limited" if api == "responses" else "stopped"
