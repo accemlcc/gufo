@@ -438,11 +438,15 @@ is the control that says the window is comparing one change and not one machine.
 
 | Rate | old build | new build | ratio |
 | --- | ---: | ---: | ---: |
-| pp2048, engine-direct, context 2,144 | 2.713 ms/token stage total | **601.6 tok/s**, 1.61 ms/token | **1.67×** on the stage total |
+| pp2048, engine-direct, context 2,144 | 2.713 ms/token stage total | 1.601 ms/token stage total, 601.6 tok/s measured | **1.70×** on the stage total |
 | pp8192, engine-direct, context 8,300 | 351.6 tok/s | **563.4 tok/s** | **1.60×** |
 | decode, context 8,300 | 52.90 tok/s | 52.80 tok/s | — |
 | pp13,057, served, one session, context 16,384 | 336.85 · 336.90 tok/s | **539.03 · 537.45** | **1.60×** |
 | pp10,438, served, same server | — | 557.82 tok/s | |
+
+Served rows are `tools/kolibri/served_pp.py`: one marker-prefixed prompt per
+run — a repeated prompt would be a byte-exact prefix hit rather than a prefill —
+`max_tokens: 1`, and the server's own `timings.prompt_per_second`.
 
 The old build's engine-direct 351.6 tok/s at pp8192 is within 0.2 % of the
 352.1 recorded before the change ([Where the forward's time
