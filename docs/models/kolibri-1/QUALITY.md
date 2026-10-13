@@ -80,12 +80,17 @@ Cache behaviour was measured in both directions, at 92 tokens and at 39,292:
   shared text, because that calibration was a *different conversation*: nothing
   was checkpointed at the byte where the two prompts part, so the only
   candidates left were the grid points of `text_model_runner.cpp:753`.
-- Inside one conversation the boundary is finer, and it is declared rather than
-  rounded: reuse ends at the stable prefix, which for a prompt ending in a
-  text-only user turn ends *before* that turn (`stable_prefix_offset`,
-  `chat_template.hpp:47-51`). Measured at three depths: 4,203 → 3,609, 4,803 →
-  4,211, 20,606 → 20,008 — a gap of 594, 592 and 598 tokens, one user block
-  each time. The same conversation sent again reuses whole: 4,797 → 4,797.
+- Inside one conversation the boundary is a turn, not a rounding: reuse ends at
+  the end of the **second-to-last closed turn**, its four-token assistant frame
+  included, so every continuation lags one turn of its own growth behind the
+  prompt end. Measured on a conversation whose turns grow by 598 tokens
+  (`cache-depth.json`, preset `kolibri1`, temperature 0, seed 31, rc=0): 20,606
+  → 0 cold, 21,204 → 20,602, 21,802 → 20,606, three branches at 21,825 →
+  21,204, resume 21,820 → 21,204, and the same request once more 21,820 →
+  21,820 with `prefill_tokens=0`. `21204 − 20602 = 598 + 4` and
+  `21802 − 20606 = 2 × 598` are the two halves of that sentence;
+  `cached + prefill == prompt` holds in all sixteen rows and every cold control
+  caches 0 with the full prompt as prefill.
 - The first turn after a leg that ended without a trailing user turn pays the
   grid as well, and not because of a foreign prefix: such a leg's stable prefix
   is its own prompt end, so the checkpoint it keeps contains the opened
