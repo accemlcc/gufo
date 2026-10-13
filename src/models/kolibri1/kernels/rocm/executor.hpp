@@ -123,6 +123,18 @@ private:
   bool stage_profile_{false};
   /// Four fixed markers plus five per layer, created only while profiling.
   std::vector<hipEvent_t> stage_events_;
+  /// The routed stage cut into its launches, on
+  /// GUFO_KOLIBRI_ROCM_ROUTED_STAGE_PROFILE set together with the five-stage
+  /// switch above: seven markers per layer, the first opening the stage and one
+  /// after each of the six launches that run before `MoeFinish`. It is read
+  /// against the `routed=` of the stage line, whose total it splits. A separate
+  /// switch because each marker costs about a microsecond, and the five-stage
+  /// line is quoted from runs that never carried them. Markers are recorded
+  /// only for a forward that runs a single piece: past `kMaxGroupSlots` the
+  /// pieces re-read experts, and splitting that would attribute a re-read to
+  /// whichever piece it landed in.
+  std::vector<hipEvent_t> routed_events_;
+  std::uint32_t routed_marks_{0};
 
   void* scratch_{nullptr};
   std::int32_t* tokens_{nullptr};

@@ -215,7 +215,15 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
       std::getenv("GUFO_KOLIBRI_ROCM_PREFILL_STAGE_PROFILE") != nullptr;
   if (stage_profile_) {
     stage_events_.resize(4U + 5U * c.num_layers);
-    for (hipEvent_t& event : stage_events_) {
+  }
+  // The routed stage's own launches, on a switch of its own: a decode step
+  // carries six extra markers per layer, and the five-stage numbers above are
+  // quoted from forwards that did not have them.
+  if (std::getenv("GUFO_KOLIBRI_ROCM_ROUTED_STAGE_PROFILE") != nullptr) {
+    routed_events_.resize(7U * c.num_layers);
+  }
+  for (std::vector<hipEvent_t>* ring : {&stage_events_, &routed_events_}) {
+    for (hipEvent_t& event : *ring) {
       HIP_CHECK(hipEventCreateWithFlags(&event, hipEventDefault));
     }
   }
@@ -326,17 +334,32 @@ void Executor::Experts(const DeviceLayer& l, const float* h,
   //
   // The loop stays for a forward wider than the table: past kMaxGroupSlots the
   // pieces re-read, which is a slower prefill rather than a refused one.
+  // The stage's time is six launches wide, and which of them it sits in is
+  // what the second switch is for. One piece only: past `kMaxGroupSlots` the
+  // pieces re-read experts, and a split of that would attribute a re-read to
+  // whichever piece it happened to land in.
+  const bool sub = !routed_events_.empty() && count <= kMaxGroupSlots;
+  std::uint32_t mark = 0;
+  const auto Mark = [&]() {
+    if (sub) {
+      HIP_CHECK(hipEventRecord(routed_events_[routed_marks_ + mark], stream_));
+      ++mark;
+    }
+  };
   for (std::uint32_t base = 0; base < count; base += kMaxGroupSlots) {
     const std::uint32_t n = std::min(kMaxGroupSlots, count - base);
     const std::uint32_t slots = n * used;
     const float* x = h + static_cast<std::size_t>(base) * d;
     float* w = weights + static_cast<std::size_t>(base) * used;
+    Mark();
     HIP_CHECK(hipMemsetAsync(moe_counts_, 0, experts * sizeof(std::uint32_t),
                              stream_));
+    Mark();
     MoeRoute({x, l.router.f32(), l.router_bias.f32(), nullptr,
               moe_ids_ + static_cast<std::size_t>(base) * used, w,
               moe_counts_, moe_groups_, n, d, experts, used},
              stream_);
+    Mark();
     // The launch bound is the number of groups that can hold a slot at all,
     // not the number of experts: a grid over all 384 makes a decode step read
     // the count of 378 empty groups, which measured two to three times the
@@ -364,18 +387,23 @@ void Executor::Experts(const DeviceLayer& l, const float* h,
     Routed(l.gate_exps, x,
            moe_gate_ + static_cast<std::size_t>(base) * used * width, width, d,
            used);
+    Mark();
     Routed(l.up_exps, x,
            moe_up_ + static_cast<std::size_t>(base) * used * width, width, d,
            used);
+    Mark();
     GateUpAct({moe_gate_ + static_cast<std::size_t>(base) * used * width,
                moe_up_ + static_cast<std::size_t>(base) * used * width,
                moe_act_ + static_cast<std::size_t>(base) * used * width,
                static_cast<std::size_t>(slots) * width},
               stream_);
+    Mark();
     Routed(l.down_exps,
            moe_act_ + static_cast<std::size_t>(base) * used * width,
            routed + static_cast<std::size_t>(base) * used * d, d, width, 1);
+    Mark();
   }
+  routed_marks_ += mark;
 }
 
 void Executor::Forward(KvCache& cache, std::span<const std::int32_t> tokens,
@@ -405,6 +433,7 @@ void Executor::Forward(KvCache& cache, std::span<const std::int32_t> tokens,
              n, d},
             stream_);
   Stage();
+  routed_marks_ = 0;
 
   const float scale =
       1.0F / std::sqrt(static_cast<float>(c.head_dim));
@@ -508,6 +537,32 @@ void Executor::Forward(KvCache& cache, std::span<const std::int32_t> tokens,
                n, embed / per, acc[0] / per, acc[1] / per, acc[2] / per,
                acc[3] / per, acc[4] / per, out_norm / per, head / per,
                total / per);
+
+  // The routed stage's own launches, when
+  // GUFO_KOLIBRI_ROCM_ROUTED_STAGE_PROFILE was set. `MoeFinish` runs after
+  // `Experts` returns, so the ring cannot see it: `finish=` is what the stage
+  // above holds that this one does not. A forward cut into pieces leaves the
+  // ring short and prints nothing.
+  if (routed_marks_ == 7U * c.num_layers) {
+    float seg[6] = {0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F};
+    for (std::uint32_t l = 0; l < c.num_layers; ++l) {
+      const hipEvent_t* e = routed_events_.data() + l * 7U;
+      for (std::uint32_t i = 0; i < 6U; ++i) {
+        float ms = 0.0F;
+        HIP_CHECK(hipEventElapsedTime(&ms, e[i], e[i + 1]));
+        seg[i] += ms;
+      }
+    }
+    float ring = 0.0F;
+    for (const float s : seg) {
+      ring += s;
+    }
+    std::fprintf(stderr,
+                 "kolibri1 routed rows=%u memset=%.3f route=%.3f gate=%.3f "
+                 "up=%.3f act=%.3f down=%.3f finish=%.3f (ms/token)\n",
+                 n, seg[0] / per, seg[1] / per, seg[2] / per, seg[3] / per,
+                 seg[4] / per, seg[5] / per, (acc[4] - ring) / per);
+  }
 }
 
 void Executor::CopyLogits(std::size_t rows, std::vector<float>* out) const {

@@ -5,6 +5,19 @@ the released Q4_K_M unless stated.
 
 ## Retained
 
+- **A timing helper that repeats one table measures the L2.** `gemv_test`'s TIME
+  cases reported 305-348 GB/s for the six-group decode launch — 4.42 MB read
+  twenty times out of a cache that holds it whole — which is the number anyone
+  comparing it against the live stage's 87 GB/s would have had to explain away.
+  `Timed` now prints a second line wherever one is possible, giving each round
+  experts no earlier round touched: the same gate launch is 167 GB/s and its
+  down-shape twin 157, on a box that also holds another model's 95 GB of GTT.
+  The cold rate is what a decode step pays, because it reads an expert once and
+  not again for fifty layers; the wide shapes, which already stream 70-283 MB a
+  launch, print one line and did not move. A standalone probe with the device to
+  itself puts the shipped split at 187 GB/s, gate-and-up-in-one-launch at 206
+  with the arithmetic unchanged, and every prefetch variant below plain —
+  [BENCHMARKS](BENCHMARKS.md#decodes-routed-stage-apart-from-the-memory-it-never-touches).
 - **One group table over the forward, not one per sixteen rows.** The routed
   stage measured flat at 2.21 ms per token from width 16 to width 128, and that
   flatness was recorded as the grouped table doing its job. It was doing

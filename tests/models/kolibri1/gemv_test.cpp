@@ -544,6 +544,15 @@ std::vector<std::int32_t> Count(std::int32_t from, std::int32_t to) {
 /// engine, whether binding a launch to every expert of the model instead of to
 /// the groups the table holds costs a decode step. A shared GPU reads these
 /// high rather than exact.
+///
+/// Two lines where a rotation is possible, because one table is not a decode
+/// step: the rounds read the same experts again and again, and the 4.42 MB a
+/// six-slot gate launch moves fits this generation's L2, so the first number
+/// is a cache number — 318 GB/s there against 187 for the same launch over
+/// tables that cannot be cached (BENCHMARKS: decode's routed stage). The second
+/// line runs each round on experts no earlier round read, until the round
+/// streams about `kRotatingBytes`; a shape moving that much in one launch keeps
+/// its single line.
 void Timed(const char* name, k::WeightFormat format, std::uint32_t experts,
            std::uint32_t m, std::uint32_t kdim, std::uint32_t rows,
            std::uint32_t slots_per_row, const std::vector<Group>& groups,
@@ -578,29 +587,84 @@ void Timed(const char* name, k::WeightFormat format, std::uint32_t experts,
     FreeAll();
     return;
   }
-  HIP_CHECK(hipStreamSynchronize(nullptr));
-  hipEvent_t first = nullptr, last = nullptr;
-  HIP_CHECK(hipEventCreate(&first));
-  HIP_CHECK(hipEventCreate(&last));
   constexpr int kRounds = 20;
-  HIP_CHECK(hipEventRecord(first, nullptr));
-  const bool ran = launch_all(kRounds);
-  HIP_CHECK(hipEventRecord(last, nullptr));
-  HIP_CHECK(hipEventSynchronize(last));
-  float ms = 0.0F;
-  HIP_CHECK(hipEventElapsedTime(&ms, first, last));
-  HIP_CHECK(hipEventDestroy(first));
-  HIP_CHECK(hipEventDestroy(last));
-  double read = 0.0;
-  for (const Group& g : groups) {
-    read += static_cast<double>(m) * RowBytes(format, kdim);
+  const auto Clock = [&](const auto& run) -> float {
+    run(2);
+    HIP_CHECK(hipStreamSynchronize(nullptr));
+    hipEvent_t first = nullptr, last = nullptr;
+    HIP_CHECK(hipEventCreate(&first));
+    HIP_CHECK(hipEventCreate(&last));
+    HIP_CHECK(hipEventRecord(first, nullptr));
+    const bool ran = run(kRounds);
+    HIP_CHECK(hipEventRecord(last, nullptr));
+    HIP_CHECK(hipEventSynchronize(last));
+    float ms = 0.0F;
+    HIP_CHECK(hipEventElapsedTime(&ms, first, last));
+    HIP_CHECK(hipEventDestroy(first));
+    HIP_CHECK(hipEventDestroy(last));
+    if (!ran) {
+      ++failures;
+    }
+    return ms;
+  };
+  const double read = static_cast<double>(groups.size()) *
+                      static_cast<double>(m) *
+                      static_cast<double>(RowBytes(format, kdim));
+  const auto report = [&](const char* tail, float ms) {
+    const double us = ms * 1000.0 / kRounds;
+    std::cout << "TIME " << name << "  " << us << " us  "
+              << read / (us * 1.0e-6) / 1.0e9
+              << " GB/s of claimed experts, " << tail << "\n";
+  };
+  report("one table", Clock(launch_all));
+
+  // A rotation replaces each group's expert instead of shifting it: the decode
+  // case's six ids span the model on purpose (0, 37, 91, 140, 255, 383), so a
+  // shift would leave the model after one round. Expert `r * touched + g` is
+  // read by no other round, and a round's own ids stay in increasing order. A
+  // table already holding one group per expert has nothing to rotate through
+  // and keeps its single line. What the rotated round gains against the model
+  // is that its experts are neighbours in the file, where a decode row's six
+  // are scattered; its number is therefore a ceiling on the cold rate.
+  const std::uint32_t touched = static_cast<std::uint32_t>(groups.size());
+  const std::uint32_t room =
+      touched > 0U && touched <= experts ? experts / touched : 1U;
+  constexpr std::size_t kRotatingBytes = 256ULL << 20;
+  const std::size_t per_round =
+      std::max<std::size_t>(1, static_cast<std::size_t>(read));
+  const std::uint32_t rotations =
+      std::max(1U, std::min(
+                       room,
+                       static_cast<std::uint32_t>(kRotatingBytes / per_round)));
+  if (rotations <= 1U) {
+    FreeAll();
+    return;
   }
-  const double us = ms * 1000.0 / kRounds;
-  std::cout << (ran ? "TIME " : "FAIL ") << name << "  " << us << " us  "
-            << read / (us * 1.0e-6) / 1.0e9 << " GB/s of claimed experts\n";
-  if (!ran) {
-    ++failures;
+  const std::size_t stride = table.size();
+  std::vector<std::int32_t> tables(stride * rotations, 0);
+  for (std::uint32_t r = 0; r < rotations; ++r) {
+    std::int32_t* t = tables.data() + r * stride;
+    std::memcpy(t, table.data(), stride * sizeof(std::int32_t));
+    for (std::uint32_t g = 0; g < touched; ++g) {
+      t[1 + g * k::kGroupInts] = static_cast<std::int32_t>(r * touched + g);
+    }
   }
+  const std::int32_t* rotating = Device(tables);
+  // The table is all a rotation changes: the groups keep their slots, so every
+  // round multiplies the same activations by weights nothing has read since
+  // that expert was last touched, which is the access a decode step makes.
+  const auto launch_rotating = [&](int rounds) -> bool {
+    for (int i = 0; i < rounds; ++i) {
+      args.groups =
+          rotating + static_cast<std::size_t>(i % rotations) * stride;
+      if (!k::GroupedGemv(args, nullptr)) {
+        return false;
+      }
+    }
+    return true;
+  };
+  const std::string tail = std::to_string(rotations) + " disjoint tables";
+  report(tail.c_str(), Clock(launch_rotating));
   FreeAll();
 }
 

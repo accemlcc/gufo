@@ -467,6 +467,81 @@ change.
 Decode is untouched by construction — one row's table never needed more than
 one block — and measured so: 52.9 against 52.8 tok/s at the same depth.
 
+## Decode's routed stage, apart from the memory it never touches
+
+Two numbers had been read as one claim. The live stage is
+`660 MB in 7.55 ms = 87 GB/s`
+([Where the forward's time sits](#where-the-forwards-time-sits));
+`kolibri1_gemv_test`'s TIME cases reported 305-348 GB/s for the same six-group
+decode table. Both were right, and neither was the decode step: the test's twenty
+rounds read the same 4.42 MB of expert weights twenty times, and 4.42 MB fits
+this generation's L2, while a decode step reads that block once and not again for
+fifty layers.
+
+The helper now prints a second line wherever one is possible, giving each round
+experts no earlier round touched (`gemv_test.cpp`, `Timed`). On this box — a
+served Qwen holding its 95 GB of GTT, nothing computing on it — the Q4_K gate
+launch reads **276 GB/s over one table and 167 over sixty disjoint ones**, its
+down-shape twin 275 and 157, and the Q6_K pair 341/181 and 404/189. Binding the
+launch to all 384 experts is still the loss it was warm (26.5 µs against 41.2 on
+the cold six-group table), so the bound `Experts` chooses was never an artefact
+of the warm measurement.
+
+`tools/kolibri/decode_gemv_probe.cpp` is the same experiment with more control
+and nothing else on the device: 32 rotations over disjoint experts, 135-270 MB
+per round, minimum over four interleaved rounds, m1 with no other kernel
+running. Its numbers run a little higher than the in-tree ones for the same
+reason it exists — one launch per variant, not one variant per launch — and it is
+what the launcher should be steered by.
+
+| One launch | Engine's policy | Rotating | Best variant in the probe |
+| --- | --- | ---: | ---: |
+| dense qkv, m=6144 k=2560 Q4_K | split 4 | 207 GB/s | 209 (split 2, 128 threads) |
+| routed gate or up, m=512 k=2560 Q4_K | split 4 | 187 GB/s | 193 (split 2, 128 threads) |
+| routed down, m=2560 k=512 Q4_K | split 1 | 184 GB/s | 191 (split 2, 128 threads) |
+| routed down, m=2560 k=512 Q6_K | split 1 | 183 GB/s | 206 (split 2) |
+| gate and up together, `blockIdx.z` over the two tensors | — | 206 GB/s | — |
+
+**The split policy is right where `k` gives it room and 4-12 % short where it
+does not.** `kSplitWaves` chooses 1 below four super-blocks
+(`gemv.hip.cpp:424-431`), which is the down projection's case at `k=512`, and a
+split of 2 across its two units is where the difference sits — 12 % on the Q6_K
+shape. That difference is not free: splitting a row's reduction is a different
+summation order, and the probe reads `rel 9.2e-5` to `6.1e-3` between a split and
+the reference's split on random weights (cancellation, not the artifact's
+weights), where a variant that keeps the split reads `0.00e+00` in zero rows. A
+split change is a numerics change and owes the golden forward a re-check.
+
+**The two halves of a routed row belong in one launch.** Gate and up read the
+same row of `h` and write two buffers, so a launch carrying both on
+`blockIdx.z` changes neither tensor's arithmetic — it reads `0.00e+00` against
+the reference. 8.44 MB in 42.9 µs is 206 GB/s where two launches of 4.42 MB run
+at 187: **9.3 % of the stage's two widest launches, and bit-safe.**
+
+**Prefetching the next block loses at every shape** — 152-184 GB/s against the
+183-207 of the same geometry without it, worst on the gate shape at 23 %. That
+retires the theory that the unit walk is bound by a dependent load chain: the
+registers a prefetch needs cost more than the latency it hides.
+
+**The router is the stage's second item and had never been measured.**
+`KOLIBRI_TIME=1 ./kolibri1_route_test` gives 31.4 µs per layer at `rows=1` on
+this box while a served Qwen forward held the device, with the 3.93 MB F32 gate
+matrix hot in cache across its 200 rounds: **≥1.57 ms per token**, the order of a
+whole gate projection, for two launches — `RouterKernel` and a single-block
+`SelectKernel`. The same test's wide rows (130.5 µs at 16, 698.6 at 128) are the
+prefill shape, where `GatherGroupsKernel` joins them.
+
+So the decode step's 7.55 ms of routed stage is roughly 3.8 ms of grouped GEMV at
+the rate a cold launch actually gets, at least 1.6 ms of routing, and about
+2.2 ms the stage bucket cannot attribute to any measured kernel. That last piece
+is why `GUFO_KOLIBRI_ROCM_ROUTED_STAGE_PROFILE` now exists: set together with the
+five-stage switch, `Forward` prints a second line splitting the stage into
+`memset`, `route`, `gate`, `up`, `act`, `down` and the `finish` left over
+(`Executor::Experts`, `Executor::Forward`). Markers are recorded only for a
+single-piece forward, and each costs about a microsecond, so its decode line
+reads high: it answers *which launch* the time sits in, and it still needs a
+window with the device to itself.
+
 ## Not measured
 
 | Cell | Status |
@@ -481,6 +556,7 @@ one block — and measured so: 52.9 against 52.8 tok/s at the same depth.
 | Whole-model prefill on the matrix-core path | Measured — 1.11× best, 1.38× median at width 128, spread 29 % → 2.4 % ([Prefill width, both dense paths](#prefill-width-both-dense-paths)) |
 | Served forward width | Measured — 1.83× at 1,572 and 2.00× at 13,030 prompt tokens, decode flat, ttft halved ([Served forward width](#served-forward-width)) |
 | Whole model on one group table | Measured in one window, both builds: routed stage 2.225-2.253 → 1.103-1.189 ms/token (**1.96×**), prefill total 2.72 → 1.61 ms/token, pp8192 351.6 → 563.4 tok/s (**1.60×**), served pp13k 336.9 → 538.3 tok/s (**1.60×**), decode unchanged, golden forward exact against the scalar reference at chunk 16 and 128 ([The same change on the model, device to itself](#the-same-change-on-the-model-device-to-itself)) |
+| Routed stage split by launch | Instrumented (`GUFO_KOLIBRI_ROCM_ROUTED_STAGE_PROFILE`), not yet read: the box's GPU holds a served Qwen forward's 95 GB of GTT, and the split needs a window with the device to itself ([Decode's routed stage, apart from the memory it never touches](#decodes-routed-stage-apart-from-the-memory-it-never-touches)) |
 
 ## Performance items
 
@@ -560,3 +636,27 @@ one block — and measured so: 52.9 against 52.8 tok/s at the same depth.
    across the ten full-attention layers, is the only lever that keeps decode flat
    as context grows; widening the sliding window is not, since those layers are
    precisely the ones that cannot slide.
+
+6. **Decode's routed stage: what to take, in the order the evidence ranks it.**
+   Of its 7.55 ms per token, ~3.8 ms is grouped GEMV at the rate a cold launch
+   gets, ≥1.6 ms is routing, and ~2.2 ms is unattributed
+   ([Decode's routed stage, apart from the memory it never touches](#decodes-routed-stage-apart-from-the-memory-it-never-touches)).
+   One quiet window with both stage switches answers the last piece, and then:
+  - **Fused gate and up**, one launch over `blockIdx.z`: 206 GB/s against 187 for
+    the same bytes in two launches, arithmetic unchanged (`0.00e+00` against the
+    reference). 4.4 µs per layer, ~0.22 ms per token, and it needs no re-baseline.
+  - **No counters on the decode path.** `Experts` memsets 384 counters every
+    layer and `SelectKernel` `atomicAdd`s them
+    (`route.hip.cpp:221-222`), but only `GatherGroupsKernel` reads them and that
+    runs only past `kSelectRows` (`route.hip.cpp:368`, `:422`). Passing
+    `counts = nullptr` for a forward of at most `kSelectRows` rows deletes an
+    atomic per slot and one serialized launch per layer; a wide forward still
+    zeroes before it gathers, since the memset lives in the same place for it.
+    Effect size unmeasured — the ring's `memset=` segment is what would price it.
+  - **The split at `k=512`**, 4 % on Q4_K and 12 % on Q6_K down, behind a golden
+    re-check because it reorders a reduction.
+  - **The router**, if the ring says the time is in `RouterKernel` and not in the
+    single-block `SelectKernel`: 3.93 MB of F32 gate matrix per layer is a
+    bandwidth item of ~20 µs at the machine's rate, so only a narrower gate
+    matrix moves it, and a narrower gate matrix is an expert-selection risk that
+    owes `QUALITY.md` a study before it owes decode a millisecond.
