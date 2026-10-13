@@ -81,6 +81,34 @@ server has never seen, so a hit cannot be explained by an earlier run). Give it
 `--log` with the server's log file and the accounting comes off the server
 instead of off `usage`.
 
+## Functional qualification
+
+`tests/functional/run.py --sampling-preset kolibri1 --record-baseline`, thirteen
+suites against `gufo serve llm --sessions 1 --context 32768` on October 13, 2026,
+reported under `functional-kolibri-20261013-092324/` on the device box. Six
+passed — discovery (text-only modalities), tools, structured, long-context,
+sampling-defaults, progress — and seven failed with a cause on each, not a shrug:
+
+| Suite | What actually happened |
+| --- | --- |
+| stops | The control request asserts the *unstopped* answer is longer than twelve characters. The model answered `LANTERN` — seven characters, `finish=stop`, three tokens. A precondition written for talkative models. |
+| conversation | `body()` always sends `chat_template_kwargs={enable_thinking: false, reasoning_effort: "low"}`, and an explicit effort outranks `enabled` in this template — the documented Jinja rule. Effort won, reasoning appeared where none was expected: `prompt_tokens` 48 without the kwargs, 56 with them. |
+| reasoning-separator | Asserts a continued conversation reuses the previous turn minus a margin. `preserve_thinking` defaults to false, so earlier thoughts are not in the continued prompt at all. |
+| tool-reasoning | Adversarial case: quote a literal `<tool_call>` opener inside the think block. The marker is not mistaken for a call and `content` stays empty — the property under test holds — but the reply spent its whole 1,024-token budget inside the block (`finish=length`) and never emitted the call. |
+| tool-streaming | Tool arguments arrive in one delta. See Known behaviour. |
+| cache-shared-prefix | The harness's own 120-second client timeout, fired during prefill. Not a semantic failure at all. |
+| cache-depth | Reuse ended at the end of the system block — `cached_tokens=20008` of `prompt_tokens=21204`, `prefill_tokens=1196` — so each turn pays again for the previous turn's user block. Open; see below. |
+
+What has been excluded from cache-depth, so the remaining candidates are few:
+`CheckpointPosition` is `session().position()` here exactly as in the Gemma 4
+runner, so no Kolibri-specific granularity; the snapshot ceiling is host RAM
+minus headroom, and the snapshot in question is 1.53 GB, so nothing was refused
+for size; and the arithmetic — 1,196 = the previous turn's user block, plus this
+turn's, plus the reply — rules out "the assistant reply is not checkpointed",
+since that reply is two tokens. What is left is that the stored prefix diverged
+before the prompt end, with the thinking-drop in the re-rendered history the
+standing suspect.
+
 ## Known behaviour
 
 - **A thinking budget can empty `content`.** With `reasoning_effort: high` a
@@ -101,6 +129,16 @@ instead of off `usage`.
   is unaffected. The fix belongs in that shared splitter (whitespace around the
   marker), not in this model's adapter; until it lands, trim client-side or use
   `auto`.
+- **Tool arguments arrive as one delta.** Once `StreamingTextFilter` sees a tool
+  marker it buffers everything to the end of the generation
+  (`openai_chat.cpp:2473`, `hidden_.append(piece)`), so a call's arguments appear
+  in a single SSE chunk instead of streaming as they decode. Presets that pass
+  `tool-streaming` reach their call through the structured path
+  (`raw_content_` → `StructuredContent()`), which emits pieces as they arrive.
+  Making marker-delimited models stream would mean changing the shared streaming
+  machine and the wire behaviour of every other model on this engine, so it is
+  left alone here on purpose: clients still get the call complete and parseable,
+  only without progressive arguments.
 
 ## Not verified
 
