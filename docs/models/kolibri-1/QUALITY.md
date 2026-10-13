@@ -118,23 +118,32 @@ warm. It asserts the accounting identity on every leg, not one cached number.
 
 ## Functional qualification
 
-`tests/functional/run.py --sampling-preset kolibri1 --record-baseline`, thirteen
-suites against `gufo serve llm --sessions 1 --context 32768` on October 13, 2026,
-reported under `functional-kolibri-20261013-092324/` on the device box. Six
-passed — discovery (text-only modalities), tools, structured, long-context,
-sampling-defaults, progress — and seven failed with a cause on each, not a shrug:
+`tests/functional/run.py --sampling-preset kolibri1`, thirteen suites against
+`gufo serve llm --sessions 1 --context 32768` on October 13, 2026. Three runs are
+in this record and every row says which one it stands on: the full sweep
+`functional-kolibri-20261013-092324`, then `serveprobe9-20261013-122921` and
+`functional-kolibri-20261013-131254` after the harness was told what this template
+actually promises. **Seven pass, six fail, and none of the six is unexplained.**
 
-| Suite | What actually happened |
-| --- | --- |
-| stops | The control request asserts the *unstopped* answer is longer than twelve characters. The model answered `LANTERN` — seven characters, `finish=stop`, three tokens. A precondition written for talkative models. |
-| conversation | `body()` always sends `chat_template_kwargs={enable_thinking: false, reasoning_effort: "low"}`, and an explicit effort outranks `enabled` in this template — the documented Jinja rule. Effort won, reasoning appeared where none was expected: `prompt_tokens` 48 without the kwargs, 56 with them. |
-| reasoning-separator | Asserts a continued conversation reuses the previous turn minus a margin. `preserve_thinking` defaults to false, so earlier thoughts are not in the continued prompt at all. |
-| tool-reasoning | Adversarial case: quote a literal `<tool_call>` opener inside the think block. The marker is not mistaken for a call and `content` stays empty — the property under test holds — but the reply spent its whole 1,024-token budget inside the block (`finish=length`) and never emitted the call. |
-| tool-streaming | The boundary the suite asserts belongs to a parser Kolibri does not use: argument deltas follow completed values, not the chunk grid. See Known behaviour. |
-| cache-shared-prefix | The harness's own 120-second client timeout, fired during prefill. Not a semantic failure at all. |
-| cache-depth | Reuse ended at the end of the system block — `cached_tokens=20008` of `prompt_tokens=21204`, `prefill_tokens=1196` — so each turn pays again for the previous turn's user block. Correct by construction; see below. |
+| Suite | Stand | What was actually there |
+| --- | --- | --- |
+| discovery, tools, structured, long-context, sampling-defaults, progress | passed | 092324. `discovery` asserts text-only modalities, which is what `/v1/models` reports. |
+| cache-depth | **passed** | Re-run in `serveprobe9-…-122921`, 13 checks. `cache_depth.py` had demanded a frontier no template promises; with the preset's own floor (`previous − growth − 96`) each leg lands where the rule above says, and a fall back to the 2048 capture grid — or to zero — still fails. |
+| cache-shared-prefix | not decided | `failed (900.019 s)` in 131254 with **no FAIL line in the suite log**. `run.py:256` defaults `--suite-timeout` to 900 s and `run.py:359` enforces it, while the four uncached 21k controls need ~1500-1700 s; it got through eight checks. A frame, not a behaviour — `--suite-timeout 1800` covers it and the assertion is untouched. |
+| tool-reasoning | 67 of 68 checks | 433.071 s in 131254. The single failure is dataset 68, `unfinished_inline_then_call_filename_buffered`: the call parsed perfectly (`terminal`, `{"command": "pwd"}`, `finish=tool_calls`) but `text` and `reasoning` came back empty with `completion_tokens: 14` where the case expects 92 characters of prose plus the call — fourteen tokens cannot have carried that text and lost it, so the model never wrote it. `literal_protocol_token_word_buffered` and `_stream` ran and passed (`text` = `EOS = "`, no tools). |
+| stops | failed at 092324 | The control asserts the *unstopped* answer is longer than twelve characters; the model answered `LANTERN` — seven characters, `finish=stop`, three tokens. A precondition written for talkative models. `openai_sdk.py` now picks a marker a one-word answer can contain (`4c5370e7`), **not re-run since**. |
+| conversation | failed at 092324 | `body()` always sent `chat_template_kwargs={enable_thinking: false, reasoning_effort: "low"}`, and an explicit effort outranks `enabled` in this template — the documented Jinja rule. Effort won: 48 prompt tokens without the kwargs, 56 with. Fix landed in `4c5370e7`, not re-run. |
+| reasoning-separator | failed at 092324 | Asserts a continued conversation reuses the previous turn minus a margin. `preserve_thinking` defaults to false, so earlier thoughts are not in the continued prompt at all. |
+| tool-streaming | failed at 092324 | The boundary the suite asserts belongs to a parser Kolibri does not use: argument deltas follow completed values, not the chunk grid. See Known behaviour. |
 
-That is a rule, not a fault, and it is written down: `stable_prefix_offset`
+Four of the six were the harness asserting its own frame — a twelve-character
+marker, a client deadline, a reasoning effort it asked for twice, an answer-shape
+table — and `4c5370e7` replaced each with a preset-bound expectation while
+`83d0a1dc` added the silent-call gate for dataset 68. **None of them is recorded
+green here, because none has been re-run since**: a suite counts when a run says
+so, not when the diff looks right.
+
+The cache-depth boundary behind the second row is a rule, not a fault: the engine
 declares the prefix the next request is expected to share, and for a prompt
 ending in a text-only user turn that is the end of the *previous* turn, because
 agent clients replace the trailing turn per request (`chat_template.hpp:47-51`).
