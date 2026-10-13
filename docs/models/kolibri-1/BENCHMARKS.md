@@ -198,6 +198,21 @@ runs prefill through hipBLASLt's tensor-core GEMM; this engine uses its own
 projection kernel and re-reads the expert table once per forward. That is the
 gap, and it is the model's first performance item.
 
+That verdict is worth exactly its own range. Both engines ran at 512 and 2,048
+prompt tokens; nothing on the reference side was ever run past 2,048, so −76 %
+is a chat-length statement and not an architectural one.
+
+Depth reverses the sign. This engine's served curve is 240 tok/s at 71 tokens,
+158.8 at 39,292 and 97.9 at 108,627 — a factor of about 2.5 across three orders
+of magnitude of prompt, which is a slope. The operator's standing observation
+from the llama.cpp era of this model on this box is that its prefill falls to
+roughly 20 tok/s near 100,000 tokens, which is a collapse. **That 20 is
+remembered, not re-measured here**, and it is the reason the crossing point is
+listed as unmeasured rather than asserted: if it holds, the curves cross
+somewhere between 2,048 and 100,000 and the engine is several times ahead exactly
+where long context is used. The cell that settles it is `llama-bench -ngl 99 -p
+8192,32768,99000 -n 0 -r 1` on the patched build, on this box.
+
 ## Not measured
 
 | Cell | Status |
@@ -205,6 +220,7 @@ gap, and it is the model's first performance item.
 | Concurrency (2/4/8 users) | TODO — one session per forward today; `SupportedPlans` is serial width 1 |
 | Q6_K / Q8_0 / Q5_K_M | TODO |
 | Contexts beyond 39,292 | Measured once, at 108,627 ([Served path](#served-path)); nothing between 39K and it |
+| llama.cpp prefill beyond 2,048 | TODO — the table above stops at pp2048, so its ratio says nothing about depth; the reference build has never been run at 8K/32K/99K |
 | Continuation cache, prefix reuse | Measured ([Served path](#served-path), [Quality](QUALITY.md)) |
 | Tool-call round-trip | Measured ([Quality](QUALITY.md)) |
 | Functional suites (13) | Recorded, 6 pass / 7 fail, every failure with a cause ([Quality](QUALITY.md#functional-qualification)) |
