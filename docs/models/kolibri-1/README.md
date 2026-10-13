@@ -121,9 +121,11 @@ artifacts/kolibri/throughput <model.gguf> [pp] [tg] [chunk] [max_context]
   With the 6-of-384 routing of this model, a pass almost never repeats an
   expert, which is why the small bin count does not re-read weights.
 - **Prefill** re-reads the expert weights per forward, so the forward's row
-  count (`ModelOptions::prefill_chunk`) is a real knob, and which width is
-  fastest depends on the prompt: at 512 tokens, 32 measured fastest of
-  16/32/64; at 8,192 the curve runs the other way and 128 led ([Benchmarks](BENCHMARKS.md)).
+  count (`ModelOptions::prefill_chunk`) is a real knob. Which width is fastest
+  is not settled: repeated cells at chat length put 32 about 25 % ahead of 16,
+  at 8,192 the two are not separable, and single runs of one fixed cell spread
+  15-30 % ([Benchmarks](BENCHMARKS.md)). The constant is 16, the width the engine
+  was qualified at.
   `gufo chat`, `gufo prompt` and `gufo serve` pass 16 today. The scheduler's
   `--prefill-chunk` is a different number — the budget of prompt tokens between
   decode rounds — and reaches the model as `max_input_tokens`.
