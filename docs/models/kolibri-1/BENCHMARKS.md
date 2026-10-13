@@ -94,10 +94,13 @@ served depth measurement below is the one that shows depth costing.
 
 ## Served path
 
-`gufo serve llm --context 131072 --sessions 1`, forward width **16**, one
-session. The HTTP API returns no timing fields; everything here is the server's
-own `event=completed` line (`prompt_tokens prefill_tokens cached_tokens
-prefill_tps decode_tps ttft_ms cache_restore_ms queue_ms`).
+`gufo serve llm --context 131072 --sessions 1`, one session. Everything in this
+table was measured at forward width **16**, the width the runner passed until
+2026-10-13; the shipped constant is 128 now and the width's own served
+comparison lives in [Served forward width](#served-forward-width). That older run
+read the server's `event=completed` line (`prompt_tokens prefill_tokens
+cached_tokens prefill_tps decode_tps ttft_ms cache_restore_ms queue_ms`); the
+build measured against it answers with a `timings` object per request.
 
 | Depth of prompt | pp (tok/s) | tg (tok/s) | ttft |
 | ---: | ---: | ---: | ---: |
@@ -269,6 +272,38 @@ three times too high — inside a real layer the dense re-reads are largely serv
 from cache, so the engine's dense share is ~0.6 ms/token, not 1.3. Read that probe
 as a ratio, never as a cost model.
 
+## Served forward width
+
+The ladder above measures a forward; what ships is a request. Both builds —
+`kKolibriPrefillChunk` 16 and 128, md5-verified apart — served the same artifact
+inside one device window on m1: `--context 131072 --sessions 1`, no disk cache,
+two runs per cell plus one generating leg.
+
+| Prompt | width 16, two runs | width 128, two runs | ratio |
+| --- | --- | --- | ---: |
+| 1,572 tokens | 290.7 · 293.5 | 531.3 · 545.8 | **1.83×** |
+| 13,030 tokens | 252.3 · 251.0 | 505.7 · 503.0 | **2.00×** |
+| 13,030, ttft | 51.6 s | 25.8 s | **half** |
+| 13,030 + 64 generated, decode | 53.27 | 53.15 | — |
+
+Tokens per second are the server's own `timings.prompt_per_second`.
+`cache_snapshot_ms` sits where it was on both widths (40-45 ms at 13 K), so the
+wider forward did not move work onto the snapshot side, and memory is identical
+because the ring is `next_pow2(513 + rows)`: 128 rows still lands on 1,024 slots.
+Decode not moving is the check that matters most here — a wider forward that
+stole decode would show up in that last row.
+
+What it costs is one field of the identity. `prefill_chunk_rows=` keys the
+disk-cache tree, so every Kolibri tree stored under 16 re-prefills once after the
+change; the weights are untouched, the cost is per tree and one-time, and this
+model serves no production traffic today.
+
+Numerics at the new width are the same gate as at the old.
+`kolibri1_device_forward_test` against the scalar reference, run at
+`KOLIBRI_TEST_PREFILL_CHUNK` 32 and 128 as well as 16: prefill max_abs 3.3e-3,
+mean 4.6e-4, argmax equal, and the chunked case that crosses the width boundary
+exact at 0 — the same numbers the old width produced.
+
 ## Where the forward's time sits
 
 `GUFO_KOLIBRI_ROCM_PREFILL_STAGE_PROFILE=1` brackets the embedding, five stages of
@@ -327,20 +362,23 @@ depth table above says a 39 K session spends most of its step.
 | Tool-call round-trip | Measured ([Quality](QUALITY.md)) |
 | Functional suites (13) | Recorded across three runs — 7 pass / 6 fail, every failure with a cause, four harness-side fixes landed but not re-run ([Quality](QUALITY.md#functional-qualification)) |
 | Whole-model prefill on the matrix-core path | Measured — 1.11× best, 1.38× median at width 128, spread 29 % → 2.4 % ([Prefill width, both dense paths](#prefill-width-both-dense-paths)) |
+| Served forward width | Measured — 1.83× at 1,572 and 2.00× at 13,030 prompt tokens, decode flat, ttft halved ([Served forward width](#served-forward-width)) |
 
 ## Performance items
 
-1. **Forward width is a prerequisite, not the win.** 32 is 25 % ahead at chat
-   length and 128 reaches the 325 plateau, but that plateau is the GEMV's FP32
-   ceiling, so more width alone buys nothing past it. Nothing structural blocks
-   widening: the sliding ring is `next_pow2(513 + rows)` = 1,024 slots for any
-   width to 511 (`executor.cpp:52-61`), so memory is unchanged; what has to move
-   is the geometry caps — `kProjectRows` (`executor.hpp:23`), `kMaxGroupSlots = 16`
-   and `kGroupInts` (`moe.hpp:31-34`), the prebuilt dense tables
-   (`executor.cpp:162-170`) and `MoeRoute`'s 16-row refusal (`route.hip.cpp:293-296`).
-   One caveat with a cost attached: `prefill_chunk_rows` is part of the served
-   disk-cache identity (`inference_backend.cpp:348`, `:4479-4491`), so a new width
-   re-prefills every existing cache tree once.
+1. **Forward width — taken, and it paid more than the engine ladder promised.**
+   The runner passes 128 now: served, 1.83× at 1,572 prompt tokens and 2.00× at
+   13,030, decode unmoved
+   ([Served forward width](#served-forward-width)). None of the geometry caps this
+   note used to list had to move — `Experts` and `Project` already step a wide
+   forward through `kProjectRows` sub-blocks — what made the width pay was the
+   dense matrix-core path underneath it, without which extra rows are mostly
+   re-reads. Past 128 the lever is spent: the routed experts cost the same 2.21 ms
+   per token at width 16 as at 128 and are 81 % of a width-128 prefill
+   ([Where the forward's time sits](#where-the-forwards-time-sits)). The cost that
+   stays on the record: `prefill_chunk_rows` is part of the disk-cache identity
+   (`inference_backend.cpp:348`), so a width change re-prefills every stored tree
+   once.
 2. **The prefill GEMM: tensor cores in two steps; a is built, b is next.**
    The reference's advantage is a tensor-core path, not a better schedule, and the
    ladder is measurable in front of us — `gemma4` was cut from the same GEMV and

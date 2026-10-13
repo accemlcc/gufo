@@ -121,14 +121,16 @@ artifacts/kolibri/throughput <model.gguf> [pp] [tg] [chunk] [max_context]
   With the 6-of-384 routing of this model, a pass almost never repeats an
   expert, which is why the small bin count does not re-read weights.
 - **Prefill** re-reads the expert weights per forward, so the forward's row
-  count (`ModelOptions::prefill_chunk`) is a real knob. Which width is fastest
-  is not settled: repeated cells at chat length put 32 about 25 % ahead of 16,
-  at 8,192 the two are not separable, and single runs of one fixed cell spread
-  15-30 % ([Benchmarks](BENCHMARKS.md)). The constant is 16, the width the engine
-  was qualified at.
-  `gufo chat`, `gufo prompt` and `gufo serve` pass 16 today. The scheduler's
-  `--prefill-chunk` is a different number — the budget of prompt tokens between
-  decode rounds — and reaches the model as `max_input_tokens`.
+  count (`ModelOptions::prefill_chunk`) is a real knob — and it is 128 now,
+  measured served at 2× of width 16 at both 1,572 and 13,030 prompt tokens with
+  decode unmoved, because since `17eada37` a wide block sends the seven dense
+  projections to the matrix cores instead of stepping them through the
+  batch-invariant GEMV. What is left of a wide prefill is the routed experts, and
+  their per-token cost is identical at 16 and at 128, which is why width stops
+  paying there ([Benchmarks](BENCHMARKS.md)). `gufo chat`, `gufo prompt` and
+  `gufo serve` pass this constant. The scheduler's `--prefill-chunk` is a
+  different number — the budget of prompt tokens between decode rounds — and
+  reaches the model as `max_input_tokens`.
 - **Cache:** the 10 patternless layers keep the whole context; the 40 sliding
   layers keep a ring of the window plus one forward's rows, rounded up to a
   power of two — `next_pow2(513 + rows)`, so 1,024 slots for any forward up to

@@ -3781,21 +3781,36 @@ private:
 // is also why this runner offers no batched plan.
 // Width is a model constant, not a per-request knob: it sizes the executor's
 // scratch and it is part of the disk-cache identity, so changing it invalidates
-// every tree preprocessed under another value. Measured on m1 (2026-10-13,
-// `tools/kolibri/throughput`, 45,254 MiB of weights pinned, median over
-// repeated cells): short prompts favour 32 measurably - pp 512 at context 640
-// gives 253.2 +/- 6.3 tok/s at 16 against 317.8 +/- 22.0 at 32 (n=9) - while
-// pp 8192 at context 131072 is not separable (245.4 +/- 21.2 against
-// 250.3 +/- 5.6), and the stricter n=5 set turns even that one the other way
-// (265.4 +/- 1.3 for 16 against 245.3 +/- 2.4 for 32). 16 stays because it is
-// the width the engine was qualified at, and the short-prompt lead given up
-// there is a deliberate choice that costs chat prefill. The width buys no
-// memory either way: the ring is `next_pow2(513 + rows)`, so anything up to
-// 511 rows keeps 1,024 slots, and only the scratch grows - which makes a width
-// chosen per prompt length the next step, not this constant. Decode held flat
-// across every cell (59.6 tok/s at pp 512, 55.5 at pp 8192, MAD <= 0.2), so
-// this number can only ever move prefill.
-constexpr std::uint32_t kKolibriPrefillChunk = 16;
+// every tree preprocessed under another value.
+//
+// 128, measured served on m1 (2026-10-13, `gufo serve llm --context 131072
+// --sessions 1`, two runs per cell inside one device window, the two binaries
+// md5-verified apart): pp 290.7 and 293.5 at 1,572 prompt tokens against 531.3
+// and 545.8, and pp 252.3 and 251.0 at 13,030 against 505.7 and 503.0. Two
+// times at both depths, so the first token of a 13 K prompt arrives after 25.8 s
+// instead of 51.6. Decode does not move (53.27 against 53.15 tok/s) and neither
+// does memory: the ring is `next_pow2(513 + rows)`, so anything up to 511 rows
+// keeps 1,024 slots and only the scratch grows.
+//
+// Why 16 held for as long as it did, and why that argument is dead: the earlier
+// ladder was an engine-direct one (`tools/kolibri/throughput` at pp 512 and pp
+// 8192, n=5 and n=9), it could not separate 16 from 32 at depth, and 16 was the
+// width the engine had been qualified at. Two things changed since - the dense
+// path of 17eada37, which costs 0.30 ms per token at width 128 where the GEMV
+// cost 1.35 (stage profile, `docs/models/kolibri-1/BENCHMARKS.md`), and the
+// served comparison itself, which measures a request rather than a forward and
+// had never been run across widths. The new width is numerically the same gate as
+// the old one: `kolibri1_device_forward_test` with `KOLIBRI_TEST_PREFILL_CHUNK`
+// at 32 and at 128 matches the scalar reference the way it does at 16 (prefill
+// max_abs 3.3e-3, mean 4.6e-4, argmax equal, and the chunked case across the
+// width boundary exact at 0).
+//
+// The price is bounded and stated once: a Kolibri tree stored under another width
+// re-prefills one time, because `prefill_chunk_rows=` is in its identity and the
+// weights are untouched. Past 128 nothing is on the table before the routed
+// experts leave the GEMV - their 2.21 ms per token is the same at width 16 as at
+// 128, and at 128 they are 81 % of the prefill.
+constexpr std::uint32_t kKolibriPrefillChunk = 128;
 
 using KolibriModel = models::kolibri1::Model;
 using KolibriSession = models::kolibri1::Session;
