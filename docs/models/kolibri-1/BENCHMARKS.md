@@ -110,20 +110,20 @@ bytes; the whole 39,292 reused for the conversation that had been seen, in 180.7
 ms against 247.5 s ([Quality](QUALITY.md)).
 
 Depth past 39K was predicted before it was measured, and the prediction is what
-the 108,627 row above tests. `T(n) = a*n + b*n^2` - a linear term for the
+the 108,627 row above tests. `T(n) = a*n + b*n^2` — a linear term for the
 bandwidth-bound pass, a quadratic one for the ten patternless layers attending
-the whole past - fitted to cold points in two variants:
+the whole past — fitted to cold points in two variants:
 
 * two points, both served at forward width 16 and session width 131,072: 2,141
   tokens at 9.111 s and 39,292 at 247.7 s, giving `a=4.14e-3 s/token` and
   `b=5.51e-8 s/token^2`;
 * three points, adding 8,192 tokens at 33.97 s measured **engine-direct**
-  (`tools/kolibri/throughput`, chunk 16, width 131,072) - a different regime, no
+  (`tools/kolibri/throughput`, chunk 16, width 131,072) — a different regime, no
   HTTP and no scheduler, so the two sources are not interchangeable, giving
   `a=3.63e-3` and `b=6.81e-8`.
 
 They predict 110,000 tokens at 1,122 s to 1,223 s, 90 to 98 tok/s. At the depth
-actually sent - 108,627 - they say 1,100 s and 1,197 s. Measured: 1,120.7 s at
+actually sent — 108,627 — they say 1,100 s and 1,197 s. Measured: 1,120.7 s at
 97.9 tok/s; the two-point fit was 2 % low, the three-point fit 6 % high.
 This is the only point beyond 39K, so every other point on that curve is
 extrapolation, and one consequence it implies is arithmetic rather than
