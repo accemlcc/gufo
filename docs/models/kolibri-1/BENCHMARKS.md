@@ -304,6 +304,13 @@ Numerics at the new width are the same gate as at the old.
 mean 4.6e-4, argmax equal, and the chunked case that crosses the width boundary
 exact at 0 — the same numbers the old width produced.
 
+**Served absolutes of this section read high against a later window.** The same
+artifact, the same width-128 build and a 13 K prompt measured 336.9 tok/s on
+`--context 16384` where this section recorded 505.7 on `--context 131072`; the
+1.83×/2.00× width ratios are ratios inside one window and stand, the absolute
+tok/s do not carry across the two configurations. See
+([The same change on the model, device to itself](#the-same-change-on-the-model-device-to-itself)).
+
 ## Where the forward's time sits
 
 `GUFO_KOLIBRI_ROCM_PREFILL_STAGE_PROFILE=1` brackets the embedding, five stages of
@@ -366,10 +373,11 @@ by construction, so a stage that steps is flat by construction too: the
 flatness was the mixture count, not the ceiling. Width is not spent.
 
 Kernel numbers, synthetic 384-expert tables at the artifact's own shapes, m1.
-**The device held a Qwen forward for every run in this section**, so absolute
-times are inflated and only ratios and correctness are claims. Both columns
-cover the same seven hundred and sixty-eight slots; "eight tables" is what a
-128-row forward used to issue.
+**Those runs shared the device with a Qwen forward**, so their absolute times
+are inflated and only the ratios and the correctness are claims; the model's own
+numbers below are from a window with the device to itself. Both columns cover
+the same seven hundred and sixty-eight slots; "eight tables" is what a 128-row
+forward used to issue.
 
 | Shape | eight tables of 96 groups | one table of 384 groups | ratio |
 | --- | ---: | ---: | ---: |
@@ -398,13 +406,62 @@ and forty-eight rows (widest group one slot per row), a row's ids, weights and
 logits identical alone and inside a batch of 128, and the new refusal past
 `kMaxGroupSlots`. 13/13 CPU checks.
 
-What the arithmetic expects from it, `[INFERENCE]` until a window measures the
-model: 6-of-384 over 128 rows touches
-384 × (1 − (1 − 6/384)<sup>128</sup>) ≈ 331 distinct experts, against the ≈ 84
-per mixture × 8 mixtures = 672 the stepped version reads — a 2.0× cut in the
-routed stage's bytes, so its 2.21 ms/token should come down toward 1.1-1.4 and
-take the width-128 total from 2.726 ms/token with it. Decode is untouched by
-construction: one row's table never needed more than one block.
+### The same change on the model, device to itself
+
+A window on m1 with nothing else on the GPU: the two builds — `HEAD` and
+`HEAD~1` of this change, checked out and rebuilt between the runs *inside the
+one window*, so no machine state separates them — against the same artifact.
+
+`kolibri1_device_forward` against the scalar reference, on the real weights, at
+both widths: prefill of 37 tokens at chunk 16 and of 261 tokens at chunk 128
+give `max_abs 3.28e-3`, `mean_abs 4.57e-4`, argmax equal; decode step
+`max_abs 1.94e-3`, argmax equal; the chunked case across the width boundary is
+exact at 0 in both. The gathered table does not move the numerics.
+
+Stages of a live prefill, ms per token, `GUFO_KOLIBRI_ROCM_PREFILL_STAGE_PROFILE`,
+pp2048 at chunk 128, ranges over the forwards of a run:
+
+| Stage | old build | new build | ratio |
+| --- | ---: | ---: | ---: |
+| routed experts | 2.225 – 2.253 | 1.103 – 1.189 | **1.96×** |
+| dense qkv | 0.196 – 0.283 | 0.201 – 0.289 | — |
+| attention | 0.030 – 0.099 | 0.030 – 0.095 | — |
+| o_proj | 0.098 – 0.099 | 0.102 – 0.106 | — |
+| shared expert | 0.097 – 0.098 | 0.100 – 0.106 | — |
+| **total** | **2.678 – 2.761** | **1.601 – 1.712** | **1.67×** |
+
+The routed stage lands where the arithmetic said it would: 6-of-384 over 128
+rows touches 384 × (1 − (1 − 6/384)<sup>128</sup>) ≈ 331 distinct experts
+against the ≈ 84 per mixture × 8 mixtures = 672 the stepped version reads, so
+2.0× fewer bytes and 1.96× measured. Every other stage sits where it was, which
+is the control that says the window is comparing one change and not one machine.
+
+| Rate | old build | new build | ratio |
+| --- | ---: | ---: | ---: |
+| pp2048, engine-direct, context 2,144 | 2.713 ms/token stage total | **601.6 tok/s**, 1.61 ms/token | **1.67×** on the stage total |
+| pp8192, engine-direct, context 8,300 | 351.6 tok/s | **563.4 tok/s** | **1.60×** |
+| decode, context 8,300 | 52.90 tok/s | 52.80 tok/s | — |
+| pp13,057, served, one session, context 16,384 | 336.85 · 336.90 tok/s | **539.03 · 537.45** | **1.60×** |
+| pp10,438, served, same server | — | 557.82 tok/s | |
+
+The old build's engine-direct 351.6 tok/s at pp8192 is within 0.2 % of the
+352.1 recorded before the change ([Where the forward's time
+sits](#where-the-forwards-time-sits)), so the two windows agree on the machine.
+Served, the identical prompt sent twice came back `cached=10438` in 0.01 s —
+the continuation cache is untouched by the new gather.
+
+What does not carry over: the served pair recorded under
+[Served forward width](#served-forward-width) — 505.7 · 503.0 tok/s at 13,030
+prompt tokens — is not reproduced by the old build in this window at 13,057
+tokens, which reads 336.9. The runs differ in `--context` (131,072 there
+against 16,384 here) and the earlier harness left no request-side record to
+replay, so no cause is claimed; what is claimed here is the ratio, measured
+old-against-new with one set of flags and one prompt builder. Read the served
+absolutes of this section as the current configuration's, and the 1.60× as the
+change.
+
+Decode is untouched by construction — one row's table never needed more than
+one block — and measured so: 52.9 against 52.8 tok/s at the same depth.
 
 ## Not measured
 
@@ -419,7 +476,7 @@ construction: one row's table never needed more than one block.
 | Functional suites (13) | Recorded across three runs — 7 pass / 6 fail, every failure with a cause, four harness-side fixes landed but not re-run ([Quality](QUALITY.md#functional-qualification)) |
 | Whole-model prefill on the matrix-core path | Measured — 1.11× best, 1.38× median at width 128, spread 29 % → 2.4 % ([Prefill width, both dense paths](#prefill-width-both-dense-paths)) |
 | Served forward width | Measured — 1.83× at 1,572 and 2.00× at 13,030 prompt tokens, decode flat, ttft halved ([Served forward width](#served-forward-width)) |
-| Whole model on one group table | Owed to a quiet window: `kolibri1_device_forward` at `KOLIBRI_TEST_PREFILL_CHUNK` 16 and 128 against the scalar reference, the stage profile at both widths, and served pp. Kernels measured, model not ([One group table over the forward](#one-group-table-over-the-forward)) |
+| Whole model on one group table | Measured in one window, both builds: routed stage 2.225-2.253 → 1.103-1.189 ms/token (**1.96×**), prefill total 2.72 → 1.61 ms/token, pp8192 351.6 → 563.4 tok/s (**1.60×**), served pp13k 336.9 → 538.3 tok/s (**1.60×**), decode unchanged, golden forward exact against the scalar reference at chunk 16 and 128 ([The same change on the model, device to itself](#the-same-change-on-the-model-device-to-itself)) |
 
 ## Performance items
 
@@ -433,7 +490,10 @@ construction: one row's table never needed more than one block.
    reading its own experts, which is why the routed stage read as finished at
    2.21 ms per token. The bound is 128 now and the step is the forward
    ([One group table over the forward](#one-group-table-over-the-forward)); the
-   whole-model number is owed to a window. The cost that stays on the record:
+   whole-model number is measured: **1.60× prefill served and engine-direct,
+   decode unmoved**
+   ([The same change on the model, device to itself](#the-same-change-on-the-model-device-to-itself)).
+   The cost that stays on the record:
    `prefill_chunk_rows` is part of the disk-cache identity
    (`inference_backend.cpp:348`), so a width change re-prefills every stored
    tree once.
