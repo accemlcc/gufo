@@ -120,12 +120,26 @@ artifacts/kolibri/throughput <model.gguf> [pp] [tg] [chunk] [max_context]
   of eight slots (`kSlots`). `bin[8]{expert,rows,base}` lives in constant memory.
   With the 6-of-384 routing of this model, a pass almost never repeats an
   expert, which is why the small bin count does not re-read weights.
-- **Prefill** re-reads the expert weights per chunk, so the chunk width
-  (`ModelOptions::prefill_chunk`) is a real knob; of the widths tried at 512
-  tokens, 32 measured fastest ([Benchmarks](BENCHMARKS.md)). `gufo chat` and
-  `gufo prompt` pass 16 today, which is why their prefill sits at ~250 tok/s.
+- **Prefill** re-reads the expert weights per forward, so the forward's row
+  count (`ModelOptions::prefill_chunk`) is a real knob, and which width is
+  fastest depends on the prompt: at 512 tokens, 32 measured fastest of
+  16/32/64; at 8,192 the curve runs the other way and 128 led ([Benchmarks](BENCHMARKS.md)).
+  `gufo chat`, `gufo prompt` and `gufo serve` pass 16 today. The scheduler's
+  `--prefill-chunk` is a different number — the budget of prompt tokens between
+  decode rounds — and reaches the model as `max_input_tokens`.
 - **Cache:** the 10 patternless layers keep the whole context; the 40 sliding
   layers keep a ring of the window plus one forward's rows, rounded up to a
-  power of two — 1,024 slots at a chunk of 16. KV is binary16, so a session at
-  32,768 costs about 720 MiB (640 MiB of patternless layers, 80 MiB of rings)
-  and the full 262,144 about 5.1 GiB.
+  power of two — `next_pow2(513 + rows)`, so 1,024 slots for any forward up to
+  511 rows. KV is binary16, so a session at 32,768 costs about 720 MiB
+  (640 MiB of patternless layers, 80 MiB of rings) and the full 262,144 about
+  5.1 GiB.
+
+Measured on this box: `gufo serve llm --context 131072 --sessions 1` holds
+**57,509 MiB** of device memory — 45,254 MiB of weights, about 5.4 GiB of
+patternless-layer cache at 131,072 positions, the rings and the launch scratch.
+That is the number a co-resident engine has to leave room for.
+
+On the box that runs this daily, `scripts/kolibri-gufo.sh start|stop|status|logs`
+on M1 stops the co-resident gufo container first (the two do not fit in one
+128 GiB UMA), refuses to start below 16 GiB of available memory, and waits for
+`/health` before reporting ready.
