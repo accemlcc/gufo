@@ -86,6 +86,13 @@ Cache behaviour was measured in both directions, at 92 tokens and at 39,292:
   `chat_template.hpp:47-51`). Measured at three depths: 4,203 → 3,609, 4,803 →
   4,211, 20,606 → 20,008 — a gap of 594, 592 and 598 tokens, one user block
   each time. The same conversation sent again reuses whole: 4,797 → 4,797.
+- The first turn after a leg that ended without a trailing user turn pays the
+  grid as well, and not because of a foreign prefix: such a leg's stable prefix
+  is its own prompt end, so the checkpoint it keeps contains the opened
+  assistant tag, which a real turn does not send — the best remaining match is
+  again a grid point. Measured on a 128-line block: block 6,328 → 0 cold, first
+  turn 6,331 → 6,144 (3 × 2,048), next turn 6,351 → 6,308 (43 tokens refilled,
+  which is the previous turn's stable prefix), sent again 6,351 → 6,351.
 - Recall at 108,627 and 109,656 scored all three planted facts (10/50/90 % of the
   prompt). At the second depth the budget ran out mid-reasoning
   (`generated_tokens=512`, `finish=length`, empty `content`), so the answer was
@@ -98,6 +105,11 @@ warm, and a same-size different-bytes control), `coldpair` (two prompts the
 server has never seen, so a hit cannot be explained by an earlier run). Give it
 `--log` with the server's log file and the accounting comes off the server
 instead of off `usage`.
+
+`tools/kolibri/prefix_probe.py` walks that ladder deliberately: `off` and
+`thinking` families, block / first turn / continuation / repeat, and a nonce in
+the block header so a second run against the same server cannot read itself
+warm. It asserts the accounting identity on every leg, not one cached number.
 
 ## Functional qualification
 
@@ -124,9 +136,10 @@ agent clients replace the trailing turn per request (`chat_template.hpp:47-51`).
 `text_model_runner.cpp:714` cuts the stored checkpoint to exactly that offset,
 so paying again for the previous user block is the designed cost. The standing
 suspect was measured out rather than argued: `preserve_thinking` neither helps
-nor hurts reuse, it only adds the generated part — a dropped thought reused
-4,211 of 4,803, a preserved one 4,258, which is the 47 tokens of the block
-itself. Also excluded: `CheckpointPosition` granularity, which is
+nor hurts reuse, it only adds the generated part — at chat length a dropped
+thought reused 6,466 of 6,485 and a preserved one all 6,485, a difference of 19
+tokens, which is the thought block; at 4,803 tokens the same pair is 4,211
+against 4,258, 47. Also excluded: `CheckpointPosition` granularity, which is
 `session().position()` here exactly as in the Gemma 4 runner, and snapshot size,
 the snapshot in question being 1.53 GB against a ceiling of host RAM minus
 headroom.
