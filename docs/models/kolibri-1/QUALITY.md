@@ -41,10 +41,15 @@ against the oracle, 0.02 / 0.002 for chunk invariance; both would fail by orders
 of magnitude on a mis-bound tensor, a wrong head count, or window clipping lost
 across a chunk boundary.
 
-The chat renderer and tokenizer have their own goldens
-(`chat_template_test.cpp`, `tokenizer_test.cpp`, `tokenizer_model_test.cpp`);
-kernel-by-kernel agreement with the oracle is in `gemv_test.cpp`,
-`route_test.cpp`, `qkv_post_test.cpp` and `attention_test.cpp`.
+Below the whole-forward check, the pieces have their own tests against the same
+oracle: `gemv_test.cpp` (quantized projections and the grouped expert launch, in
+max-abs and mean-relative terms, including the launch-bound case where more rows
+than experts are routed), `route_test.cpp` (bias selection and the
+un-renormalized sigmoid weights), `qkv_post_test.cpp` (per-head QK norm and
+RoPE), and `attention_test.cpp` (window edge, ring wrap, the no-position layer,
+and 128K decode). The chat renderer and tokenizer are pinned by byte-exact
+goldens in `chat_template_test.cpp`, `tokenizer_test.cpp` and
+`tokenizer_model_test.cpp`.
 
 ## Not verified
 
