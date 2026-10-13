@@ -76,8 +76,16 @@ Cache behaviour was measured in both directions, at 92 tokens and at 39,292:
 - A prefix shared with a finished turn is reused at depth, not just at chat
   length: a 109,656-token prompt sharing its first 9,845 tokens with the
   calibration turn that preceded it came back `cached_tokens=8192`,
-  `prefill_tokens=101464` — reuse applied at 108K of state, landing on the grid
-  boundary below the shared prefix rather than at its end.
+  `prefill_tokens=101464`. It stopped at `4 × 2,048`, below the end of the
+  shared text, because that calibration was a *different conversation*: nothing
+  was checkpointed at the byte where the two prompts part, so the only
+  candidates left were the grid points of `text_model_runner.cpp:753`.
+- Inside one conversation the boundary is finer, and it is declared rather than
+  rounded: reuse ends at the stable prefix, which for a prompt ending in a
+  text-only user turn ends *before* that turn (`stable_prefix_offset`,
+  `chat_template.hpp:47-51`). Measured at three depths: 4,203 → 3,609, 4,803 →
+  4,211, 20,606 → 20,008 — a gap of 594, 592 and 598 tokens, one user block
+  each time. The same conversation sent again reuses whole: 4,797 → 4,797.
 - Recall at 108,627 and 109,656 scored all three planted facts (10/50/90 % of the
   prompt). At the second depth the budget ran out mid-reasoning
   (`generated_tokens=512`, `finish=length`, empty `content`), so the answer was
@@ -105,19 +113,23 @@ sampling-defaults, progress — and seven failed with a cause on each, not a shr
 | conversation | `body()` always sends `chat_template_kwargs={enable_thinking: false, reasoning_effort: "low"}`, and an explicit effort outranks `enabled` in this template — the documented Jinja rule. Effort won, reasoning appeared where none was expected: `prompt_tokens` 48 without the kwargs, 56 with them. |
 | reasoning-separator | Asserts a continued conversation reuses the previous turn minus a margin. `preserve_thinking` defaults to false, so earlier thoughts are not in the continued prompt at all. |
 | tool-reasoning | Adversarial case: quote a literal `<tool_call>` opener inside the think block. The marker is not mistaken for a call and `content` stays empty — the property under test holds — but the reply spent its whole 1,024-token budget inside the block (`finish=length`) and never emitted the call. |
-| tool-streaming | Tool arguments arrive in one delta. See Known behaviour. |
+| tool-streaming | The boundary the suite asserts belongs to a parser Kolibri does not use: argument deltas follow completed values, not the chunk grid. See Known behaviour. |
 | cache-shared-prefix | The harness's own 120-second client timeout, fired during prefill. Not a semantic failure at all. |
-| cache-depth | Reuse ended at the end of the system block — `cached_tokens=20008` of `prompt_tokens=21204`, `prefill_tokens=1196` — so each turn pays again for the previous turn's user block. Open; see below. |
+| cache-depth | Reuse ended at the end of the system block — `cached_tokens=20008` of `prompt_tokens=21204`, `prefill_tokens=1196` — so each turn pays again for the previous turn's user block. Correct by construction; see below. |
 
-What has been excluded from cache-depth, so the remaining candidates are few:
-`CheckpointPosition` is `session().position()` here exactly as in the Gemma 4
-runner, so no Kolibri-specific granularity; the snapshot ceiling is host RAM
-minus headroom, and the snapshot in question is 1.53 GB, so nothing was refused
-for size; and the arithmetic — 1,196 = the previous turn's user block, plus this
-turn's, plus the reply — rules out "the assistant reply is not checkpointed",
-since that reply is two tokens. What is left is that the stored prefix diverged
-before the prompt end, with the thinking-drop in the re-rendered history the
-standing suspect.
+That is a rule, not a fault, and it is written down: `stable_prefix_offset`
+declares the prefix the next request is expected to share, and for a prompt
+ending in a text-only user turn that is the end of the *previous* turn, because
+agent clients replace the trailing turn per request (`chat_template.hpp:47-51`).
+`text_model_runner.cpp:714` cuts the stored checkpoint to exactly that offset,
+so paying again for the previous user block is the designed cost. The standing
+suspect was measured out rather than argued: `preserve_thinking` neither helps
+nor hurts reuse, it only adds the generated part — a dropped thought reused
+4,211 of 4,803, a preserved one 4,258, which is the 47 tokens of the block
+itself. Also excluded: `CheckpointPosition` granularity, which is
+`session().position()` here exactly as in the Gemma 4 runner, and snapshot size,
+the snapshot in question being 1.53 GB against a ceiling of host RAM minus
+headroom.
 
 ## Known behaviour
 
@@ -139,16 +151,23 @@ standing suspect.
   is unaffected. The fix belongs in that shared splitter (whitespace around the
   marker), not in this model's adapter; until it lands, trim client-side or use
   `auto`.
-- **Tool arguments arrive as one delta.** Once `StreamingTextFilter` sees a tool
-  marker it buffers everything to the end of the generation
-  (`openai_chat.cpp:2473`, `hidden_.append(piece)`), so a call's arguments appear
-  in a single SSE chunk instead of streaming as they decode. Presets that pass
-  `tool-streaming` reach their call through the structured path
-  (`raw_content_` → `StructuredContent()`), which emits pieces as they arrive.
-  Making marker-delimited models stream would mean changing the shared streaming
-  machine and the wire behaviour of every other model on this engine, so it is
-  left alone here on purpose: clients still get the call complete and parseable,
-  only without progressive arguments.
+- **Tool arguments stream per completed value, not per token.** At a tool marker
+  `StreamingTextFilter` stops the text channel and keeps the rest of the
+  generation for the parser (`openai_chat.cpp:2473`, `hidden_.append(piece)`),
+  which is easy to mistake for buffering of the call. The argument channel is
+  separate: `StreamingToolCalls::Update` (`openai_chat.cpp:2778`) publishes only
+  the newly parsed suffix of a call, and a new suffix exists when the JSON
+  parser holds a completed value (`partial_arguments`, `openai_chat.cpp:75`,
+  written by `AddPartialArgument`, `openai_chat.cpp:1472`), refreshed per piece
+  at `openai_chat.cpp:3287`. A call whose arguments are one long string
+  therefore arrives as one or two deltas. Nothing waits for the generation to
+  end; the granularity is the parser's. Progressive string prefixes would mean
+  changing the shared parser and with it the wire behaviour of every marker
+  model on this engine, so it is left alone here on purpose — clients get the
+  call complete and parseable. `tool_streaming.py` asserts a fragment count only
+  where a parser promises one: the typed call syntax of Gemma 4, while marker
+  presets assert that deltas arrive at all and before the terminal event
+  (`RELEASES_ARGUMENT_ON_VALUE` in `tool_streaming.py`).
 
 ## Not verified
 

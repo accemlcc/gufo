@@ -160,13 +160,16 @@ probe now calibrates without needles, which makes the calibration a real prefix 
 the graded prompt, and the leg run on October 13 at 10:04 measured the answer:
 **`cached_tokens=8192`, `prefill_tokens=101464` of a 109,656-token prompt** — the
 checkpoint survived 108K of state and was applied. It landed on 8,192 rather than
-the 9,845 the calibration actually shared, which is the 2,048-token checkpoint
-grid (`text_model_runner.cpp:753`) snapped down to a window-safe boundary by
-`PrefillStop`. Same mechanism, one row above, explains cache-depth's
-`cached=20008`: 20,480 on the grid, snapped down 472. Decode reproduced to one
-tenth — 31.7 tok/s here against 31.8 in the cold leg — while prefill moved 97.9
-to 93.4, exactly the split between the two kinds of measurement this card keeps
-insisting on.
+the 9,845 the calibration actually shared, because that calibration is another
+conversation and nothing was checkpointed where the two prompts part: the only
+candidates are the 2,048-token checkpoint grid (`text_model_runner.cpp:753`) and
+8,192 is the largest of its points below the shared prefix. cache-depth's
+`cached=20008` is a different rule and a finer one — the stable prefix, which
+ends before a trailing text-only user turn (`chat_template.hpp:47-51`) — and
+20,606 − 20,008 = 598 is exactly that user block; the same probe measured 594 and
+592 at shallower depths. Decode reproduced to one tenth — 31.7 tok/s here against
+31.8 in the cold leg — while prefill moved 97.9 to 93.4, exactly the split
+between the two kinds of measurement this card keeps insisting on.
 
 Loading the model over HTTP took 18.5 s for the 45 GiB file, against 12-42 s
 engine-direct depending on page-cache state.
