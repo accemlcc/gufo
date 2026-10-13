@@ -51,18 +51,54 @@ and 128K decode). The chat renderer and tokenizer are pinned by byte-exact
 goldens in `chat_template_test.cpp`, `tokenizer_test.cpp` and
 `tokenizer_model_test.cpp`.
 
+## Served path
+
+`gufo serve llm` was driven over HTTP on October 13, 2026 with
+`tools/kolibri/serve_check.py` and the server's own `event=completed` log line.
+A chat turn returns, the `
+
+`-pair splits into
+`reasoning_content` and `content` with neither channel polluted by the other,
+`tool_choice: "required"` returns a structured call, and two conversations
+interleaved as A1 B1 A2 B2 A3 answer from their own state: each reply carries its
+own planted code and person, never the other's, while the log's accounting
+(`prefill_tokens + cached_tokens == prompt_tokens`) shows the cache advancing by
+exactly the new turn.
+
+`tools/kolibri/serve_check.py` re-runs all of it: `sessions` (interleaving),
+`recall --tokens N` (three facts planted at 10/50/90% depth), `prefix` (cold,
+warm, and a same-size different-bytes control), `coldpair` (two prompts the
+server has never seen, so a cache hit cannot be explained by an earlier run).
+
+## Known behaviour
+
+- **A thinking budget can empty `content`.** With `reasoning_effort: high` a
+  small `max_tokens` is spent entirely inside `
+` and `content` comes back
+  `""` with `finish_reason: length`. This is the model spending its budget, not a
+  parser failure; `serve_check.py` therefore scores the reasoning channel too and
+  re-asks once at `low` rather than reporting a miss it did not observe.
+- **`parallel_tool_calls: true` admits a second envelope.** The constrained
+  grammar allows another call when the request permits parallel calls, and the
+  model uses it, so the same call can arrive twice. `parallel_tool_calls: false`
+  yields exactly one. Upstream grammar behaviour, not this adapter.
+- **`tool_choice: "required"` leaves the reasoning shell in `content`.** The
+  `tool_only` branch of `ParseStructuredGeneration` splits reasoning off only when
+  the generation begins with the closing marker, and this template surrounds the
+  marker with newlines, so the returned `content` starts with a newline, the
+  closing marker and two more newlines before the call text. `tool_choice: "auto"`
+  is unaffected. The fix belongs in that shared splitter (whitespace around the
+  marker), not in this model's adapter; until it lands, trim client-side or use
+  `auto`.
+
 ## Not verified
 
 - **Text quality.** No benchmark suite has been run against the original FP8
   model, and the conversion itself warns that quantization can reduce accuracy.
   Nothing here says how good this model is; only that the engine computes it.
-- **Long context.** The device check runs at a few dozen tokens. The cache
-  geometry supports the full 262,144, but recall or perplexity at depth is untested.
-- **Tool calling on the device.** The tool grammar is produced and tested as
-  text; no measurement that a served tool call round-trips.
 - **Other quants.** Q6_K, Q8_0 and Q5_K_M have not been loaded. The binder
   accepts Q4_K, Q6_K and F32 rows and names the tensor it rejects, so an
   unexpected per-tensor layout fails loudly rather than silently — but that is
   a load-time guarantee, not a correctness measurement.
-- **Concurrency.** Everything measured is one user. Multi-session rings and the
-  continuation cache are not yet exercised for this architecture.
+- **Depth beyond this box.** The cache geometry supports the full 262,144; the
+  recall probe below reports what was actually measured at 128 K.

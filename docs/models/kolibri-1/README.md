@@ -7,12 +7,13 @@ Apache-2.0. This card covers Hob-forge's independent GGUF conversion,
 whose GGUF architecture key is `kolibri1`. Stock llama.cpp does not run this
 architecture; the conversion ships a patch for it. Gufo implements it natively.
 
-**Status.** The engine, its device check against a scalar oracle, the tokenizer,
-the chat renderer and the throughput tool pass on `gfx1151`, and `gufo chat` /
-`gufo prompt` dispatch to this architecture. The HTTP path
-(`gufo serve llm`, and with it the continuation cache and concurrency) is not
-wired yet; the numbers in [BENCHMARKS.md](BENCHMARKS.md) therefore come from the
-engine, not from HTTP.
+**Status.** The engine, its device check against a scalar oracle, the tokenizer
+and the chat renderer pass on `gfx1151`; `gufo chat`, `gufo prompt` and
+`gufo serve llm` dispatch to this architecture, and the served path is verified
+for chat, reasoning separation, tool calls, prefix reuse and session isolation
+([Quality](QUALITY.md)). The numbers in [BENCHMARKS.md](BENCHMARKS.md) are
+engine-direct except the "Served path" section. No speculative decoding (the
+architecture has no draft head here) and no wide-batch prefill.
 
 [Benchmarks](BENCHMARKS.md) · [Quality](QUALITY.md) · [Experiments](EXPERIMENTS.md)
 
@@ -70,12 +71,18 @@ nix build
   --max-tokens 512
 ./result/bin/gufo prompt --model models/kolibri-1/Kolibri-1-Q4_K_M.gguf \
   --raw -p "Hauptstadt von Deutschland?"
+./result/bin/gufo serve llm --model models/kolibri-1/Kolibri-1-Q4_K_M.gguf \
+  --served-model-name Kolibri-1 --context 131072 --sessions 1 --port 8102
 ```
 
 `--system`, the shared sampling flags (`-n` / `--max-tokens` and friends) and
-`--verbose` apply. The context is fixed at 8,192 by `kKolibriContext` in
-`src/cli/prompt/kolibri1_prompt.cpp` and is not a flag yet, and reasoning effort
-is not one either, so `chat` renders the template's default (`high`).
+`--verbose` apply. `chat` and `prompt` fix the context at 8,192
+(`kKolibriContext` in `src/cli/prompt/kolibri1_prompt.cpp`); `serve` takes
+`--context` and holds it for the process, since the session cache is sized from
+it at load. Sampling falls back to the upstream `generation_config` through
+`sampling::TextModelPreset::kKolibri1` (temperature 1.0, top-p 0.97, top_k 128)
+— the GGUF ships no `general.sampling.*`, so requests that send nothing get
+those numbers.
 
 ## Developer tools
 

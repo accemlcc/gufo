@@ -50,6 +50,32 @@ rings. Prefill at 8,192 tokens is 254 tok/s at chunk 64 — the patternless laye
 are quadratic and the sliding ones are not, and the 4:1 mix keeps the whole
 curve nearly flat.
 
+## Served path
+
+`gufo serve llm`, one session, context 8,192, October 13, 2026. The HTTP API
+returns no timing fields; these come from the server's own `event=completed`
+line, which carries `prompt_tokens prefill_tokens cached_tokens prefill_tps
+decode_tps ttft_ms cache_restore_ms queue_ms`. The methods agree: a 2,046-token
+prompt measured 9.367 s from the client against `prefill_tps 218.6` in the log,
+and a 64-token generation 59.2 tok/s against `decode_tps 60.5`.
+
+| Metric | Value |
+| --- | ---: |
+| prefill_tps (log, several requests) | 217.7 – 244.4 |
+| decode_tps (log) | 59.4 – 60.5 |
+| ttft_ms on a warm prefix | 1.3 |
+| cache_restore_ms | 1.1 – 3.5 |
+
+Served prefill lands on the chunk-16 row of the first table, which is what the
+geometry predicts: `--prefill-chunk` is the scheduler's budget of prompt tokens
+between decode rounds — it arrives here as `max_input_tokens` — while
+`kKolibriPrefillChunk` is the number of rows one forward actually carries. A
+512-token step runs as 32 forwards of 16 rows. Widening the forward is the open
+performance item the next section explains.
+
+Loading over HTTP took 18.5 s for the 45 GiB file, against 12-35 s
+engine-direct depending on page-cache state.
+
 ## Against the reference implementation
 
 Same box, same artifact, October 13, 2026. The reference is the patched
@@ -86,11 +112,8 @@ Closing that gap is the model's first performance item.
 
 | Cell | Status |
 | --- | --- |
-| HTTP serve, `gufo chat` / `/v1/chat/completions` | In progress |
-| Concurrency (2/4/8 users), continuation cache | TODO |
+| Concurrency (2/4/8 users) | TODO — one session per forward today; `SupportedPlans` is serial width 1 |
 | Q6_K / Q8_0 / Q5_K_M | TODO |
-| Contexts beyond 8,192 | TODO |
-| Long-context recall, tool-call round-trip | TODO |
-
-Weight load is 12–35 s for the 45 GiB file depending on page-cache state; it is
-not part of any timed region above.
+| Contexts beyond 8,192 | In progress — 128 K recall probe running |
+| Continuation cache, prefix reuse | Measured ([Served path](#served-path), [Quality](QUALITY.md)) |
+| Tool-call round-trip | Measured ([Quality](QUALITY.md)) |
