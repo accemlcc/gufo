@@ -11,7 +11,14 @@
 #     lives in a bind mount CMake does not search on its own:
 #       cmake -B build/gpu-test -G Ninja -DCMAKE_BUILD_TYPE=Release \
 #             -DBUILD_TESTING=ON -DENGINE_ENABLE_HIP=ON \
+#             -DROCM_PATH=/opt/rocm \
 #             -DCMAKE_HIP_COMPILER=/opt/rocm/lib/llvm/bin/clang++
+#     `-DROCM_PATH` is not decoration: the container gets /opt/rocm as a bind
+#     mount (`rocm-sdk`), and CMake's HIP detection aborts with "Failed to find
+#     ROCm root directory" on a directory it can see, because it looks for the
+#     ROCm install registry rather than the compiler. A build directory
+#     configured before that mount existed carries the answer in its cache and
+#     never asks again, which is why the failure appears only on a clean one.
 #     BUILD_TESTING also decides whether the test targets exist at all, so a
 #     directory configured without it knows no kolibri1_*_test to build.
 #   - KOLIBRI_REMOTE_SRC and KOLIBRI_CONTAINER pick another source tree and
