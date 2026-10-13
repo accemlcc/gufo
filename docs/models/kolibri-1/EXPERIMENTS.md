@@ -54,6 +54,47 @@ the released Q4_K_M unless stated.
   `Session::Append` now asks for row `n - 1` and only takes logits on the last
   chunk; the device test prefill 37 tokens both in one append and across a chunk
   of 16 and requires the same answer.
+- **Serving's prefill knob is not the forward's knob.** Served prefill measured
+  218 tok/s against the engine's 251 at chunk 16, which read as `--prefill-chunk`
+  being ignored. It is not: that flag is the scheduler's budget of prompt tokens
+  between decode rounds and arrives at the model as `max_input_tokens`, while
+  `kKolibriPrefillChunk` is the number of rows one forward carries — a 512-token
+  step is 32 forwards of 16. Passing the budget through as the row count would
+  silently resize the sliding ring (`next_pow2(513 + rows)`: 1,024 up to 511 rows,
+  2,048 from 512) and the scratch with it. The row count stays a model constant,
+  varied by measurement rather than by flag.
+- **No reasoning format for a model that matches the default.** The first adapter
+  set the markup for reasoning by hand and wrapped each marker in newlines,
+  because the template writes the marker surrounded by newlines. The splitter in
+  the serve layer looks for the marker where the generation begins, so a wrapped
+  marker is never found and the closing marker leaked into `content`. The server's
+  default markup is already the bare marker pair this model writes, so `Markup()`
+  keeps its default and the model adds nothing. Rule: an adapter overrides only
+  what actually differs.
+- **Timing came from the log line, not a new API field.** Measuring pp/tg over
+  HTTP first needed SSE assembly client-side, and the obvious fix — a `timings`
+  object in the response — would put fork-only fields into a contract the
+  community clients share. The `event=completed` line already carries
+  `prompt_tokens prefill_tokens cached_tokens prefill_tps decode_tps ttft_ms
+  cache_restore_ms queue_ms`, and it agrees with the client-side measurement
+  (2,046 tokens: 9.367 s against `prefill_tps 218.6`; 64 tokens: 59.2 against
+  `decode_tps 60.5`), so the card quotes the log and the API stays upstream.
+- **Prefix reuse proven by control, not by speed.** "The second request was
+  faster" cannot distinguish reuse from a warm page cache, and "a different
+  conversation hit the cache" cannot distinguish a bug from a client that built
+  its second conversation out of the first one's messages. The probe pair is now
+  two prompts the server has never seen, same length, different bytes, so any
+  cold hit is a bug (`coldpair`), and a same-size context with a shifted line
+  numbering is the negative control inside the reuse probe (`prefix`).
+
+- **Reading a cache hit as cross-talk.** Two conversations answered identically
+  while the log reported `cached_tokens` equal to the full prompt, and the
+  conclusion on the table was that prefix reuse matched by length. The
+  conversations had been sent twice by the harness, and the second pair was
+  byte-identical to the first: reuse of identical tokens is the design, and
+  `cache_miss_reason=prefix_changed` with `common_prefix_tokens=13` on a request
+  that differed only in one text field shows the comparison is byte-exact. What
+  looked like contamination was the harness replaying itself.
 
 ## Rejected
 

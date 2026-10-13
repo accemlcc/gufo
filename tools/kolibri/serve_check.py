@@ -32,6 +32,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 
 BASE = os.environ.get("KOLIBRI_URL", "http://127.0.0.1:8102").rstrip("/")
 MODEL = os.environ.get("KOLIBRI_MODEL", "Kolibri-1")
@@ -244,9 +245,16 @@ def cmd_sessions() -> int:
 
 
 def cmd_prefix(target_tokens: int) -> int:
-    """Cold, warm, and same-size-but-different-bytes on one conversation."""
-    context, _ = prompt_with_needles(target_tokens)
+    """One unseen conversation cold, the same conversation warm, then a control
+    of the same size that was never sent.
+
+    The cold leg has to be a prompt this server has not seen: reusing the
+    filler the recall probe already paid for measures a warm prefix and calls it
+    cold. The control answers the only alternative that matters — a cache
+    matching on length would take the second conversation from the first.
+    """
     summarize = "Fasse in einem Satz zusammen, was diese Ablage enthaelt."
+    context, _ = prompt_with_needles(target_tokens, offset=7_000_000)
     first = [{"role": "system", "content": context},
              {"role": "user", "content": summarize}]
     cold, t_cold = chat(first, max_tokens=32)
@@ -265,23 +273,80 @@ def cmd_prefix(target_tokens: int) -> int:
     print(f"warm   {t_warm:6.2f}s cached={cached(warm_p)}")
     print(f"fremd  {t_other:6.2f}s cached={cached(other_p)}")
     failed = []
-    if cached(warm_p) < 0.5 * depth:
+    if cached(cold) > 0.05 * depth:
+        print(f"FEHLER: nie gesehener Prafix traf den Cache "
+              f"({cached(cold)} von {depth})")
+        failed.append("cold-hit")
+    if cached(warm_p) < 0.9 * depth:
         print(f"FEHLER: warme Wiederverwendung zu klein "
               f"({cached(warm_p)} von {depth})")
-        failed.append("warm-cache")
+        failed.append("warm-miss")
     if t_warm >= t_cold:
         print("FEHLER: warm war nicht schneller als kalt")
         failed.append("warm-time")
-    if cached(other_p) > 0.5 * depth:
+    if cached(other_p) > 0.05 * depth:
         print("FEHLER: fremder Prafix traf den Cache")
         failed.append("cold-cache")
     print("PREFIX " + ("FEHLER: " + ",".join(failed) if failed else "OK"))
     return 1 if failed else 0
 
 
+def cmd_coldpair() -> int:
+    """Two prompts of the same length that the server has never seen.
+
+    A nonce puts the divergence in the first sentence, so any `cached_tokens`
+    beyond the shared template is prefix matching by length rather than by
+    bytes. Repeating both then proves reuse still works when it should.
+    """
+    nonce = uuid.uuid4().hex[:8]
+    ask = "Antworte mit genau einer Zeile: NAME | CODE | PERSON."
+    a = (f"Merk dir: Projekt ALPHA-{nonce} hat Code 4417 und zustaendig ist "
+         f"Ilgen. {ask}")
+    b = (f"Merk dir: Projekt BETA-{nonce} hat Code 8802 und zustaendig ist "
+         f"Seitz. {ask}")
+    pa, _ = chat([{"role": "user", "content": a}], max_tokens=64)
+    pb, _ = chat([{"role": "user", "content": b}], max_tokens=64)
+    a_len, b_len = prompt_tokens(pa), prompt_tokens(pb)
+    text_a, where_a = answer(pa)
+    text_b, where_b = answer(pb)
+    print(f"A kalt: {a_len} tokens, cached={cached(pa)}, {where_a}: "
+          f"{text_a.strip()[:120]}")
+    print(f"B kalt: {b_len} tokens, cached={cached(pb)}, {where_b}: "
+          f"{text_b.strip()[:120]}")
+
+    pa2, _ = chat([{"role": "user", "content": a}], max_tokens=64)
+    pb2, _ = chat([{"role": "user", "content": b}], max_tokens=64)
+    text_a2, _ = answer(pa2)
+    text_b2, _ = answer(pb2)
+    print(f"A warm: cached={cached(pa2)} von {a_len}: {text_a2.strip()[:120]}")
+    print(f"B warm: cached={cached(pb2)} von {b_len}: {text_b2.strip()[:120]}")
+
+    failed = []
+    if a_len != b_len:
+        print(f"HINWEIS: ungleiche Laengen ({a_len} vs {b_len}) — "
+              f"Laengengleichheit ist hier nur ein Hinweis, kein Beweis")
+    if cached(pa) > 4 or cached(pb) > 4:
+        print("FEHLER: nie gesehener Prompt traf den Cache — Prafix nach Laenge")
+        failed.append("cold-hit")
+    for label, text, want, other in (("A", text_a2, "4417", "8802"),
+                                     ("B", text_b2, "8802", "4417")):
+        if want not in text:
+            print(f"FEHLER: {label} nennt den eigenen Code nicht")
+            failed.append(f"{label}-answer")
+        if other in text:
+            print(f"FEHLER: {label} antwortet aus der anderen Konversation")
+            failed.append(f"{label}-leak")
+    if cached(pa2) < a_len - 4 or cached(pb2) < b_len - 4:
+        print("FEHLER: echte Wiederholung wurde nicht wiederverwendet")
+        failed.append("warm-miss")
+    print("COLDPAIR " + ("FEHLER: " + ",".join(failed) if failed else "OK"))
+    return 1 if failed else 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=("recall", "sessions", "prefix", "all"))
+    ap.add_argument("mode",
+                    choices=("recall", "sessions", "prefix", "coldpair", "all"))
     ap.add_argument("--tokens", type=int, default=110_000,
                     help="approximate prompt size for recall/prefix probes")
     args = ap.parse_args()
@@ -292,6 +357,8 @@ def main() -> int:
         rc |= cmd_sessions()
     if args.mode in ("prefix", "all"):
         rc |= cmd_prefix(args.tokens)
+    if args.mode in ("coldpair", "all"):
+        rc |= cmd_coldpair()
     return rc
 
 
