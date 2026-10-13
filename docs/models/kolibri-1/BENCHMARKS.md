@@ -238,6 +238,7 @@ where long context is used. The cell that settles it is `llama-bench -ngl 99 -p
 | Continuation cache, prefix reuse | Measured ([Served path](#served-path), [Quality](QUALITY.md)) |
 | Tool-call round-trip | Measured ([Quality](QUALITY.md)) |
 | Functional suites (13) | Recorded across three runs — 7 pass / 6 fail, every failure with a cause, four harness-side fixes landed but not re-run ([Quality](QUALITY.md#functional-qualification)) |
+| Whole-model prefill on the matrix-core path | TODO — built and measured per shape (item 2a), but the served `prefill_chunk_rows` is 16, where the path is never taken |
 
 ## Performance items
 
@@ -252,30 +253,47 @@ where long context is used. The cell that settles it is `llama-bench -ngl 99 -p
    One caveat with a cost attached: `prefill_chunk_rows` is part of the served
    disk-cache identity (`inference_backend.cpp:348`, `:4479-4491`), so a new width
    re-prefills every existing cache tree once.
-2. **The prefill GEMM: tensor cores in two steps, both already in this repo.**
+2. **The prefill GEMM: tensor cores in two steps; a is built, b is next.**
    The reference's advantage is a tensor-core path, not a better schedule, and the
    ladder is measurable in front of us — `gemma4` was cut from the same GEMV and
    already switched above 16 rows (`gemma4/kernels/rocm/executor.cpp:476-540`),
    and `qwen38_flash_next` runs dense on F16/int8 WMMA and hipBLASLt with routed
    experts on compacted buckets (`qwen38/kernels/rocm/executor.cpp:1543-1621`,
    `:2504-2575`).
-   - **a) Dense projections and the shared expert** (30 of the ~56 MB per layer
-     read at width 16, 3.1 of 6.9 GFLOP/token) through the vendored
-     `qwen::hip::ops::LaunchBatchedQuantGEMMPreQuantized`, which takes Q4_K and
-     Q6_K with pre-quantised activations (`qwen/hip/ops/gemm.hpp:279`, dispatch
-     `qwen/hip/prefill_quant_gemm.hip:1479-1491`). Expected ~550-600 tok/s at
-     width 128-256.
-   - **b) Routed experts** (2.4 of 6.9 GFLOP, ~90 % of the bytes) as a WMMA tile
-     over per-expert padded buckets — `gemma4/kernels/rocm/moe_prefill.hip.cpp`
-     is Q4_K/Q6_K → binary16 already, and `MoeRoute` emits the `counts` such a
-     `RoutedCompact` needs (`route.hip.cpp:216-220`). With every expert read once
-     per ≥256-row chunk, traffic drops to 93-184 MB/token, a memory floor of
-     800-1600 tok/s, and the tensor core supplies the FLOPs. This is the step that
-     reaches the reference's 1,217 pp, and it inherits the accuracy review that
-     gemma4 already accepted: Q4_K products rounded through binary16.
-   Neither is bit-identical to the decode GEMV, whose batch-invariance contract
-   (`gemv.hip.cpp:11-27`, compiled `-ffp-contract=off`) must stay for decode;
-   prompt and decode rounding already differ in Qwen and gemma4.
+  - **a) Dense projections and the shared expert — built.** `Executor::Project`
+    hands a block of `kMatrixCoreRows = 32` rows or more to
+    `gufo::hip::LaunchBatchedQuantGEMMPreQuantized` (`qwen/hip/ops/gemm.hpp:279`,
+    dispatch `qwen/hip/kernels/prefill_quant_gemm.hip:1517-1537`), the entry
+    `gemma4` uses for the same job; under 32 rows, and for every decode row, the
+    batch-invariant GEMV is untouched. The block's input is staged once into Q8_1
+    tiles (`QuantizedActivationBytes`), one buffer per executor, sized by the
+    widest projection input — and no new link edge, since those kernels compile
+    into `gufo_core` (`qwen/CMakeLists.txt:34`), which this engine already links.
+    Measured per shape at the artifact's own widths with random weights
+    (`tools/kolibri/prefill_gemm_probe.cpp`, so without the artifact and without a
+    device window): over the seven projections of one layer, the tiled path runs
+    0.76 of the GEMV at 16 rows — the reason the threshold is 32 and not 17 — then
+    1.46 at 32, 2.95 at 64, 3.51 at 128 and 4.97 at 256. Per token that is
+    0.81 ms of projection at 32 rows, 0.42 at 64, 0.37 at 128 and 0.26 at 256,
+    against 1.30 ms for the GEMV at any width; set against the 3.07 ms/token of
+    the measured 325 pp plateau, width 128 should land near 465 pp. Derived, not
+    measured: the routed experts and the attention still pay their share, and
+    those are item b. What the wide path trades is rounding — its activations are
+    int8 per 32 values, and against the GEMV on the same input the largest
+    deviation is 3.2e-3 to 4.6e-3 of a projection's largest output, the same
+    trade Qwen and gemma4 already make.
+  - **b) Routed experts** (2.4 of 6.9 GFLOP, ~90 % of the bytes) as a WMMA tile
+    over per-expert padded buckets — `gemma4/kernels/rocm/moe_prefill.hip.cpp`
+    is Q4_K/Q6_K → binary16 already, and `MoeRoute` emits the `counts` such a
+    `RoutedCompact` needs (`route.hip.cpp:216-220`). With every expert read once
+    per ≥256-row chunk, traffic drops to 93-184 MB/token, a memory floor of
+    800-1600 tok/s, and the tensor core supplies the FLOPs. This is the step that
+    reaches the reference's 1,217 pp, and it inherits the accuracy review that
+    gemma4 already accepted: Q4_K products rounded through binary16.
+    It will not be bit-identical to the decode GEMV either; that kernel's
+    batch-invariance contract (`gemv.hip.cpp:11-27`, compiled
+    `-ffp-contract=off`) stays in force for decode, and prompt and decode
+    rounding already differ in Qwen and gemma4.
 3. **Two grid and allocation wastes to sweep up while in there.**
    `AttentionQueryRowsPerBlock()` returns 32 while the kernel advances 64 rows per
    block (`attention.hpp:59-61` against `attention.hip.cpp:131-133`), so at width

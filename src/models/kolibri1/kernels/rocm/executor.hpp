@@ -22,6 +22,16 @@ namespace gufo::models::kolibri1::rocm {
 /// projection weights per step and nothing else.
 inline constexpr std::uint32_t kProjectRows = 16;
 
+/// Rows a projection block needs before the tiled GEMM is the faster of the
+/// two. Measured per shape on gfx1151 with the artifact's own widths
+/// (`tools/kolibri/prefill_gemm_probe.cpp`): over the seven projections of one
+/// layer, the tiled path is 0.76 of the GEMV at 16 rows, 1.46 at 32, 2.95 at
+/// 64, 3.51 at 128 and 4.97 at 256. The narrow projections of a layer (the key,
+/// value and shared gate/up, 512 rows out) are the ones that lose at 16 rows -
+/// their tile is mostly empty - and they are also the reason the crossover is
+/// where it is rather than one row above `kProjectRows`.
+inline constexpr std::uint32_t kMatrixCoreRows = 32;
+
 /// One session's attention state. The ten layers without positional encoding
 /// keep every position of the context; the sliding layers keep a ring, so a
 /// long context costs the ten full caches and nothing else.
@@ -79,8 +89,10 @@ public:
   [[nodiscard]] const DeviceModel& model() const noexcept { return model_; }
 
 private:
-  /// y[rows][w.rows] = x[rows][w.cols] . W^T in steps of kProjectRows, using
-  /// the prebuilt single-group table for that step's width.
+  /// y[rows][w.rows] = x[rows][w.cols] . W^T. Up to `kProjectRows` this is the
+  /// batch-invariant GEMV with its prebuilt single-group table; a wider block
+  /// goes to the shared tiled GEMM, which reads the weights once for all of it.
+  /// See `MatrixCoreProjection` in the definition for what decides.
   void Project(const DeviceTensor& w, const float* x, std::uint32_t rows,
                float* y);
   /// The routed experts of one layer over the rows of `h`, writing
@@ -124,6 +136,11 @@ private:
   /// Single-group tables for one to kProjectRows rows, built once.
   std::int32_t* dense_groups_{nullptr};
   float* logits_{nullptr};
+  /// Q8_1 tiles of one projection's input rows, for the path that runs a wide
+  /// projection on the matrix cores. Sized for the widest input any projection
+  /// reads, so one buffer serves every layer of a forward.
+  void* act_q8_{nullptr};
+  std::size_t act_q8_bytes_{0};
   float* logit_x_{nullptr};
   float* partials_{nullptr};
 };

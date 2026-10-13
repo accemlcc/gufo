@@ -112,8 +112,25 @@ int main() {
   }
 
   const std::string prompt = "Hauptstadt von Deutschland ist";
-  auto model = k1::Model::Load(path, k1::ModelOptions{.max_context = 1024,
-                                                      .prefill_chunk = 16});
+  // The rows one forward takes. 16 is what the engine is configured with and
+  // what the batch-invariant GEMV is written for; a wider value sends the
+  // projections to the matrix cores instead, which lets the same checks run
+  // over both paths of a projection without a second copy of the weights.
+  std::uint32_t chunk = 16;
+  if (const char* env = std::getenv("KOLIBRI_TEST_PREFILL_CHUNK");
+      env != nullptr) {
+    char* end = nullptr;
+    const long want = std::strtol(env, &end, 10);
+    if (end == env || want < 1 || want > 512) {
+      std::cout << "FAIL KOLIBRI_TEST_PREFILL_CHUNK wants a number from 1 to "
+                   "512\n";
+      return 1;
+    }
+    chunk = static_cast<std::uint32_t>(want);
+  }
+  auto model =
+      k1::Model::Load(path, k1::ModelOptions{.max_context = 1024,
+                                             .prefill_chunk = chunk});
   if (!model) {
     std::cout << "FAIL cannot load the model on the device\n";
     return 1;

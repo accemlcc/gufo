@@ -8,6 +8,7 @@
 #include "src/models/kolibri1/kernels/rocm/attention.hpp"
 #include "src/models/kolibri1/kernels/rocm/moe.hpp"
 #include "src/models/kolibri1/kernels/rocm/qkv_post.hpp"
+#include "src/models/qwen/hip/ops/gemm.hpp"
 
 namespace gufo::models::kolibri1::rocm {
 namespace {
@@ -38,6 +39,30 @@ struct Arena {
 [[nodiscard]] constexpr std::size_t ArenaBytes(std::size_t count,
                                                std::size_t element) noexcept {
   return Pad(count * element);
+}
+
+/// Whether a projection of `rows` rows goes to the shared matrix-core GEMM
+/// instead of the batch-invariant GEMV.
+///
+/// The GEMV is written for at most `kProjectRows` rows and reads a weight
+/// matrix once per step of that many, so a wider block costs it a re-read; the
+/// tiled GEMM reads it once for the whole block and pays for it by quantizing
+/// its input to int8 per 32 values. Where the two cross is a measured thing,
+/// not a property of the width, so it is `kMatrixCoreRows` and not one row past
+/// the GEMV's own limit; a decode step and the tail below it keep the GEMV's
+/// strict rounding.
+///
+/// The shared launcher covers the two formats of the released artifacts (its
+/// own fallback returns without launching anything for a format it does not
+/// know, which would leave `y` to whatever the scratch held) and wants a
+/// reduction dimension its quantization blocks divide.
+[[nodiscard]] bool MatrixCoreProjection(const DeviceTensor& w,
+                                        std::uint32_t rows) noexcept {
+  if (rows < kMatrixCoreRows) {
+    return false;
+  }
+  return (w.type == core::GgmlType::kQ4_K || w.type == core::GgmlType::kQ6_K) &&
+         w.cols % 256 == 0;
 }
 
 }  // namespace
@@ -123,6 +148,12 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
   Need(static_cast<std::size_t>(max_logit_rows_) * d);         // logit_x_
   Need(static_cast<std::size_t>(max_logit_rows_) * vocab);     // logits_
   Need(AttentionPartialFloats(1, c.num_heads, c.head_dim, max_context));
+  // One projection's input rows as Q8_1 tiles. The output projection reads the
+  // whole query width and every other one reads at most the hidden size, so the
+  // wider of the two bounds the buffer for all of them.
+  const std::size_t act_bytes =
+      hip::QuantizedActivationBytes(max_rows_, std::max(d, q_dim));
+  bytes += ArenaBytes(act_bytes, 1);
   HIP_CHECK(hipMalloc(&scratch_, bytes));
   Arena arena{static_cast<char*>(scratch_)};
   x_ = arena.Take<float>(static_cast<std::size_t>(max_rows_) * d);
@@ -153,6 +184,8 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
   partials_ =
       arena.Take<float>(AttentionPartialFloats(1, c.num_heads, c.head_dim,
                                                max_context));
+  act_q8_ = arena.Take<std::uint8_t>(act_bytes);
+  act_q8_bytes_ = act_bytes;
 
   // The single-group table of a dense projection says: one expert, these rows
   // as its slots. Every width the executor steps through gets its own table
@@ -220,6 +253,16 @@ void Executor::Project(const DeviceTensor& w, const float* x,
                        std::uint32_t rows, float* y) {
   const std::uint32_t m = w.rows;
   const std::uint32_t k = w.cols;
+  if (MatrixCoreProjection(w, rows) &&
+      hip::QuantizedActivationBytes(rows, k) <= act_q8_bytes_) {
+    // One pass over the rows into tiles, then the whole block in one launch:
+    // the weight matrix is read once for `rows` rows instead of once per
+    // kProjectRows of them.
+    hip::LaunchQuantizeActivationQ8_1FromFp32(x, act_q8_, rows, k, stream_);
+    hip::LaunchBatchedQuantGEMMPreQuantized(w.type, w.data, act_q8_, y, rows, m,
+                                           k, stream_);
+    return;
+  }
   for (std::uint32_t base = 0; base < rows; base += kProjectRows) {
     const std::uint32_t n = std::min(kProjectRows, rows - base);
     const std::int32_t* table = dense_groups_ + (n - 1) * GroupTableInts(1);
