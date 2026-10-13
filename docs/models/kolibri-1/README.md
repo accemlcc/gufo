@@ -69,13 +69,13 @@ nix build
 ./result/bin/gufo chat --model models/kolibri-1/Kolibri-1-Q4_K_M.gguf \
   --max-tokens 512
 ./result/bin/gufo prompt --model models/kolibri-1/Kolibri-1-Q4_K_M.gguf \
-  --no-chat-template -p "Hauptstadt von Deutschland?"
+  --raw -p "Hauptstadt von Deutschland?"
 ```
 
-`--system-prompt`, the shared sampling flags and `--verbose` apply. The context
-is fixed at 8,192 by `kKolibriContext` in `src/cli/prompt/kolibri1_prompt.cpp`
-and is not a flag yet; reasoning effort is not a CLI flag either, so `chat`
-renders the template's default (`high`).
+`--system`, the shared sampling flags (`-n` / `--max-tokens` and friends) and
+`--verbose` apply. The context is fixed at 8,192 by `kKolibriContext` in
+`src/cli/prompt/kolibri1_prompt.cpp` and is not a flag yet, and reasoning effort
+is not one either, so `chat` renders the template's default (`high`).
 
 ## Developer tools
 
@@ -111,9 +111,10 @@ tools/kolibri/throughput <model.gguf> 2048 64 32
   of eight slots (`kSlots`). `bin[8]{expert,rows,base}` lives in constant memory.
   With the 6-of-384 routing of this model, a pass almost never repeats an
   expert, which is why the small bin count does not re-read weights.
-- **Prefill** re-reads the expert weights per chunk. The chunk width is a
-  parameter (`--prefill-chunk`); of the widths tried at 512 tokens, 32 measured
-  fastest ([Benchmarks](BENCHMARKS.md)).
+- **Prefill** re-reads the expert weights per chunk, so the chunk width
+  (`ModelOptions::prefill_chunk`) is a real knob; of the widths tried at 512
+  tokens, 32 measured fastest ([Benchmarks](BENCHMARKS.md)). `gufo chat` and
+  `gufo prompt` pass 16 today, which is why their prefill sits at ~250 tok/s.
 - **Cache:** the 10 patternless layers keep the whole context; the 40 sliding
   layers keep a ring of the window plus one forward's rows, rounded up to a
   power of two — 1,024 slots at a chunk of 16. KV is binary16, so a session at
