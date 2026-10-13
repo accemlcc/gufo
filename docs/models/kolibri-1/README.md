@@ -7,11 +7,12 @@ Apache-2.0. This card covers Hob-forge's independent GGUF conversion,
 whose GGUF architecture key is `kolibri1`. Stock llama.cpp does not run this
 architecture; the conversion ships a patch for it. Gufo implements it natively.
 
-**Status.** The engine, its device check against a scalar oracle, the chat
-renderer and the throughput tool are in the tree and pass on `gfx1151`. The
-`gufo chat` / `gufo serve` dispatch for this architecture is not wired yet;
-until it is, run the tools under `tools/kolibri/` described below. The measured
-numbers in [BENCHMARKS.md](BENCHMARKS.md) come from the engine, not from HTTP.
+**Status.** The engine, its device check against a scalar oracle, the tokenizer,
+the chat renderer and the throughput tool pass on `gfx1151`, and `gufo chat` /
+`gufo prompt` dispatch to this architecture. The HTTP path
+(`gufo serve llm`, and with it the continuation cache and concurrency) is not
+wired yet; the numbers in [BENCHMARKS.md](BENCHMARKS.md) therefore come from the
+engine, not from HTTP.
 
 [Benchmarks](BENCHMARKS.md) · [Quality](QUALITY.md) · [Experiments](EXPERIMENTS.md)
 
@@ -61,18 +62,36 @@ hf download Hob-forge/Kolibri-1-GGUF Kolibri-1-Q4_K_M.gguf \
 The engine refuses a file whose tensor names, shapes or row types disagree with
 `kolibri1`, so a wrong revision fails at load with the offending tensor named.
 
-## Tools
+## Run it
 
-The engine is currently driven by `tools/kolibri/`; `tools/kolibri/m1.sh` builds
-inside the ROCm container on the M1 box and ships the artifact back.
+```sh
+nix build
+./result/bin/gufo chat --model models/kolibri-1/Kolibri-1-Q4_K_M.gguf \
+  --max-tokens 512
+./result/bin/gufo prompt --model models/kolibri-1/Kolibri-1-Q4_K_M.gguf \
+  --no-chat-template -p "Hauptstadt von Deutschland?"
+```
+
+`--system-prompt`, the shared sampling flags and `--verbose` apply. The context
+is fixed at 8,192 by `kKolibriContext` in `src/cli/prompt/kolibri1_prompt.cpp`
+and is not a flag yet; reasoning effort is not a CLI flag either, so `chat`
+renders the template's default (`high`).
+
+## Developer tools
+
+`tools/kolibri/m1.sh` builds inside the ROCm container on the M1 box and ships
+the artifact back; everything below runs there.
 
 ```sh
 # scalar oracle logits for a prompt (CPU, no ROCm needed)
 tools/kolibri/build_reference_logits.sh build/gpu-test <model.gguf>
 tools/kolibri/reference_logits <model.gguf> --prompt "..." --json
 
-# device logits against that oracle, plus the chat-template golden
+# device logits against that oracle, plus the chunk-invariance check
 tools/kolibri/m1.sh model-test kolibri1_device_forward
+
+# reference vs patched llama.cpp on synthetic artifacts
+LLAMA_DIR=~/kolibri-xcheck/llama.cpp tools/kolibri/run_parity.sh
 
 # single-user prefill and decode, no sampling: throughput <model> [pp] [tg] [chunk]
 tools/kolibri/m1.sh build
@@ -93,7 +112,10 @@ tools/kolibri/throughput <model.gguf> 2048 64 32
   With the 6-of-384 routing of this model, a pass almost never repeats an
   expert, which is why the small bin count does not re-read weights.
 - **Prefill** re-reads the expert weights per chunk. The chunk width is a
-  parameter (`--prefill-chunk`), and 32 measured fastest of the widths tried.
+  parameter (`--prefill-chunk`); of the widths tried at 512 tokens, 32 measured
+  fastest ([Benchmarks](BENCHMARKS.md)).
 - **Cache:** the 10 patternless layers keep the whole context; the 40 sliding
-  layers keep a ring of the window plus one chunk. A 32,768 context costs about
-  1.45 GiB of cache.
+  layers keep a ring of the window plus one forward's rows, rounded up to a
+  power of two — 1,024 slots at a chunk of 16. KV is binary16, so a session at
+  32,768 costs about 720 MiB (640 MiB of patternless layers, 80 MiB of rings)
+  and the full 262,144 about 5.1 GiB.
