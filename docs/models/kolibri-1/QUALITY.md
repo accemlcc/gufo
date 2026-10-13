@@ -54,21 +54,32 @@ goldens in `chat_template_test.cpp`, `tokenizer_test.cpp` and
 ## Served path
 
 `gufo serve llm` was driven over HTTP on October 13, 2026 with
-`tools/kolibri/serve_check.py` and the server's own `event=completed` log line.
-A chat turn returns, the `
+`tools/kolibri/serve_check.py` and the server's own `event=completed` line. A
+chat turn returns; reasoning and answer arrive on separate channels
+(`reasoning_content`, `content`) with neither polluted by the other;
+`tool_choice: "required"` returns a structured call; and two conversations
+interleaved as A1 B1 A2 B2 A3 answer from their own state — each reply carries
+its own planted code and person, never the other's.
 
-`-pair splits into
-`reasoning_content` and `content` with neither channel polluted by the other,
-`tool_choice: "required"` returns a structured call, and two conversations
-interleaved as A1 B1 A2 B2 A3 answer from their own state: each reply carries its
-own planted code and person, never the other's, while the log's accounting
-(`prefill_tokens + cached_tokens == prompt_tokens`) shows the cache advancing by
-exactly the new turn.
+Cache behaviour was measured in both directions, at 92 tokens and at 39,292:
+
+- A prompt the server has never seen pays for everything except the conversation
+  frame — the system line plus the opened assistant tag, 42 tokens on this
+  template, which the runner checkpoints after the first request:
+  `prompt=93 prefill=51 cached=42`. A same-length context with different bytes
+  is treated the same way at depth: 39,292 tokens reused 42 and prefilled 39,250.
+- A conversation repeated is reused whole: `prompt=39,292 prefill=0
+  cached=39,292` in 180.7 ms against 247.7 s cold, answer text identical.
+- On every leg, hit or miss, `prefill_tokens + cached_tokens == prompt_tokens`.
+  That invariant is what tells a taken cache apart from a usage field counting
+  something else; the probe asserts it rather than reading one number.
 
 `tools/kolibri/serve_check.py` re-runs all of it: `sessions` (interleaving),
 `recall --tokens N` (three facts planted at 10/50/90% depth), `prefix` (cold,
 warm, and a same-size different-bytes control), `coldpair` (two prompts the
-server has never seen, so a cache hit cannot be explained by an earlier run).
+server has never seen, so a hit cannot be explained by an earlier run). Give it
+`--log` with the server's log file and the accounting comes off the server
+instead of off `usage`.
 
 ## Known behaviour
 
