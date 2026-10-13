@@ -85,6 +85,10 @@ test-results/
 /models/
 *.safetensors
 *.gguf
+# Test fixtures are inputs a check needs, not downloaded artifacts. The Kolibri
+# reference check cross-verifies its oracle against a NumPy run of this 33 KB
+# tiny artifact, and the check is meaningless on a clean clone without it.
+!tests/models/*/fixtures/*.gguf
 *.ckpt
 pytorch_model*.bin
 /.venv/
