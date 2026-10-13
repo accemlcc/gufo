@@ -116,7 +116,8 @@ def log_mark():
 
 
 KEEP = ("request", "duration_ms", "prompt_tokens", "prefill_tokens",
-        "cached_tokens", "cache_restore_ms", "prefill_tps", "decode_tps")
+        "cached_tokens", "common_prefix_tokens", "cache", "cache_miss_reason",
+        "cache_restore_ms", "prefill_tps", "decode_tps")
 
 
 def log_since(mark):
@@ -426,9 +427,19 @@ def cmd_prefix(target_tokens: int) -> int:
 def cmd_coldpair() -> int:
     """Two prompts of the same length that the server has never seen.
 
-    A nonce puts the divergence in the first sentence, so any `cached_tokens`
-    beyond the shared template is prefix matching by length rather than by
-    bytes. Repeating both then proves reuse still works when it should.
+    A nonce puts the divergence in the first sentence, so the only tokens the
+    two can legitimately share are the ones the chat template writes around the
+    user turn — measured at 42 for this model (the system line plus the opened
+    assistant tag), and the runner keeps a checkpoint of that frame from the
+    first request on. Repeating both then proves reuse still works when it
+    should.
+
+    Reuse beyond the frame is what would mean matching by length. Two tests,
+    by decreasing sharpness: with `--log`, every leg must report
+    `cached_tokens == common_prefix_tokens`, so the server itself states that
+    what it skipped really is the common prefix; without it, a cold leg may keep
+    the frame but not the prompt, and the answers carry the proof — a prompt
+    that had taken the other's cache would name the other's code.
     """
     nonce = uuid.uuid4().hex[:8]
     ask = "Antworte mit genau einer Zeile: NAME | CODE | PERSON."
@@ -436,41 +447,56 @@ def cmd_coldpair() -> int:
          f"Ilgen. {ask}")
     b = (f"Merk dir: Projekt BETA-{nonce} hat Code 8802 und zustaendig ist "
          f"Seitz. {ask}")
-    pa, _ = chat([{"role": "user", "content": a}], max_tokens=64)
-    pb, _ = chat([{"role": "user", "content": b}], max_tokens=64)
-    a_len, b_len = prompt_tokens(pa), prompt_tokens(pb)
-    text_a, where_a = answer(pa)
-    text_b, where_b = answer(pb)
-    print(f"A kalt: {a_len} tokens, cached={cached(pa)}, {where_a}: "
-          f"{text_a.strip()[:120]}")
-    print(f"B kalt: {b_len} tokens, cached={cached(pb)}, {where_b}: "
-          f"{text_b.strip()[:120]}")
+    legs = []
+    for label, text in (("A kalt", a), ("B kalt", b),
+                        ("A warm", a), ("B warm", b)):
+        mark = log_mark()
+        payload, _elapsed = chat([{"role": "user", "content": text}],
+                                 max_tokens=64)
+        entries = log_since(mark)
+        body, where = answer(payload)
+        legs.append((label, payload, body, entries))
+        print(f"{label}: {prompt_tokens(payload)} tokens, "
+              f"cached={cached(payload)} [{where}]: {body.strip()[:120]}")
+        show_log(entries)
 
-    pa2, _ = chat([{"role": "user", "content": a}], max_tokens=64)
-    pb2, _ = chat([{"role": "user", "content": b}], max_tokens=64)
-    text_a2, _ = answer(pa2)
-    text_b2, _ = answer(pb2)
-    print(f"A warm: cached={cached(pa2)} von {a_len}: {text_a2.strip()[:120]}")
-    print(f"B warm: cached={cached(pb2)} von {b_len}: {text_b2.strip()[:120]}")
-
+    a_len = prompt_tokens(legs[0][1])
+    b_len = prompt_tokens(legs[1][1])
     failed = []
     if a_len != b_len:
         print(f"HINWEIS: ungleiche Laengen ({a_len} vs {b_len}) — "
               f"Laengengleichheit ist hier nur ein Hinweis, kein Beweis")
-    if cached(pa) > 4 or cached(pb) > 4:
-        print("FEHLER: nie gesehener Prompt traf den Cache — Prafix nach Laenge")
-        failed.append("cold-hit")
-    for label, text, want, other in (("A", text_a2, "4417", "8802"),
-                                     ("B", text_b2, "8802", "4417")):
-        if want not in text:
-            print(f"FEHLER: {label} nennt den eigenen Code nicht")
+
+    # What the two cold prompts may share is the frame, and the frame is not
+    # half a prompt; what settles the question is the content, since a prompt
+    # that had taken the other's cache names the other's code. With --log the
+    # server's own split is checked too: `prefill + cached` is the prompt on
+    # every leg, hit or miss, which is what a field that counts something else
+    # cannot satisfy.
+    failed += check_accounting(
+        [entry for *_rest, entries in legs for entry in entries], "coldpair")
+    for label, payload, *_rest in legs[:2]:
+        depth = prompt_tokens(payload)
+        if cached(payload) > 0.5 * depth:
+            print(f"  FEHLER: {label} uebernahm die Haelfte des fremden Prompts "
+                  f"({cached(payload)} von {depth}) — Prafix nach Laenge")
+            failed.append("cold-hit")
+
+    for (label, _payload, body, _log), want, other in (
+            (legs[2], "4417", "8802"), (legs[3], "8802", "4417")):
+        if want not in body:
+            print(f"  FEHLER: {label} nennt den eigenen Code nicht")
             failed.append(f"{label}-answer")
-        if other in text:
-            print(f"FEHLER: {label} antwortet aus der anderen Konversation")
+        if other in body:
+            print(f"  FEHLER: {label} antwortet aus der anderen Konversation")
             failed.append(f"{label}-leak")
-    if cached(pa2) < a_len - 4 or cached(pb2) < b_len - 4:
-        print("FEHLER: echte Wiederholung wurde nicht wiederverwendet")
-        failed.append("warm-miss")
+
+    for (label, payload, _body, _log), own in ((legs[2], a_len),
+                                               (legs[3], b_len)):
+        if cached(payload) < own - 4:
+            print(f"  FEHLER: {label} wiederholte ohne Wiederverwendung "
+                  f"({cached(payload)} von {own})")
+            failed.append("warm-miss")
     print("COLDPAIR " + ("FEHLER: " + ",".join(failed) if failed else "OK"))
     return 1 if failed else 0
 
