@@ -5,14 +5,18 @@
 // so agreement means the operators, the routing rules, the cache layout and the
 // order of a layer all mean the same thing in both. What it compares is the
 // frontier logits over a short prefix and the token sampled from them, then one
-// decode step from that token - a prefix that only agrees until the first
-// mixture layer would show as a second row that differs.
+// decode step from that token. Before that it pins two things bit for bit — the
+// embedding row as the file packs it and as the device holds it, and the gather
+// against the host dequantizer — because a wrong upload or a wrong row length
+// misreads as a wrong kernel in every stage above them, and a prefix that only
+// agrees until the first mixture layer shows as a second row that differs.
 //
 // The oracle decodes every weight it touches, so this stays at a handful of
 // tokens and is labelled slow. Without GUFO_KOLIBRI1_MODEL it skips with 77, and
 // without a gfx1151 device likewise.
 #include <hip/hip_runtime.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -22,7 +26,10 @@
 #include <string>
 #include <vector>
 
+#include "src/core/hip/hip_utils.hpp"
+#include "src/core/quant/ggml_gemm.hpp"
 #include "src/models/kolibri1/engine.hpp"
+#include "src/models/kolibri1/kernels/rocm/moe.hpp"
 #include "src/models/kolibri1/reference.hpp"
 
 namespace k1 = gufo::models::kolibri1;
@@ -126,9 +133,78 @@ int main() {
     return 1;
   }
 
+  // Two things the forward depends on before its arithmetic means anything:
+  // the table on the device has to be the file's own bytes, and the gather has
+  // to read them the way the host dequantizer does. A staging offset that is
+  // off by one shard, or a row length the format does not have, breaks every
+  // stage below it and reads there like a wrong kernel.
+  const auto& host_embd = weights->token_embd;
+  const auto& device_embd = model->device().token_embd();
+  const std::size_t row_bytes = host_embd.RowBytes();
+  {
+    std::vector<std::uint8_t> uploaded(row_bytes), packed(row_bytes);
+    HIP_CHECK(hipMemcpy(uploaded.data(),
+                        static_cast<const std::uint8_t*>(device_embd.data) +
+                            static_cast<std::size_t>(tokens[0]) * row_bytes,
+                        row_bytes, hipMemcpyDeviceToHost));
+    std::memcpy(packed.data(),
+                static_cast<const std::uint8_t*>(host_embd.data) +
+                    static_cast<std::size_t>(tokens[0]) * row_bytes,
+                row_bytes);
+    const bool exact = std::equal(uploaded.begin(), uploaded.end(),
+                                  packed.begin());
+    if (!exact) {
+      ++failures;
+    }
+    std::cout << (exact ? "PASS " : "FAIL ")
+              << "the device holds an embedding row as the file packs it\n";
+  }
+  {
+    // Rows the prompt visits and the last row of the table, which a prompt of
+    // this length never reaches: the whole table is addressed, not its start.
+    const std::size_t d = weights->config.hidden_size;
+    const std::vector<std::int32_t> probe{
+        0, 1, tokens[0],
+        static_cast<std::int32_t>(weights->VocabSize() - 1)};
+    std::int32_t* ids = nullptr;
+    float* rows = nullptr;
+    HIP_CHECK(hipMalloc(&ids, probe.size() * sizeof(std::int32_t)));
+    HIP_CHECK(hipMalloc(&rows, probe.size() * d * sizeof(float)));
+    HIP_CHECK(hipMemcpy(ids, probe.data(), probe.size() * sizeof(std::int32_t),
+                        hipMemcpyHostToDevice));
+    k1::rocm::EmbedRows({device_embd.data, device_embd.quant(), ids, rows,
+                         static_cast<std::uint32_t>(probe.size()),
+                         static_cast<std::uint32_t>(d)},
+                        nullptr);
+    std::vector<float> got(d), want(d);
+    double worst = 0.0;
+    for (std::size_t r = 0; r < probe.size(); ++r) {
+      HIP_CHECK(hipMemcpy(got.data(), rows + r * d, d * sizeof(float),
+                          hipMemcpyDeviceToHost));
+      gufo::quant::Dequantize(
+          host_embd.type,
+          static_cast<const std::uint8_t*>(host_embd.data) +
+              static_cast<std::size_t>(probe[r]) * row_bytes,
+          want.data(), d);
+      for (std::size_t i = 0; i < d; ++i) {
+        worst = std::max(worst,
+                         static_cast<double>(std::abs(got[i] - want[i])));
+      }
+    }
+    if (worst != 0.0) {
+      ++failures;
+    }
+    std::cout << (worst == 0.0 ? "PASS " : "FAIL ")
+              << "the gather decodes the table like the host: max_abs=" << worst
+              << "\n";
+    (void)hipFree(ids);
+    (void)hipFree(rows);
+  }
+
   // Prefill on the device, then the same tokens through the oracle. The oracle
   // returns one logits row per token; the last is the frontier both compared.
   session->Append(tokens);
+
   const std::vector<float> device_first(session->logits().begin(),
                                         session->logits().end());
   k1::Reference reference(*weights);

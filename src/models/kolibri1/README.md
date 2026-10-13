@@ -62,7 +62,10 @@ what a client that re-renders a transcript per turn needs.
 ## Checks
 
 `kolibri1_device_forward_test` is the end-to-end one: it loads the real artifact
-on the device, runs a short prefix and one decode step, and compares the
+on the device and first pins two things bit for bit — an embedding row as the
+file packs it against what the device holds, and the gather against the host
+dequantizer — because a wrong upload reads as a wrong kernel in every stage
+above them. Then it runs a short prefix and one decode step and compares the
 frontier logits with `Reference`. The kernel tests build their own weights and
 compare against an FP64 dot; `tools/kolibri/m1.sh` carries a target to the GPU
 box. See [docs/TESTING.md](../../../docs/TESTING.md) for the presets.
