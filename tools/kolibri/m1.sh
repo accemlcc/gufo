@@ -36,8 +36,12 @@ build_dir="${KOLIBRI_BUILD:-build/gpu-test}"
 artifact="${KOLIBRI_ARTIFACT:-/home/arnomatic/models/Kolibri-1-GGUF/Kolibri-1-Q4_K_M.gguf}"
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 
+# The root CMakeLists.txt travels with the sources on purpose: it names the
+# targets, so a tree that ships only src/ leaves the container's own copy
+# behind — a `gufo` link there then misses a model library the local file
+# already lists, and the failure points at the link, not at the missing file.
 sync() {
-  tar -cf - -C "$root" src tests tools |
+  tar -cf - -C "$root" CMakeLists.txt src tests tools |
     ssh "$remote" "cat > /tmp/kolibri-sync.tar"
   ssh "$remote" "podman cp /tmp/kolibri-sync.tar $container:/tmp/ &&
                  podman exec $container tar -xf /tmp/kolibri-sync.tar -C /work"
