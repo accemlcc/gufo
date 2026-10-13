@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <stdexcept>
 
 #include "src/core/hip/hip_utils.hpp"
@@ -205,9 +207,24 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
   HIP_CHECK(hipMemcpy(dense_groups_, tables, sizeof(tables),
                       hipMemcpyHostToDevice));
   HIP_CHECK(hipStreamCreateWithFlags(&stream_, hipStreamNonBlocking));
+
+  // Named like the deepseek runtime's GUFO_DEEPSEEK_ROCM_*_STAGE_PROFILE
+  // switches. The events exist only while it is set, so the shipped path keeps
+  // its launch sequence untouched.
+  stage_profile_ =
+      std::getenv("GUFO_KOLIBRI_ROCM_PREFILL_STAGE_PROFILE") != nullptr;
+  if (stage_profile_) {
+    stage_events_.resize(4U + 5U * c.num_layers);
+    for (hipEvent_t& event : stage_events_) {
+      HIP_CHECK(hipEventCreateWithFlags(&event, hipEventDefault));
+    }
+  }
 }
 
 Executor::~Executor() {
+  for (hipEvent_t& event : stage_events_) {
+    (void)hipEventDestroy(event);
+  }
   if (scratch_ != nullptr) {
     (void)hipFree(scratch_);
   }
@@ -364,11 +381,20 @@ void Executor::Forward(KvCache& cache, std::span<const std::int32_t> tokens,
     throw std::invalid_argument("kolibri1 forward past the cache's context");
   }
   const std::uint32_t d = c.hidden_size;
+
+  std::uint32_t mark = 0;
+  const auto Stage = [&]() {
+    if (stage_profile_) {
+      HIP_CHECK(hipEventRecord(stage_events_[mark++], stream_));
+    }
+  };
+  Stage();
   HIP_CHECK(hipMemcpyAsync(tokens_, tokens.data(), n * sizeof(std::int32_t),
                            hipMemcpyHostToDevice, stream_));
   EmbedRows({model_.token_embd().data, model_.token_embd().quant(), tokens_, x_,
              n, d},
             stream_);
+  Stage();
 
   const float scale =
       1.0F / std::sqrt(static_cast<float>(c.head_dim));
@@ -387,6 +413,7 @@ void Executor::Forward(KvCache& cache, std::span<const std::int32_t> tokens,
              cache.v[l], n, c.num_heads, c.kv_heads[l], c.head_dim,
              first_position, ring, c.rms_eps, model_.theta_scale(), sliding},
             stream_);
+    Stage();
     AttentionArgs a{};
     a.q = q_;
     a.k = cache.k[l];
@@ -403,20 +430,25 @@ void Executor::Forward(KvCache& cache, std::span<const std::int32_t> tokens,
     a.key_limit = first_position + n;
     a.scale = scale;
     Attention(a, stream_);
+    Stage();
     Project(w.attn_output, attn_, n, o_);
     // The sandwich norm sits on the branch, and the residual is added after it.
     RmsNormRows({o_, w.post_attn_norm.f32(), attn_, n, d, c.rms_eps}, stream_);
     AddRows({x_, attn_, static_cast<std::size_t>(n) * d}, stream_);
+    Stage();
 
     RmsNormRows({x_, w.ffn_norm.f32(), h_, n, d, c.rms_eps}, stream_);
     SharedExpert(w, h_, n, shared_);
+    Stage();
     Experts(w, h_, n, moe_out_, moe_weights_);
     MoeFinish({x_, moe_out_, shared_, moe_weights_, w.post_ffn_norm.f32(), n, d,
                c.experts_used, c.rms_eps},
               stream_);
+    Stage();
   }
 
   RmsNormRows({x_, model_.output_norm().f32(), h_, n, d, c.rms_eps}, stream_);
+  Stage();
   for (std::size_t i = 0; i < logit_rows.size(); ++i) {
     if (logit_rows[i] >= n) {
       throw std::invalid_argument("kolibri1 logit row outside the forward");
@@ -425,8 +457,47 @@ void Executor::Forward(KvCache& cache, std::span<const std::int32_t> tokens,
         logit_x_ + i * d, h_ + static_cast<std::size_t>(logit_rows[i]) * d,
         d * sizeof(float), hipMemcpyDeviceToDevice, stream_));
   }
-  Project(model_.output(), logit_x_, static_cast<std::uint32_t>(logit_rows.size()),
-          logits_);
+  Project(model_.output(), logit_x_,
+          static_cast<std::uint32_t>(logit_rows.size()), logits_);
+  Stage();
+  if (!stage_profile_) {
+    return;
+  }
+  // Marker 0 is the entry and 1 the end of the embedding; then five per layer,
+  // in the order qkv, attention, output projection, shared expert, routed
+  // experts; the last two close the output norm and the logits. Segment i
+  // therefore belongs to stage (i - 1) % 5, and a single synchronization of the
+  // closing marker covers the whole forward. Recording a marker costs about a
+  // microsecond, so a decode step reads a few percent too high - the switch is
+  // for prefill attribution, not for a tg number.
+  constexpr std::uint32_t kStageCount = 5;
+  const std::uint32_t layer_end = 1U + kStageCount * c.num_layers;
+  const std::uint32_t last = 3U + kStageCount * c.num_layers;
+  HIP_CHECK(hipEventSynchronize(stage_events_[last]));
+  float acc[kStageCount] = {0.0F, 0.0F, 0.0F, 0.0F, 0.0F};
+  float embed = 0.0F;
+  float out_norm = 0.0F;
+  float head = 0.0F;
+  HIP_CHECK(hipEventElapsedTime(&embed, stage_events_[0], stage_events_[1]));
+  for (std::uint32_t i = 1; i < layer_end; ++i) {
+    float ms = 0.0F;
+    HIP_CHECK(hipEventElapsedTime(&ms, stage_events_[i], stage_events_[i + 1]));
+    acc[(i - 1U) % kStageCount] += ms;
+  }
+  HIP_CHECK(hipEventElapsedTime(&out_norm, stage_events_[layer_end],
+                                stage_events_[layer_end + 1]));
+  HIP_CHECK(hipEventElapsedTime(&head, stage_events_[layer_end + 1],
+                                stage_events_[last]));
+  const float per = static_cast<float>(n);
+  const float total = embed + out_norm + head + acc[0] + acc[1] + acc[2] +
+                      acc[3] + acc[4];
+  std::fprintf(stderr,
+               "kolibri1 stage rows=%u embed=%.3f qkv=%.3f attn=%.3f "
+               "oproj=%.3f shared=%.3f routed=%.3f out_norm=%.3f head=%.3f "
+               "total=%.3f (ms/token)\n",
+               n, embed / per, acc[0] / per, acc[1] / per, acc[2] / per,
+               acc[3] / per, acc[4] / per, out_norm / per, head / per,
+               total / per);
 }
 
 void Executor::CopyLogits(std::size_t rows, std::vector<float>* out) const {

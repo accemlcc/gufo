@@ -269,6 +269,52 @@ three times too high — inside a real layer the dense re-reads are largely serv
 from cache, so the engine's dense share is ~0.6 ms/token, not 1.3. Read that probe
 as a ratio, never as a cost model.
 
+## Where the forward's time sits
+
+`GUFO_KOLIBRI_ROCM_PREFILL_STAGE_PROFILE=1` brackets the embedding, five stages of
+every layer, the output norm and the logits with HIP events and prints one line per
+forward (`Executor::Forward`, named after the deepseek runtime's
+`GUFO_DEEPSEEK_ROCM_*_STAGE_PROFILE` switches). It exists because a stage's cost
+derived from an isolated kernel probe was off by a factor of three — the section
+above is what that mistake cost. These are the stages of a live forward,
+milliseconds per token averaged over every prefill forward of the run; the totals
+agree with the tool's own rate within 1 % (4.183 ms = 239 pp against the run's
+238.3).
+
+| Stage | pp2048 @16 | pp2048 @128 | pp8192 @128 | decode step |
+| --- | ---: | ---: | ---: | ---: |
+| routed experts | 2.212 (52.9 %) | 2.218 (81.3 %) | 2.213 (77.9 %) | 7.55 (41.8 %) |
+| dense qkv + o_proj | 1.353 (32.3 %) | 0.302 (11.1 %) | 0.304 (10.7 %) | 6.30 (34.9 %) |
+| attention | 0.356 (8.5 %) | 0.108 (4.0 %) | 0.223 (7.8 %) | 1.44 (8.0 %) |
+| shared expert | 0.260 (6.2 %) | 0.098 (3.6 %) | 0.099 (3.5 %) | 1.54 (8.5 %) |
+| head + norms + embed | 0.002 | 0.002 | 0.001 | 1.19 (6.6 %) |
+| **total** | **4.183** | **2.726** | **2.840** | **18.05** |
+
+**The routed experts do not amortise, and that is the finding.** Their cost is
+2.212 ms per token at width 16 and 2.218 at width 128 — flat to a third decimal
+while every other stage falls. That is the grouped table doing its job (a step
+reads each touched expert once rather than once per slot), and it is also the end
+of width as a lever: at width 128 the experts *are* the prefill, 81 % of it. The
+same 2.2 ms is why 256 and 512 rows are not worth a window before the experts move
+off the GEMV — at best they buy the 0.3 ms that is left outside.
+
+**The dense switch did what it claimed**: 1.353 → 0.302 ms/token at width 128, a
+1.05 ms saving inside a 1.457 ms total change, the remainder being attention and
+the shared expert amortising too.
+
+**Attention is a depth term, not a width term**: 0.108 ms at pp2048 and 0.223 at
+pp8192 with the width identical — the ten patternless layers doubling over four
+times the depth while the forty windowed ones sit at their 513-slot cap.
+
+**The decode row calibrates the machine.** The output head moves a 268 MB Q6_K
+table in 1.19 ms — **225 GB/s**, which is what this box's memory actually
+delivers, from the engine's own widest projection. Against that anchor: routed
+experts 660 MB in 7.55 ms = 87 GB/s (39 % of the ceiling) and dense projections
+1.07 GB in 6.30 ms = 170 GB/s (76 %). Decode's headroom is therefore the routed
+GEMV's — the same item b, this time with split-K across the 512 output rows of a
+512-wide expert — and past ~40 K positions attention joins it, which is where the
+depth table above says a 39 K session spends most of its step.
+
 ## Not measured
 
 | Cell | Status |

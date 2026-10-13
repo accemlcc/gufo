@@ -111,6 +111,17 @@ private:
   std::uint32_t ring_;
   hipStream_t stream_{nullptr};
 
+  /// Off unless GUFO_KOLIBRI_ROCM_PREFILL_STAGE_PROFILE is set, which is the
+  /// same shape as the deepseek runtime's stage-profile switches. When on,
+  /// `Forward` brackets the embedding, five stages of every layer, the output
+  /// norm and the logits with events and prints their per-token cost to stderr.
+  /// It exists because the cost of a stage inside a live forward is not
+  /// something an isolated kernel probe can say - one such derivation was off
+  /// by a factor of three (docs/models/kolibri-1/BENCHMARKS.md).
+  bool stage_profile_{false};
+  /// Four fixed markers plus five per layer, created only while profiling.
+  std::vector<hipEvent_t> stage_events_;
+
   void* scratch_{nullptr};
   std::int32_t* tokens_{nullptr};
   float* x_{nullptr};
