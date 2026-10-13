@@ -83,20 +83,22 @@ is not one either, so `chat` renders the template's default (`high`).
 the artifact back; everything below runs there.
 
 ```sh
-# scalar oracle logits for a prompt (CPU, no ROCm needed)
-tools/kolibri/build_reference_logits.sh build/gpu-test <model.gguf>
-tools/kolibri/reference_logits <model.gguf> --prompt "..." --json
+# scalar oracle logits (CPU, no ROCm needed). The prompts file holds token ids,
+# one prompt per line; with no file they come from the command line.
+tools/kolibri/m1.sh build gufo_kolibri1_reference
+tools/kolibri/build_reference_logits.sh
+artifacts/kolibri/reference_logits <model.gguf> out.json prompts.txt
 
 # device logits against that oracle, plus the chunk-invariance check
 tools/kolibri/m1.sh model-test kolibri1_device_forward
 
-# reference vs patched llama.cpp on synthetic artifacts
+# oracle vs the patched llama.cpp on synthetic artifacts: window clipping, the
+# patternless layer at first, middle and last position, one- and many-token prompts
 LLAMA_DIR=~/kolibri-xcheck/llama.cpp tools/kolibri/run_parity.sh
 
-# single-user prefill and decode, no sampling: throughput <model> [pp] [tg] [chunk]
-tools/kolibri/m1.sh build
+# single-user prefill and decode, no sampling
 tools/kolibri/build_throughput.sh
-tools/kolibri/throughput <model.gguf> 2048 64 32
+artifacts/kolibri/throughput <model.gguf> [pp] [tg] [chunk] [max_context]
 ```
 
 ## How it runs
