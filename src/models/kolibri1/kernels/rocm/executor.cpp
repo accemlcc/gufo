@@ -389,8 +389,14 @@ void Executor::Forward(KvCache& cache, std::span<const std::int32_t> tokens,
 void Executor::CopyLogits(std::size_t rows, std::vector<float>* out) const {
   const std::size_t count = rows * model_.vocab_size();
   out->resize(count);
-  HIP_CHECK(hipMemcpy(out->data(), logits_, count * sizeof(float),
-                      hipMemcpyDeviceToHost));
+  // The forward is still in flight here, and its logits projection is the
+  // widest of the model. The executor's stream is non-blocking and shares no
+  // ordering with the default one, so a plain copy overtook it and returned a
+  // half-written row; the untouched entries are zero, which is how token 0 won
+  // a prompt whose true argmax was nowhere near.
+  HIP_CHECK(hipMemcpyAsync(out->data(), logits_, count * sizeof(float),
+                           hipMemcpyDeviceToHost, stream_));
+  HIP_CHECK(hipStreamSynchronize(stream_));
 }
 
 }  // namespace gufo::models::kolibri1::rocm
