@@ -18,9 +18,16 @@ BOUNDARY_ALLOWANCE = 96
 # Below this gain the server keeps the nearest existing checkpoint instead of
 # capturing another one (TextRunnerPool::Request::kSharedPrefixMinTokens).
 LEARN_MIN_TOKENS = 512
-# Gemma 4 copies the last background label into the short DELTA task: uncached
-# Gufo and llama.cpp b11069 also answer "DELTA.3" ("." 0.503 vs end 0.497).
-COPIED_LABEL_ANSWERS = {"gemma4": {("short_tasks", "DELTA")}}
+# Kolibri 1 copies its surroundings into the one-word answers of four tasks: the
+# period that ends the instruction, and with it the first character of whatever
+# follows ("BETA.", "BETA.0", "DELTA.0"), while GAMMA came back as the system
+# prompt's own label. Gemma 4 does the label variant on the short DELTA task -
+# uncached Gufo and llama.cpp b11069 also answer "DELTA.3" ("." 0.503 vs end
+# 0.497). What this suite owns is that a warm and an uncached run answer the same,
+# and that stays asserted for every case.
+COPIED_LABEL_ANSWERS = {"gemma4": {("short_tasks", "DELTA")},
+                        "kolibri1": {("long_tasks", "BETA"), ("long_tasks", "GAMMA"),
+                                     ("long_tasks", "DELTA"), ("short_tasks", "BETA")}}
 
 
 def check_cache_shared_prefix(client, model, checks, chat_result, preset=None):

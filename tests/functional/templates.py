@@ -14,14 +14,22 @@ THINKING_OFF_OPENING_TOKENS = {"gemma4": 7}
 
 # Gemma 4 renders a turn's reasoning only after the last user message (unless
 # preserve_thinking keeps it on tool calls): a later user turn reuses the
-# previous prompt, not the reasoning generated after it.
-DROPS_EARLIER_REASONING = {"gemma4"}
+# previous prompt, not the reasoning generated after it. Kolibri 1 drops earlier
+# thinking by default as well: its template replays an assistant turn as answer
+# only, unless preserve_thinking is asked for.
+DROPS_EARLIER_REASONING = {"gemma4", "kolibri1"}
 
 
 # Gufo's Gemma 4 template shows a string `const` as a one-value `enum` (the
 # official template drops `const`, and Gemma then deliberated far longer), so a
 # control that renames `const` must show the same `enum`.
 SHOWS_STRING_CONST_AS_ENUM = {"gemma4"}
+
+# Asked to quote a control-token spelling, Kolibri 1 emits the token: four
+# completion tokens, `finish_reason: stop`, and the visible text stops at the
+# opening quote. A token that ended the turn cannot be printed as text, so the
+# server has nothing left to keep literal.
+QUOTES_CONTROL_TOKEN_AS_TOKEN = {"kolibri1"}
 
 # Gemma 4 calls carry typed values (`call:NAME{key:value}`), so a root `const`
 # is enforced as that value; Qwen and DeepSeek tags declare no parameters for

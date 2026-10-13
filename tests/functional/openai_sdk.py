@@ -49,6 +49,16 @@ from cache_rotation import check_cache_rotation
 from prefill_scheduling import check_prefill_scheduling
 
 
+# Prefilling a deep conversation on a large-context model takes far longer than
+# the default request deadline, and a client timeout would report a harness
+# deadline as a server failure.
+REQUEST_TIMEOUT_S = {"kolibri1": 1800}
+
+# Tokens a cancelled turn's resume re-prefills beyond its new user message: the
+# framing between the last stored checkpoint and the answer a template opens with.
+RESUME_PREFILL_TOKENS = {"kolibri1": 32}
+
+
 class CompletionStreamChoice(CompletionChoice):
     # openai-python shares its completed-choice type with legacy stream chunks,
     # although in-progress chunks legitimately carry finish_reason:null.
@@ -257,10 +267,16 @@ def check_stops(client, model, checks):
                             "The secret keyword is LANTERN. Follow instructions accurately. " * 32},
                            *request["messages"]]}
     full = run("stop_cache_baseline", cached)
-    assert len(full["text"]) > 12, full
-    stopped_request = {**cached, "stop": full["text"][6:12]}
+    # The marker has to be something the filter can cut on: a model that answers
+    # with the bare keyword ("LANTERN") has no six-token middle, and an empty or
+    # whole-answer marker would prove nothing.
+    marker = full["text"][6:12] if len(full["text"]) > 12 else full["text"][-2:]
+    assert marker and marker in full["text"] and len(full["text"]) > len(marker), full
+    stopped_request = {**cached, "stop": marker}
     stopped = run("stop_cached", stopped_request)
     replay = run("stop_cached_replay", stopped_request, True)
+    assert stopped["text"] == full["text"].split(marker)[0], stopped
+    assert stopped["text"] != full["text"], stopped
     assert replay["text"] == stopped["text"] and replay["usage"]["cached_tokens"] > 0, replay
     continuation = {**cached, "max_completion_tokens": 16, "messages": [
         *cached["messages"], {"role": "assistant", "content": stopped["text"]},
@@ -745,7 +761,7 @@ def check_batches(client, model, checks, width, vision=False, speculative="off")
     checks[f"batch_c{width}_rejected_peer_isolation"] = rejected
 
 
-def check_conversations(client, model, checks, vision=False):
+def check_conversations(client, model, checks, vision=False, preset=None):
     """Exercise thinking controls and cache reuse after a client disconnect."""
 
     def signature(result):
@@ -760,6 +776,11 @@ def check_conversations(client, model, checks, vision=False):
         return save(label, chat_result(client, request, stream))
 
     def body(prompt="Compute 123 times 456.", thinking=False, **kwargs):
+        template_kwargs = {"enable_thinking": thinking}
+        # An explicit effort wins over `enable_thinking` in the Kolibri 1
+        # template, so a request that means "no reasoning" must not name one.
+        if not (preset == "kolibri1" and not thinking):
+            template_kwargs["reasoning_effort"] = "low"
         return {
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
@@ -767,10 +788,7 @@ def check_conversations(client, model, checks, vision=False):
             "seed": 31,
             "max_completion_tokens": 12,
             "extra_body": {
-                "chat_template_kwargs": {
-                    "enable_thinking": thinking,
-                    "reasoning_effort": "low",
-                },
+                "chat_template_kwargs": template_kwargs,
                 "cache_prompt": False,
             },
             **kwargs,
@@ -857,7 +875,11 @@ def check_conversations(client, model, checks, vision=False):
             warm = chat(label + "_resume", request)
             assert warm["usage"]["cached_tokens"] >= 128, warm
             if not retain:
-                assert warm["usage"]["gufo"]["prefill_tokens"] <= 16, warm
+                # Kolibri 1 writes its reasoning instruction into the generation
+                # prompt, so the stored checkpoint stops above it and a resume pays
+                # that framing plus the new turn (measured 29 of 351 tokens).
+                assert (warm["usage"]["gufo"]["prefill_tokens"]
+                        <= RESUME_PREFILL_TOKENS.get(preset, 16)), warm
             replay = chat(label + "_replay", request, True)
             assert (
                 warm["text"].strip(),
@@ -2656,7 +2678,8 @@ def main():
         local_only(request)
 
     options = dict(api_key="local-test", base_url=args.base_url, max_retries=0,
-                   timeout=120, _strict_response_validation=True)
+                   timeout=REQUEST_TIMEOUT_S.get(args.sampling_preset, 120),
+                   _strict_response_validation=True)
     report = {"sdk": openai.__version__, "model": args.model, "suite": args.suite,
               "vision": args.vision, "speculative": args.speculative,
               "sampling_preset": args.sampling_preset,
@@ -2684,7 +2707,8 @@ def main():
             "responses": lambda: check_responses(client, args.model, checks, options,
                                                    async_local_only, args.expect_reasoning),
             "stops": lambda: check_stops(client, args.model, checks),
-            "conversation": lambda: check_conversations(client, args.model, checks, args.vision),
+            "conversation": lambda: check_conversations(client, args.model, checks, args.vision,
+                                                        args.sampling_preset),
             "image-inputs": lambda: check_image_inputs(
                 client, args.model, checks, image_content, chat_result, response_result),
             "image-count": lambda: check_image_count(
@@ -2752,7 +2776,8 @@ def main():
                 client, args.model, checks, chat_result, args.sampling_preset,
                 args.server_log),
             "cache-depth": lambda: check_cache_depth(
-                client, args.model, checks, chat_result, args.concurrency, args.server_log),
+                client, args.model, checks, chat_result, args.concurrency, args.server_log,
+                preset=args.sampling_preset),
             "cache-rotation": lambda: check_cache_rotation(client, args.model, checks, chat_result),
             "cache-concurrency": lambda: check_cache_concurrency(
                 client, args.model, checks, chat_result, args.concurrency,
