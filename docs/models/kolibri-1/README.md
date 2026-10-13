@@ -134,9 +134,10 @@ artifacts/kolibri/throughput <model.gguf> [pp] [tg] [chunk] [max_context]
   (640 MiB of patternless layers, 80 MiB of rings) and the full 262,144 about
   5.1 GiB.
 
-Measured on this box: `gufo serve llm --context 131072 --sessions 1` holds
-**57,509 MiB** of device memory — 45,254 MiB of weights, about 5.4 GiB of
-patternless-layer cache at 131,072 positions, the rings and the launch scratch.
+Measured on this box: `gufo serve llm --context 131072 --sessions 1` reports
+**51,164 MiB** of device memory on its own `event=load_completed` line — 45,254
+MiB of weights, the rest patternless-layer cache at 131,072 positions, rings and
+launch scratch; the same line reads 47,324 MiB at `--context 32768`.
 That is the number a co-resident engine has to leave room for.
 
 `scripts/kolibri-gufo.sh start|stop|status|logs` drives that box: it refuses to
