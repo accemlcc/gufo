@@ -183,6 +183,7 @@ gap, and it is the model's first performance item.
 | Contexts beyond 39,292 | Measured once, at 108,627 ([Served path](#served-path)); nothing between 39K and it |
 | Continuation cache, prefix reuse | Measured ([Served path](#served-path), [Quality](QUALITY.md)) |
 | Tool-call round-trip | Measured ([Quality](QUALITY.md)) |
+| Functional suites (13) | Recorded, 6 pass / 7 fail, every failure with a cause ([Quality](QUALITY.md#functional-qualification)) |
 
 ## Performance items
 
