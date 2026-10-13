@@ -2606,8 +2606,11 @@ def main():
     parser.add_argument("--suite", choices=("all", *SDK_SUITES), default="all")
     parser.add_argument("--vision", action="store_true",
                         help="Add image checks; the server needs its matching --mmproj")
+    # `kolibri1` needs no branch below: its template's default effort is kHigh,
+    # and the resolver maps both `high` and `xhigh` onto kHigh, so the generic
+    # default-versus-explicit comparison holds unchanged.
     parser.add_argument("--sampling-preset",
-                        choices=("qwen38", "deepseek4", "gemma4"),
+                        choices=("qwen38", "deepseek4", "gemma4", "kolibri1"),
                         help="Expected text defaults; required for all/sampling-defaults")
     parser.add_argument("--sampling-overrides", type=json.loads, default={},
                         help="JSON object of explicit server sampling CLI values")
