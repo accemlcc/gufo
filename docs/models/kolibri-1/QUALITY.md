@@ -73,6 +73,16 @@ Cache behaviour was measured in both directions, at 92 tokens and at 39,292:
 - On every leg, hit or miss, `prefill_tokens + cached_tokens == prompt_tokens`.
   That invariant is what tells a taken cache apart from a usage field counting
   something else; the probe asserts it rather than reading one number.
+- A prefix shared with a finished turn is reused at depth, not just at chat
+  length: a 109,656-token prompt sharing its first 9,845 tokens with the
+  calibration turn that preceded it came back `cached_tokens=8192`,
+  `prefill_tokens=101464` — reuse applied at 108K of state, landing on the grid
+  boundary below the shared prefix rather than at its end.
+- Recall at 108,627 and 109,656 scored all three planted facts (10/50/90 % of the
+  prompt). At the second depth the budget ran out mid-reasoning
+  (`generated_tokens=512`, `finish=length`, empty `content`), so the answer was
+  read from the reasoning channel — stated because a scorer that only looked at
+  `content` would have reported a miss the model did not have.
 
 `tools/kolibri/serve_check.py` re-runs all of it: `sessions` (interleaving),
 `recall --tokens N` (three facts planted at 10/50/90% depth), `prefix` (cold,
@@ -149,8 +159,8 @@ standing suspect.
   accepts Q4_K, Q6_K and F32 rows and names the tensor it rejects, so an
   unexpected per-tensor layout fails loudly rather than silently — but that is
   a load-time guarantee, not a correctness measurement.
-- **Depth beyond 108,627 served.** Recall has been scored cold at 39,292 and at
-  108,627 prompt tokens — every planted fact at 10/50/90 % of a prompt that is
-  twenty times the sliding window, so all forty rings are behind the facts and
-  the ten patternless layers are the only thing that can carry them. The cache
-  geometry supports 262,144; nothing has been scored between 108,627 and that.
+- **Depth beyond 109,656 served.** Recall has been scored cold at 39,292, 108,627
+  and 109,656 prompt tokens — every planted fact at 10/50/90 % of a prompt twenty
+  times the sliding window, so all forty rings sit behind the facts and only the
+  ten patternless layers can carry them. The cache geometry supports 262,144;
+  nothing has been scored between 109,656 and that.

@@ -101,6 +101,7 @@ prefill_tps decode_tps ttft_ms cache_restore_ms queue_ms`).
 | 39,292 cold, second context | 157.7 | 50.8 | 248.9 s |
 | 39,292, same context repeated | — | 51.9 | **180.7 ms** |
 | 108,627 cold, after a 9,940-token calibration leg | 97.9 | 31.8 | **1,109.7 s** |
+| 109,656, needle-free 9,845-token calibration before it | 93.4 | 31.7 | 1,086.4 s, 8,192 reused |
 
 Depth costs: prefill falls from ~230 to ~159 tok/s between 2K and 39K, and decode
 from ~60 to ~51 — the quadratic patternless layers, visible only where depth was
@@ -108,6 +109,18 @@ actually measured twice. Reuse, at the same depth: 42 tokens (the conversation
 frame) reused and 39,250 prefilled for a same-length context with different
 bytes; the whole 39,292 reused for the conversation that had been seen, in 180.7
 ms against 247.5 s ([Quality](QUALITY.md)).
+
+What depth actually costs is cache bytes rather than attention arithmetic, and
+the three decode numbers put that in one regime. A generated token reads the ten
+patternless layers' KV for every position in the context: 10 layers × 4 KV heads
+× 128 dimensions, K and V, binary16 — 20,480 bytes per position, so 2.07 GiB at
+108,627 positions against 0.76 GiB at 39,292, while the forty sliding rings
+contribute their ~42 MB whatever the depth. The 3.46B active parameters add
+roughly 2 GB of weights. Divide the sum by the measured rate — 59.6 tok/s at 512,
+51.1 at 39,292, 31.8 at 108,627 — and it comes out at 131, 151 and 137 GB/s: one
+bandwidth-bound regime, within the ±15 % any single measurement on this box
+carries. Decode falls with depth because the cache has outgrown the weights, and
+past ~60 K positions it is the larger half of every token.
 
 Depth past 39K was predicted before it was measured, and the prediction is what
 the 108,627 row above tests. `T(n) = a*n + b*n^2` — a linear term for the
@@ -144,8 +157,16 @@ prefix cannot be applied to a new prompt, so
 `cache=miss cached_tokens=0 prefill_tokens=108627` is what the geometry requires
 here, not evidence about whether checkpoints survive 8.2 GB of snapshot. The
 probe now calibrates without needles, which makes the calibration a real prefix of
-the graded prompt; whether a deep leg then reuses its 9,900 tokens is the test
-that question actually needs, and it has not been run.
+the graded prompt, and the leg run on October 13 at 10:04 measured the answer:
+**`cached_tokens=8192`, `prefill_tokens=101464` of a 109,656-token prompt** — the
+checkpoint survived 108K of state and was applied. It landed on 8,192 rather than
+the 9,845 the calibration actually shared, which is the 2,048-token checkpoint
+grid (`text_model_runner.cpp:753`) snapped down to a window-safe boundary by
+`PrefillStop`. Same mechanism, one row above, explains cache-depth's
+`cached=20008`: 20,480 on the grid, snapped down 472. Decode reproduced to one
+tenth — 31.7 tok/s here against 31.8 in the cold leg — while prefill moved 97.9
+to 93.4, exactly the split between the two kinds of measurement this card keeps
+insisting on.
 
 Loading the model over HTTP took 18.5 s for the 45 GiB file, against 12-42 s
 engine-direct depending on page-cache state.
@@ -197,3 +218,9 @@ gap, and it is the model's first performance item.
 3. **Repeated-cell measurement protocol.** `~/kolibri-stats.py` exists; the
    engine-direct harness should run n repetitions itself rather than leave it to
    the caller's shell loop.
+4. **The patternless layers' KV is now the bandwidth bill.** 2.07 GiB per
+   generated token at 108,627 positions, against ~2 GB of weights — the reason
+   decode falls 59.6 → 51.1 → 31.8 tok/s with depth. Binary8 KV, or sharing heads
+   across the ten full-attention layers, is the only lever that keeps decode flat
+   as context grows; widening the sliding window is not, since those layers are
+   precisely the ones that cannot slide.
