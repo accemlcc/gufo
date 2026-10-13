@@ -12,10 +12,10 @@
 #include <vector>
 
 #include "src/core/gguf_reader.hpp"
-#include "tests/models/gemma4/check.hpp"
+#include "tests/models/kolibri1/check.hpp"
 
 namespace k1 = gufo::models::kolibri1;
-using gemma4_test::Require;
+using kolibri1_test::Require;
 using k1::TokenId;
 using k1::TokenType;
 
@@ -182,7 +182,7 @@ int main() {
     std::cout << "SKIP: GUFO_KOLIBRI1_MODEL is not set\n";
     return 77;
   }
-  return gemma4_test::Run([&] {
+  return kolibri1_test::Run([&] {
     std::string error;
     const auto reader = gufo::core::GgufReader::OpenFile(model, &error);
     Require(reader != nullptr, error);

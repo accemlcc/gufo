@@ -6,19 +6,20 @@
 #include <string>
 #include <vector>
 
-// The in-memory GGUF writer and the always-on assertion are shared with the
-// gemma4 host checks rather than duplicated per model.
-#include "tests/models/gemma4/check.hpp"
-#include "tests/models/gemma4/gguf_builder.hpp"
+// The in-memory GGUF writer and the always-on assertion live in this directory.
+// They came out of the Gemma 4 host checks; copying them here is the cheaper
+// trade, because a model's tests then fail for reasons inside that model.
+#include "tests/models/kolibri1/check.hpp"
+#include "tests/models/kolibri1/gguf_builder.hpp"
 
 namespace k1 = gufo::models::kolibri1;
-using gemma4_test::BoolArray;
-using gemma4_test::GgufImage;
-using gemma4_test::I32Array;
-using gemma4_test::Metadata;
-using gemma4_test::Require;
-using gemma4_test::TensorSpec;
-using gemma4_test::Tensors;
+using kolibri1_test::BoolArray;
+using kolibri1_test::GgufImage;
+using kolibri1_test::I32Array;
+using kolibri1_test::Metadata;
+using kolibri1_test::Require;
+using kolibri1_test::TensorSpec;
+using kolibri1_test::Tensors;
 using gufo::core::GgmlType;
 
 namespace {
@@ -460,7 +461,7 @@ void CheckQuantWeights() {
 }  // namespace
 
 int main() {
-  return gemma4_test::Run([] {
+  return kolibri1_test::Run([] {
     CheckTarget();
     CheckArtifactGeometry();
     CheckPerLayerValues();

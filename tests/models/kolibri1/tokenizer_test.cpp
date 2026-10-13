@@ -15,11 +15,11 @@
 #include <vector>
 
 #include "src/core/json.hpp"
-#include "tests/models/gemma4/check.hpp"
-#include "tests/models/gemma4/gguf_builder.hpp"
+#include "tests/models/kolibri1/check.hpp"
+#include "tests/models/kolibri1/gguf_builder.hpp"
 
 namespace k1 = gufo::models::kolibri1;
-using gemma4_test::Require;
+using kolibri1_test::Require;
 using gufo::json::Value;
 using k1::TokenId;
 using k1::TokenType;
@@ -346,19 +346,19 @@ void CheckPieceCache(const Fixture& f) {
 /// A different pre-tokenizer would split words differently and silently change
 /// every id, so the GGUF loader accepts exactly one combination.
 void CheckGgufGate(const Fixture& f) {
-  gemma4_test::I32Array types;
+  kolibri1_test::I32Array types;
   for (const auto type : f.vocabulary.types) {
     types.values.push_back(static_cast<std::int32_t>(type));
   }
   const auto build = [&](const std::string& model, const std::string& pre,
                          bool with_types) {
-    gemma4_test::Metadata metadata;
+    kolibri1_test::Metadata metadata;
     metadata["tokenizer.ggml.model"] = model;
     metadata["tokenizer.ggml.pre"] = pre;
     metadata["tokenizer.ggml.tokens"] =
-        gemma4_test::StringArray{f.vocabulary.tokens};
+        kolibri1_test::StringArray{f.vocabulary.tokens};
     metadata["tokenizer.ggml.merges"] =
-        gemma4_test::StringArray{f.vocabulary.merges};
+        kolibri1_test::StringArray{f.vocabulary.merges};
     if (with_types) {
       metadata["tokenizer.ggml.token_type"] = types;
     }
@@ -367,7 +367,7 @@ void CheckGgufGate(const Fixture& f) {
     metadata["tokenizer.ggml.padding_token_id"] =
         static_cast<std::uint32_t>(f.vocabulary.eos);
     metadata["tokenizer.ggml.add_bos_token"] = false;
-    return gemma4_test::GgufImage(metadata);
+    return kolibri1_test::GgufImage(metadata);
   };
 
   const auto accepted = build("gpt2", "kolibri1", true);
@@ -465,7 +465,7 @@ void CheckCreateRejects() {
 }  // namespace
 
 int main() {
-  return gemma4_test::Run([&] {
+  return kolibri1_test::Run([&] {
     const Fixture fixture = Load();
     const Value golden =
         gufo::json::parse(ReadFixture("tokenizer_golden.json"));
