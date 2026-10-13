@@ -68,6 +68,12 @@ measured 253.8 and 324.9 tok/s, 28 % apart, one session width and one binary
 apart from nothing. Any width claim that is smaller than that is a claim about
 the order the processes ran in.
 
+Those cells are the old dense path and one run each. Since `17eada37` a block of
+32 rows or more goes to the matrix cores, and both dense paths were then measured
+against each other inside a single window, three runs per cell
+([Prefill width, both dense paths](#prefill-width-both-dense-paths)) — which also
+confirms the 28 % above as the shape of the GEMV's variance, not as luck.
+
 ## Depth
 
 Engine-direct, chunk 64, session width 131,072, decode after the prompt is
@@ -205,12 +211,17 @@ the table.
 
 At width 16 that is 0.5-0.8 GB of weights per token, which at the measured ~250
 tok/s is 150-200 GB/s: at the shipped width prefill sits on the memory ceiling,
-not on arithmetic. From width 64 up the re-read amortises (371 MB/token at 128)
-and the 325 tok/s plateau is the FFMA kernel's own ceiling — 325 × 6.9 GFLOP ≈
-2.2 TFLOP/s against llama.cpp's 8.5 through hipBLASLt. This paragraph previously
-said prefill was never bandwidth-bound and needed ~500 GB/s at 253 tok/s; that
-was the arithmetic of a whole-table re-read, too high by about a factor three,
-and it hid the fact that width alone cannot pass 325.
+not on arithmetic. From width 64 up the re-read amortises and the curve flattens,
+but the ceiling behind that flattening belongs to the **routed experts**, not to
+the dense projections — a 512-wide expert is 2.16 MB across gate, up and down, six
+slots per token, so ~13 MB per token per layer and ~650 MB per token. That is now
+measured rather than argued: lifting the seven dense projections off the GEMV
+(item 2a) moved pp2048 from 257-331 tok/s to 359-367 while the experts stayed put,
+and it collapsed the run-to-run spread from 29 % to 2.4 %
+([Prefill width, both dense paths](#prefill-width-both-dense-paths)). What this
+paragraph said before — that width alone cannot pass 325 — described the curve
+correctly and the cause wrongly: 325 was a plateau that still contained the dense
+GEMV.
 
 That verdict is worth exactly its own range. Both engines ran at 512 and 2,048
 prompt tokens; nothing on the reference side was ever run past 2,048, so −76 %
@@ -227,6 +238,37 @@ somewhere between 2,048 and 100,000 and the engine is several times ahead exactl
 where long context is used. The cell that settles it is `llama-bench -ngl 99 -p
 8192,32768,99000 -n 0 -r 1` on the patched build, on this box.
 
+## Prefill width, both dense paths
+
+Engine-direct `tools/kolibri/throughput`, same box, same artifact, one device
+window, so no machine state separates the two builds: pp 2048, decode 32, context
+2,144, three runs per cell. **GEMV** is `17eada37^`, **tiled** is `17eada37`, whose
+dense path takes over at 32 rows (`kMatrixCoreRows`).
+
+| Build | chunk | pp2048 tok/s, three runs | median |
+| --- | ---: | --- | ---: |
+| GEMV | 16 | 289.5 · 243.8 · 303.2 | 289.5 |
+| GEMV | 128 | 331.3 · 265.3 · 257.2 | 265.3 |
+| tiled | 16 | 262.0 · 252.9 · 251.4 | 252.9 |
+| tiled | 128 | 366.9 · 367.3 · 358.7 | 367.3 |
+
+Three readings, in order of how much they should be trusted. At width 128 the
+tiled build is **1.11× the best** run of the GEMV build and **1.38× its median** —
+that range is the claim, not the median. At width 16 the patch is inactive by
+construction, and still the two medians differ by 13 % (289.5 against 252.9): that
+is the drift between phases of one window on this box, and it is why the sentence
+before gives a range. The spread is not noise to average away — 2,800 short GEMV
+launches per 2,048-token prompt competing for DRAM with the desktop is a different
+machine from 700 regular ones with a third of the traffic, and it shows as 29 %
+against 2.4 %. Decode did not move: 58.2-58.5 tok/s on both builds, every cell.
+
+The isolated-shape probe (`tools/kolibri/prefill_gemm_probe.cpp`) predicted
+0.93 ms/token saved at width 128; the measured saving is 0.30 ms/token (3.02 →
+2.72 ms per token). Its per-shape ratios hold, its absolute dense cost is about
+three times too high — inside a real layer the dense re-reads are largely served
+from cache, so the engine's dense share is ~0.6 ms/token, not 1.3. Read that probe
+as a ratio, never as a cost model.
+
 ## Not measured
 
 | Cell | Status |
@@ -238,7 +280,7 @@ where long context is used. The cell that settles it is `llama-bench -ngl 99 -p
 | Continuation cache, prefix reuse | Measured ([Served path](#served-path), [Quality](QUALITY.md)) |
 | Tool-call round-trip | Measured ([Quality](QUALITY.md)) |
 | Functional suites (13) | Recorded across three runs — 7 pass / 6 fail, every failure with a cause, four harness-side fixes landed but not re-run ([Quality](QUALITY.md#functional-qualification)) |
-| Whole-model prefill on the matrix-core path | TODO — built and measured per shape (item 2a), but the served `prefill_chunk_rows` is 16, where the path is never taken |
+| Whole-model prefill on the matrix-core path | Measured — 1.11× best, 1.38× median at width 128, spread 29 % → 2.4 % ([Prefill width, both dense paths](#prefill-width-both-dense-paths)) |
 
 ## Performance items
 
@@ -275,13 +317,14 @@ where long context is used. The cell that settles it is `llama-bench -ngl 99 -p
     0.76 of the GEMV at 16 rows — the reason the threshold is 32 and not 17 — then
     1.46 at 32, 2.95 at 64, 3.51 at 128 and 4.97 at 256. Per token that is
     0.81 ms of projection at 32 rows, 0.42 at 64, 0.37 at 128 and 0.26 at 256,
-    against 1.30 ms for the GEMV at any width; set against the 3.07 ms/token of
-    the measured 325 pp plateau, width 128 should land near 465 pp. Derived, not
-    measured: the routed experts and the attention still pay their share, and
-    those are item b. What the wide path trades is rounding — its activations are
-    int8 per 32 values, and against the GEMV on the same input the largest
-    deviation is 3.2e-3 to 4.6e-3 of a projection's largest output, the same
-    trade Qwen and gemma4 already make.
+    against 1.30 ms for the GEMV at any width. That last number is about three
+    times the truth in a live layer: measured end to end at width 128 the saving is
+    0.30 ms/token, 1.11× the best and 1.38× the median run of the GEMV build, and
+    the expert GEMV is what remains on the curve (item b, ~650 MB of the ~900 MB a
+    prefill token reads). What the wide path trades is rounding — its activations
+    are int8 per 32 values, and against the GEMV on the same input the largest
+    deviation is 3.2e-3 to 4.6e-3 of a projection's largest output, the same trade
+    Qwen and gemma4 already make.
   - **b) Routed experts** (2.4 of 6.9 GFLOP, ~90 % of the bytes) as a WMMA tile
     over per-expert padded buckets — `gemma4/kernels/rocm/moe_prefill.hip.cpp`
     is Q4_K/Q6_K → binary16 already, and `MoeRoute` emits the `counts` such a
