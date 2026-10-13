@@ -2,111 +2,138 @@
 
 AMD Strix Halo `gfx1151`, 128 GB unified memory (MINIX Elite ER939-AI),
 `Hob-forge/Kolibri-1-GGUF` **Kolibri-1-Q4_K_M.gguf** (45,254 MiB resident).
-Measured October 13, 2026.
+Measured October 13, 2026 on the box that runs it, host `kubuntu`.
 
-**These are engine numbers, not server numbers.** They come from
-`tools/kolibri/throughput`, which drives the engine directly: no HTTP, no
-sampler, no tokenizer in the timed region, greedy is irrelevant because no token
-is sampled — the loop reads logits and picks the argmax itself. Single user,
-`--prefill-chunk` as stated. Treat them as an upper bound on what the served
-path will do once it exists. **TODO** means unmeasured.
+## Read this before using a number
 
-## Prefill chunk
+Decode is reproducible here; prefill is not. Nine repetitions of the same
+engine-direct cell gave decode a median absolute deviation of 0.0-0.2 tok/s,
+while prefill in one fixed cell (same width, same context, same binary) spanned
+**222.6 to 309.3 tok/s** — and a cell whose weights took 41.7 s to map prefilled
+faster than one that took 12.2 s, so page-cache state is not a usable explanation
+either. Every prefill row below therefore carries its repetition count and, where
+there are repetitions, the MAD; rows marked **n=1** are single runs and support a
+direction, not a ranking. `tools/kolibri/throughput` prints the session width it
+used, and `~/kolibri-stats.py` computes the medians from the logs — a width
+comparison without both is how the first round of this card ended up claiming a
++34 % effect that did not replicate.
 
-Prompt length against the chunk width the engine feeds the grouped projection at
-once. The expert weights are re-read per chunk, so the width is a real knob;
-512 tokens:
+**These are engine numbers unless the section says served.** They come from
+`tools/kolibri/throughput`, which drives the engine directly: no HTTP, no sampler,
+no tokenizer in the timed region, greedy is irrelevant because no token is
+sampled.
 
-| Chunk | pp (tok/s) | tg (tok/s) |
-| ---: | ---: | ---: |
-| 16 | 251.0 | 59.0 |
-| 32 | **321.9** | 59.0 |
-| 64 | 256.8 | 57.5 |
+## Repeated: the two widths that matter
 
-2,048 tokens, the two extremes again:
+Five repetitions at each width, run interleaved `16, 32, 16, 32, 16` so drift
+falls on both, pooled with four earlier repetitions of the same cells (n=9).
+Prefill and decode in tok/s, median ± MAD.
 
-| Chunk | pp (tok/s) | tg (tok/s) |
-| ---: | ---: | ---: |
-| 16 | 251.9 | 57.9 |
-| 64 | 260.2 | 57.6 |
+| Prompt | Session width | Chunk 16 | Chunk 32 |
+| ---: | ---: | ---: | ---: |
+| 512 | 640 | 253.2 ± 6.3 | **317.8 ± 22.0** |
+| 512 | 640 (decode) | 59.6 ± 0.0 | 59.6 ± 0.0 |
+| 8,192 | 131,072 | 245.4 ± 21.2 | 250.3 ± 5.6 |
+| 8,192 | 131,072 (decode) | 55.5 ± 0.1 | 55.6 ± 0.2 |
 
-Decode does not depend on the chunk (one row per forward), which the tables
-bear out: it moves with context depth, not with chunk width.
+At chat length 32 measures about 25 % ahead of 16 and the gap (64.6) is more than
+double the summed MAD (28.3). At 8,192 the two are not separable. Taken on its
+own — the cleanest set, since nothing but these cells ran during it — the
+interleaved five also reversed the long-prompt case: 265.4 ± 1.3 for 16 against
+245.3 ± 2.4 for 32, which is the shape of the argument for not promoting 32 on
+strength of the short-prompt row.
+
+**The served constant is 16**, the width the engine was qualified at, and the
+first performance item below is the honest way to take the short-prompt win
+without giving up the long-prompt one.
+
+## Single runs: directional only
+
+Each of these is one process, one pass. They are kept because they bound where
+the interesting region is, not because they rank it.
+
+| Prompt | Session width | Chunk | pp | tg |
+| ---: | ---: | ---: | ---: | ---: |
+| 512 | 640 | 128 | 269.4 | 59.6 |
+| 8,192 | 8,320 | 16 | 225.2 | 55.9 |
+| 8,192 | 8,320 | 32 | 278.7 | 55.6 |
+| 8,192 | 8,320 | 64 | 254.4 | 55.4 |
+| 8,192 | 8,320 | 128 | 297.8 | 55.4 |
+| 8,192 | 131,072 | 64 | 253.8 and 324.9 | 55.7 |
+| 8,192 | 131,072 | 128 | 324.2 | 55.6 |
+| 2,048 | 131,072 | 64 | 298.8 | 58.3 |
+
+The 8,192 / 131,072 / chunk-64 row is the noise stated as a number: the same cell
+measured 253.8 and 324.9 tok/s, 28 % apart, one session width and one binary
+apart from nothing. Any width claim that is smaller than that is a claim about
+the order the processes ran in.
 
 ## Depth
 
-Prefill and decode at the width that measured fastest above, decode measured
-after the prompt is cached — depth is the cached prefix:
+Engine-direct, chunk 64, session width 131,072, decode after the prompt is
+cached — one run each:
 
-| Depth (tokens) | Chunk | pp (tok/s) | tg (tok/s) |
-| ---: | ---: | ---: | ---: |
-| 512 | 32 | 321.9 | 59.0 |
-| 2,048 | 64 | 260.2 | 57.6 |
-| 8,192 | 64 | 254.4 | 54.9 |
+| Depth (tokens) | pp | tg |
+| ---: | ---: | ---: |
+| 512 | 276.0 | 59.6 |
+| 2,048 | 298.8 | 58.3 |
+| 8,192 | 324.9 | 55.8 |
 
-Decode loses about 7% from a fresh context to 8K, which is the expected shape
-for a model whose cache is only 10 layers deep at full context plus 40 sliding
-rings. Prefill at 8,192 tokens is 254 tok/s at chunk 64 — the patternless layers
-are quadratic and the sliding ones are not, and the 4:1 mix keeps the whole
-curve nearly flat.
+Decode falls about 7 % from a fresh context to 8K, which is the expected shape
+for a cache that is ten layers deep at full context plus forty sliding rings.
+Prefill does not fall with depth here, and it should if the patternless layers
+dominate: at 8,192 they attend the whole past quadratically. One run each cannot
+separate that from the ±15 % above, so the flat curve is not a finding — the
+served depth measurement below is the one that shows depth costing.
 
 ## Served path
 
-`gufo serve llm`, one session, context 8,192, October 13, 2026. The HTTP API
-returns no timing fields; these come from the server's own `event=completed`
-line, which carries `prompt_tokens prefill_tokens cached_tokens prefill_tps
-decode_tps ttft_ms cache_restore_ms queue_ms`. The methods agree: a 2,046-token
-prompt measured 9.367 s from the client against `prefill_tps 218.6` in the log,
-and a 64-token generation 59.2 tok/s against `decode_tps 60.5`.
+`gufo serve llm --context 131072 --sessions 1`, forward width **16**, one
+session. The HTTP API returns no timing fields; everything here is the server's
+own `event=completed` line (`prompt_tokens prefill_tokens cached_tokens
+prefill_tps decode_tps ttft_ms cache_restore_ms queue_ms`).
 
-| Metric | Value |
-| --- | ---: |
-| prefill_tps (log, several requests) | 217.7 – 244.4 |
-| decode_tps (log) | 59.4 – 60.5 |
-| ttft_ms on a warm prefix | 1.3 |
-| cache_restore_ms | 1.1 – 3.5 |
+| Depth of prompt | pp (tok/s) | tg (tok/s) | ttft |
+| ---: | ---: | ---: | ---: |
+| 71 | 240.0 | 59.7 | 123.3 ms |
+| 2,141 | 230.4 | 63.0 | 9.11 s |
+| 39,292 cold | 158.8 | 51.1 | 247.5 s |
+| 39,292 cold, second context | 157.7 | 50.8 | 248.9 s |
+| 39,292, same context repeated | — | 51.9 | **180.7 ms** |
 
-Served prefill lands on the chunk-16 row of the first table, which is what the
-geometry predicts: `--prefill-chunk` is the scheduler's budget of prompt tokens
-between decode rounds — it arrives here as `max_input_tokens` — while
-`kKolibriPrefillChunk` is the number of rows one forward actually carries. A
-512-token step runs as 32 forwards of 16 rows. Widening the forward is the open
-performance item the next section explains.
+Depth costs: prefill falls from ~230 to ~159 tok/s between 2K and 39K, and decode
+from ~60 to ~51 — the quadratic patternless layers, visible only where depth was
+actually measured twice. Reuse, at the same depth: 42 tokens (the conversation
+frame) reused and 39,250 prefilled for a same-length context with different
+bytes; the whole 39,292 reused for the conversation that had been seen, in 180.7
+ms against 247.5 s ([Quality](QUALITY.md)).
 
-Loading over HTTP took 18.5 s for the 45 GiB file, against 12-35 s
+Loading the model over HTTP took 18.5 s for the 45 GiB file, against 12-42 s
 engine-direct depending on page-cache state.
 
 ## Against the reference implementation
 
-Same box, same artifact, October 13, 2026. The reference is the patched
-llama.cpp the conversion ships, configured `-DGGML_HIP=ON` for `gfx1151`
-against this ROCm, and run as `llama-bench -ngl 99 -p 512,2048 -n 64 -r 1`
-with flash attention left at its default. The Gufo columns are the
-engine-direct numbers above, best chunk.
+Same box, same artifact. The reference is the patched llama.cpp the conversion
+ships, configured `-DGGML_HIP=ON` for `gfx1151` against this ROCm, run as
+`llama-bench -ngl 99 -p 512,2048 -n 64 -r 1`. **n=1 on both sides** — llama.cpp
+was not repeated, and the Gufo prefill column is the n=9 median at width 640.
 
-| Test | Gufo (tok/s) | llama.cpp ROCm (tok/s) | Gain |
+| Test | Gufo (tok/s) | llama.cpp ROCm (tok/s) | Ratio |
 | --- | ---: | ---: | ---: |
-| pp512 | 321.9 | 1217.2 | **−74%** |
-| pp2048 | 260.2 | 1232.8 | **−79%** |
-| tg64 | 59.0 | 64.8 | **−9%** |
+| pp512 | 253.2 (n=9, chunk 16) | 1217.2 (n=1) | **−79 %** |
+| pp2048 | 298.8 (n=1, chunk 64) | 1232.8 (n=1) | −76 % |
+| tg64 at 512 | 59.6 (n=9) | 64.8 (n=1) | −8 % |
 
-Gufo loses on this architecture today, badly at prefill and slightly at decode.
-Both sides ran on the device: `USED_GTT` was 51.6 GB during the llama-bench run
-against a 47.5 GB file, and on this APU the processor and the matrix cores draw
-from one LPDDR5X pool, so neither column is reading a faster chip.
-
-The two tests fail for different reasons. Decode is bandwidth-bound on both:
-3.46B active parameters spread over 6 of 384 experts per layer, the shared
-expert, the attention projections and one untied 128,000-wide output row add up
-to about 2 GB of weights per token, which puts Gufo at roughly 118 GB/s and
-llama.cpp at 130 GB/s — the same regime, 10% apart. Prefill is not
-bandwidth-bound: at 251 tok/s the engine would have to stream some 500 GB/s,
-which the hardware does not have, so it is compute-bound instead, and 251 tok/s
-of a 3.46B-active model is about 1.7 TFLOP/s against llama.cpp's 8.5. The
-reference runs prefill through hipBLASLt's tensor-core GEMM; this engine uses
-its own projection kernel and additionally re-reads the expert weights once per
-prefill chunk, which is why a wider chunk moves prefill only from 251 to 322.
-Closing that gap is the model's first performance item.
+Decode is bandwidth-bound on both sides: 3.46B active parameters spread over 6 of
+384 experts per layer, the shared expert, the attention projections and one
+untied 128,000-wide output row come to about 2 GB of weights per token, which
+puts Gufo near 118 GB/s and llama.cpp near 130 GB/s — one regime, 10 % apart.
+Prefill is not bandwidth-bound: at 253 tok/s this model would need some 500 GB/s,
+which the hardware does not have, so it is compute-bound, and 253 tok/s of a
+3.46B-active model is about 1.7 TFLOP/s against llama.cpp's 8.5. The reference
+runs prefill through hipBLASLt's tensor-core GEMM; this engine uses its own
+projection kernel and re-reads the expert table once per forward. That is the
+gap, and it is the model's first performance item.
 
 ## Not measured
 
@@ -114,6 +141,19 @@ Closing that gap is the model's first performance item.
 | --- | --- |
 | Concurrency (2/4/8 users) | TODO — one session per forward today; `SupportedPlans` is serial width 1 |
 | Q6_K / Q8_0 / Q5_K_M | TODO |
-| Contexts beyond 8,192 | In progress — 128 K recall probe running |
+| Contexts beyond 39,292 | In progress — 108,627-token recall probe queued |
 | Continuation cache, prefix reuse | Measured ([Served path](#served-path), [Quality](QUALITY.md)) |
 | Tool-call round-trip | Measured ([Quality](QUALITY.md)) |
+
+## Performance items
+
+1. **Forward width per prompt length.** 32 is 25 % ahead at chat length, 16 holds
+   the long-prompt case; one constant has to lose one of them. Nothing structural
+   blocks the split: the sliding ring is `next_pow2(513 + rows)` = 1,024 slots for
+   any width up to 511, so both widths reserve the same memory and only the
+   executor's scratch changes.
+2. **Prefill GEMM.** The reference's advantage is a tensor-core path, not a
+   better schedule.
+3. **Repeated-cell measurement protocol.** `~/kolibri-stats.py` exists; the
+   engine-direct harness should run n repetitions itself rather than leave it to
+   the caller's shell loop.
