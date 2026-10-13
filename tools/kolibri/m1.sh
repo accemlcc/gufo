@@ -31,6 +31,12 @@
 #   tools/kolibri/m1.sh model-test kolibri1_artifact      # needs the artifact
 #   tools/kolibri/m1.sh gpu-test kolibri1_attention    # needs the matrix cores
 #   tools/kolibri/m1.sh suite                            # every cpu check
+#   tools/kolibri/m1.sh throughput                       # link the measure driver
+#   tools/kolibri/m1.sh bench 4096 32 128 131072         # needs the artifact
+# The bench run is the one number the quiet GPU is owed: with another model on
+# the device the same command still checks the forwards but reads its timings
+# against a shared memory controller. KOLIBRI_STAGE_PROFILE=1 turns on the
+# executor's own stage attribution, which prints one line per forward.
 set -euo pipefail
 
 remote="${KOLIBRI_REMOTE:-m1}"
@@ -91,9 +97,30 @@ case "$command" in
     in_container "cmake --build $build_dir --target ${1}_test -j8 2>&1 | tail -8"
     # Named after the check so two people on the one GPU do not overwrite each
     # other's binary on the way across.
+    #
+    # KOLIBRI_TIME reaches the check only when it is really set: the checks ask
+    # getenv() != nullptr rather than testing a value, so passing
+    # "-e KOLIBRI_TIME=0" switches every timing block on.
+    time_env=""
+    [[ -z "${KOLIBRI_TIME:-}" ]] || time_env="-e KOLIBRI_TIME=$KOLIBRI_TIME"
     ssh "$remote" "cp $remote_src/$build_dir/tests/models/kolibri1/${1}_test /tmp/${1}.bin && \
                    podman cp /tmp/${1}.bin $gpu_container:/tmp/${1} && \
-                   podman exec -e KOLIBRI_TIME=${KOLIBRI_TIME:-0} $gpu_container bash -lc 'LD_LIBRARY_PATH=/opt/rocm/lib /tmp/${1}'"
+                   podman exec $time_env $gpu_container bash -lc 'LD_LIBRARY_PATH=/opt/rocm/lib /tmp/${1}'"
+    ;;
+  throughput)
+    # The driver links the engine's archives, so it is built where they are and
+    # run where the artifact is.
+    sync
+    in_container "cmake --build $build_dir --target gufo_kolibri1 -j8 2>&1 | tail -3 && \
+                  ROCM_PATH=/opt/rocm bash tools/kolibri/build_throughput.sh $build_dir 2>&1 | tail -2"
+    ;;
+  bench)
+    sync
+    in_container "cmake --build $build_dir --target gufo_kolibri1 -j8 2>&1 | tail -3 && \
+                  ROCM_PATH=/opt/rocm bash tools/kolibri/build_throughput.sh $build_dir 2>&1 | tail -1"
+    ssh "$remote" "LD_LIBRARY_PATH=/opt/rocm/lib GUFO_KOLIBRI1_MODEL=$artifact \
+                   ${KOLIBRI_STAGE_PROFILE:+GUFO_KOLIBRI_ROCM_PREFILL_STAGE_PROFILE=1} \
+                   $remote_src/artifacts/kolibri/throughput $artifact $*"
     ;;
   suite)
     sync

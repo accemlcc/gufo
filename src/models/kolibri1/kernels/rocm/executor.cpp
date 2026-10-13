@@ -311,13 +311,23 @@ void Executor::Experts(const DeviceLayer& l, const float* h,
   const std::uint32_t experts = c.num_experts;
   const std::uint32_t d = c.hidden_size;
   const std::uint32_t width = c.expert_ffn_size;
-  // The routing table holds kProjectRows rows' slots, so the mixture runs in
-  // the same steps as the projections. Both read every expert weight they
-  // touch, which is what makes a large prefill cost weight traffic per step
-  // instead of per token - the routed half of this model is 224 MB per layer
-  // and a step touches at most 96 of its 384 experts.
-  for (std::uint32_t base = 0; base < count; base += kProjectRows) {
-    const std::uint32_t n = std::min(kProjectRows, count - base);
+  // One group table over as many rows as the table can hold, which at the
+  // shipped prefill width is the whole forward.
+  //
+  // The step size is what decides how often a hot expert is read again: a
+  // grouped launch reads every expert it touches once, and a step only knows
+  // the slots of its own rows. At sixteen rows a hundred and twenty-eight ran
+  // eight mixtures, and the stage measured the same 2.212 ms per token there as
+  // at one mixture of a hundred and twenty-eight (2.218) - the traffic of a
+  // step over the step's rows does not fall when the steps grow with the
+  // forward. Over the forward the visits are the distinct experts of all the
+  // rows together, and the cost per token falls with the width as every other
+  // part of the model's does.
+  //
+  // The loop stays for a forward wider than the table: past kMaxGroupSlots the
+  // pieces re-read, which is a slower prefill rather than a refused one.
+  for (std::uint32_t base = 0; base < count; base += kMaxGroupSlots) {
+    const std::uint32_t n = std::min(kMaxGroupSlots, count - base);
     const std::uint32_t slots = n * used;
     const float* x = h + static_cast<std::size_t>(base) * d;
     float* w = weights + static_cast<std::size_t>(base) * used;

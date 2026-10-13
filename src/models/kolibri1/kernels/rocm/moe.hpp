@@ -28,8 +28,23 @@ enum class WeightFormat : std::uint32_t {
 /// and the same token has to come out the same either way.
 /// ---------------------------------------------------------------------------
 
-/// Slots one group can list, which bounds a grouped launch to this many rows.
-inline constexpr std::uint32_t kMaxGroupSlots = 16;
+/// Rows one grouped launch may carry, which is also the most slots one group
+/// can list: an expert is chosen at most once per row. The bound is the
+/// table's, not the kernel's - the selection kernel covers sixteen rows per
+/// block, so a launch wider than that builds its table over the counts the
+/// selection leaves behind (see `MoeRoute`).
+///
+/// It matters because a grouped launch reads the weights of every expert it
+/// touches once per pass of its groups: cutting a prefill into narrower
+/// mixtures than the forward makes the hot experts be read again in every
+/// piece, which is what held the routed stage at the same cost per token from
+/// sixteen rows to a hundred and twenty-eight. One table over the forward makes
+/// the cost per token fall with the width, as it does for every other part of
+/// the model.
+inline constexpr std::uint32_t kMaxGroupSlots = 128;
+/// Rows one block of the selection kernel holds, so `kMaxGroupSlots` rows need
+/// `kMaxGroupSlots / kSelectRows` blocks and a table built outside them.
+inline constexpr std::uint32_t kSelectRows = 16;
 /// Ints per group: the expert index, the slot count, then the slots.
 inline constexpr std::uint32_t kGroupInts = 2 + kMaxGroupSlots;
 /// Ints of a table with `groups` groups, including the leading count.
@@ -83,7 +98,20 @@ void EmbedRows(const EmbedArgs& args, hipStream_t stream);
 /// recipes: the bias moves the selection and nothing else, and the weight an
 /// expert contributes is the unbiased sigmoid of its own logit, with no
 /// renormalization over the chosen six and no softmax.
+///
+/// Two launches carry a row to its experts - the logits, then the selection
+/// over them - and a table over more than one block's rows adds a third: the
+/// selection's per-block table would only see its own sixteen rows, so past
+/// that the selection publishes ids and counts and one block gathers the table
+/// from them. The order the table has to have - experts increasing, a group's
+/// slots increasing - is a property of the gather either way.
 /// ---------------------------------------------------------------------------
+
+/// Experts a gathered table can carry: the gather gives one expert one thread
+/// of one block, so that block is the model's expert bound on the wide path. A
+/// narrower launch builds its table inside the selection block and is not
+/// limited this way.
+inline constexpr std::uint32_t kGatherExperts = 1024;
 
 struct MoeRouteArgs {
   const float* x;      ///< [rows][hidden], the normalized layer input
@@ -92,10 +120,13 @@ struct MoeRouteArgs {
   float* logits;       ///< [rows][experts], the raw scores; may be null
   std::int32_t* ids;   ///< [rows][used]
   float* weights;      ///< [rows][used], sigmoid(logit) of the chosen expert
-  std::uint32_t* counts;  ///< [experts] assignments, zeroed by the caller
-  /// Group table GroupTableInts(rows * used), or null: one group per distinct
-  /// expert the rows chose, its slots the assignments of that expert in
-  /// increasing slot order, and no empty group.
+  /// [experts] assignments, zeroed by the caller. Required whenever `groups`
+  /// is asked for beyond `kSelectRows` rows: it is what the gather reads.
+  std::uint32_t* counts;
+  /// Group table GroupTableInts(min(experts, rows * used)), or null: one group
+  /// per distinct expert the rows chose, its slots the assignments of that
+  /// expert in increasing slot order, and no empty group. Up to
+  /// `kMaxGroupSlots` rows.
   std::int32_t* groups;
   std::uint32_t rows;
   std::uint32_t hidden;

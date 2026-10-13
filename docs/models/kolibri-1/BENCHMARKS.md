@@ -325,13 +325,14 @@ agree with the tool's own rate within 1 % (4.183 ms = 239 pp against the run's
 | head + norms + embed | 0.002 | 0.002 | 0.001 | 1.19 (6.6 %) |
 | **total** | **4.183** | **2.726** | **2.840** | **18.05** |
 
-**The routed experts do not amortise, and that is the finding.** Their cost is
-2.212 ms per token at width 16 and 2.218 at width 128 — flat to a third decimal
-while every other stage falls. That is the grouped table doing its job (a step
-reads each touched expert once rather than once per slot), and it is also the end
-of width as a lever: at width 128 the experts *are* the prefill, 81 % of it. The
-same 2.2 ms is why 256 and 512 rows are not worth a window before the experts move
-off the GEMV — at best they buy the 0.3 ms that is left outside.
+**The routed experts did not amortise — and the reason was not the experts.**
+Their cost is 2.212 ms per token at width 16 and 2.218 at width 128, flat to a
+third decimal while every other stage falls. That was read as the grouped table
+doing its job, and so as the end of width as a lever. It was the mixture count:
+the table held sixteen rows, the wide forward ran eight of them, and a step's
+traffic is constant in its own width by construction. The measurement stands;
+the reading did not — see [One group table over the
+forward](#one-group-table-over-the-forward).
 
 **The dense switch did what it claimed**: 1.353 → 0.302 ms/token at width 128, a
 1.05 ms saving inside a 1.457 ms total change, the remainder being attention and
@@ -350,6 +351,61 @@ GEMV's — the same item b, this time with split-K across the 512 output rows of
 512-wide expert — and past ~40 K positions attention joins it, which is where the
 depth table above says a 39 K session spends most of its step.
 
+## One group table over the forward
+
+`kMaxGroupSlots` was sixteen, so a 128-row forward walked `Executor::Experts`
+through eight mixtures and each mixture read the experts of its own rows. The
+bound is now 128 rows, one table per forward, and past one block's rows the
+table is gathered by a second launch from the ids and counts the selection
+leaves behind (`MoeRoute`, `kSelectRows`).
+
+**This corrects the section above.** "The routed experts do not amortise" was
+read from 2.212 ms per token at width 16 against 2.218 at 128 and recorded as
+the grouped table doing its job. A step's traffic is constant in its own width
+by construction, so a stage that steps is flat by construction too: the
+flatness was the mixture count, not the ceiling. Width is not spent.
+
+Kernel numbers, synthetic 384-expert tables at the artifact's own shapes, m1.
+**The device held a Qwen forward for every run in this section**, so absolute
+times are inflated and only ratios and correctness are claims. Both columns
+cover the same seven hundred and sixty-eight slots; "eight tables" is what a
+128-row forward used to issue.
+
+| Shape | eight tables of 96 groups | one table of 384 groups | ratio |
+| --- | ---: | ---: | ---: |
+| Q4_K gate 512×2560 | 8 × 351.7 = 2,813 µs | 1,491 µs | **1.89** |
+| Q4_K down 2560×512 | 8 × 347.2 = 2,778 µs | 1,496 µs | **1.86** |
+| Q6_K gate 512×2560 | 8 × 456.5 = 3,652 µs | 1,853 µs | **1.97** |
+| Q6_K down 2560×512 | 8 × 460.6 = 3,685 µs | 1,889 µs | **1.95** |
+
+The eight-table column reads a 96-expert table eight times (768 matrix reads)
+and the one-table column reads 384 experts twice apiece (384 reads), and both
+run at 190-226 GB/s of the bytes they touch: the gain is fewer reads, not a
+faster kernel, which is why it lands close to the byte ratio of two and not
+above it.
+
+Routing itself, per layer, same shared device: 30.2 µs at one row, 109.6 at
+sixteen, **631.6 µs at 128** — the wide number carries the counts memset and the
+gather launch the narrow ones never pay. Across fifty layers that is 31.6 ms of
+a 128-row step, which at the prefill rates recorded above is under two percent
+of the forward. The table is not free; it is cheap.
+
+Correctness on the device: `kolibri1_gemv_test` matches the FP64 dot on every
+case, now including a group of forty-eight slots compared bit for bit at pass
+widths one, four, eight and sixteen, and a lone slot held against a table whose
+other slots belong to other experts; `kolibri1_route_test` covers tables at nine
+and forty-eight rows (widest group one slot per row), a row's ids, weights and
+logits identical alone and inside a batch of 128, and the new refusal past
+`kMaxGroupSlots`. 13/13 CPU checks.
+
+What the arithmetic expects from it, `[INFERENCE]` until a window measures the
+model: 6-of-384 over 128 rows touches
+384 × (1 − (1 − 6/384)<sup>128</sup>) ≈ 331 distinct experts, against the ≈ 84
+per mixture × 8 mixtures = 672 the stepped version reads — a 2.0× cut in the
+routed stage's bytes, so its 2.21 ms/token should come down toward 1.1-1.4 and
+take the width-128 total from 2.726 ms/token with it. Decode is untouched by
+construction: one row's table never needed more than one block.
+
 ## Not measured
 
 | Cell | Status |
@@ -363,22 +419,24 @@ depth table above says a 39 K session spends most of its step.
 | Functional suites (13) | Recorded across three runs — 7 pass / 6 fail, every failure with a cause, four harness-side fixes landed but not re-run ([Quality](QUALITY.md#functional-qualification)) |
 | Whole-model prefill on the matrix-core path | Measured — 1.11× best, 1.38× median at width 128, spread 29 % → 2.4 % ([Prefill width, both dense paths](#prefill-width-both-dense-paths)) |
 | Served forward width | Measured — 1.83× at 1,572 and 2.00× at 13,030 prompt tokens, decode flat, ttft halved ([Served forward width](#served-forward-width)) |
+| Whole model on one group table | Owed to a quiet window: `kolibri1_device_forward` at `KOLIBRI_TEST_PREFILL_CHUNK` 16 and 128 against the scalar reference, the stage profile at both widths, and served pp. Kernels measured, model not ([One group table over the forward](#one-group-table-over-the-forward)) |
 
 ## Performance items
 
-1. **Forward width — taken, and it paid more than the engine ladder promised.**
-   The runner passes 128 now: served, 1.83× at 1,572 prompt tokens and 2.00× at
-   13,030, decode unmoved
-   ([Served forward width](#served-forward-width)). None of the geometry caps this
-   note used to list had to move — `Experts` and `Project` already step a wide
-   forward through `kProjectRows` sub-blocks — what made the width pay was the
-   dense matrix-core path underneath it, without which extra rows are mostly
-   re-reads. Past 128 the lever is spent: the routed experts cost the same 2.21 ms
-   per token at width 16 as at 128 and are 81 % of a width-128 prefill
-   ([Where the forward's time sits](#where-the-forwards-time-sits)). The cost that
-   stays on the record: `prefill_chunk_rows` is part of the disk-cache identity
-   (`inference_backend.cpp:348`), so a width change re-prefills every stored tree
-   once.
+1. **Forward width — taken twice: the dense path under it, then the table over
+   it.** The runner passes 128 now: served, 1.83× at 1,572 prompt tokens and
+   2.00× at 13,030, decode unmoved
+   ([Served forward width](#served-forward-width)). What made that width pay the
+   first time was the dense matrix-core path underneath it, without which extra
+   rows are mostly re-reads. What capped it afterwards was `kMaxGroupSlots` at
+   sixteen rows: `Experts` stepped the wide forward through eight mixtures, each
+   reading its own experts, which is why the routed stage read as finished at
+   2.21 ms per token. The bound is 128 now and the step is the forward
+   ([One group table over the forward](#one-group-table-over-the-forward)); the
+   whole-model number is owed to a window. The cost that stays on the record:
+   `prefill_chunk_rows` is part of the disk-cache identity
+   (`inference_backend.cpp:348`), so a width change re-prefills every stored
+   tree once.
 2. **The prefill GEMM: tensor cores in two steps; a is built, b is next.**
    The reference's advantage is a tensor-core path, not a better schedule, and the
    ladder is measurable in front of us — `gemma4` was cut from the same GEMV and

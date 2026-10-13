@@ -395,9 +395,13 @@ void LaunchGrouped(const GroupedGemvArgs& args, hipStream_t stream) {
   const auto with_split = [&]<int kSplit>() {
     constexpr int kRows = kRowsPerWave * (kWaves / kSplit);
     const dim3 grid((args.m + kRows - 1) / kRows, args.max_groups);
-    // A group lists one slot per row of the batch, so the launch's rows bound
-    // the pass width. Wider passes only re-read an expert fewer times: a slot's
-    // chain starts and ends in the same place at every width.
+    // The pass width is how many of a group's slots share one read of the
+    // expert's weights. It never changes a slot's arithmetic - the accumulator
+    // starts at zero inside the pass that carries it - so it is chosen purely
+    // for that: a group of nine slots at width eight would read the expert a
+    // second time for its last one. The shared memory of the reduction is one
+    // kilobyte per slot of the pass either way, because kSplit times
+    // kRowGroups is the block's wave count whichever split was picked.
     const auto with_slots = [&]<int kSlots>() {
       GroupedGemvKernel<F, kSplit, kSlots>
           <<<grid, kThreads, 0, stream>>>(weights, args.groups, args.x, args.y,
@@ -407,8 +411,14 @@ void LaunchGrouped(const GroupedGemvArgs& args, hipStream_t stream) {
       with_slots.template operator()<1>();
     } else if (args.rows <= 4) {
       with_slots.template operator()<4>();
-    } else {
+    } else if (args.rows <= 32) {
       with_slots.template operator()<8>();
+    } else {
+      // A table over the whole forward puts several rows' slots on one expert,
+      // and past a width of eight those groups start needing a second pass:
+      // at the artifact's six experts per row, a group of the average size a
+      // hundred and twenty-eight rows produce still fits one read at sixteen.
+      with_slots.template operator()<16>();
     }
   };
   // The split divides the row's 256-value super-blocks, so it is chosen from

@@ -14,12 +14,14 @@
 
 namespace gufo::models::kolibri1::rocm {
 
-/// Rows of one projection launch. A grouped launch reads the weights of every
-/// expert it touches, so it wants as many rows as it can get; a dense
-/// projection has no such trade-off and 16 rows is the widest shape the
-/// batch-invariant GEMV is written for. Prefill therefore walks its rows
-/// through the projections in steps of this size, which costs a re-read of the
-/// projection weights per step and nothing else.
+/// Rows of one dense projection launch: the widest shape the batch-invariant
+/// GEMV is written for, which is what the prebuilt single-group tables cover.
+/// Prefill walks its dense rows through the projections in steps of this size,
+/// which costs a re-read of the projection weights per step and nothing else -
+/// a dense projection has one matrix, so a wider step buys nothing the tiled
+/// GEMM below `kMatrixCoreRows` does not already buy. The routed mixture is not
+/// bound this way: it runs over the whole table (`kMaxGroupSlots`), because
+/// there the rows a launch shares decide how often the experts are re-read.
 inline constexpr std::uint32_t kProjectRows = 16;
 
 /// Rows a projection block needs before the tiled GEMM is the faster of the

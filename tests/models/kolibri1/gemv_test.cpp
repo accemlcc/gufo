@@ -363,7 +363,7 @@ void CheckInvariance(k::WeightFormat format, std::uint32_t m,
   // One slot against every pass width the launcher can choose, so the widths
   // are compared with each other and not only with their own launch.
   std::size_t moved = 0;
-  for (const std::uint32_t rows : {1U, 2U, 5U, 16U}) {
+  for (const std::uint32_t rows : {1U, 2U, 5U, 16U, 33U, 128U}) {
     const std::vector<float> one =
         Launch(w, x, {{0, {0}}}, format, rows, 1, m, kdim, 1);
     for (std::uint32_t row = 0; row < m; ++row) {
@@ -373,8 +373,9 @@ void CheckInvariance(k::WeightFormat format, std::uint32_t m,
     }
   }
   std::snprintf(name, sizeof(name),
-                "%s one slot at pass widths one, four and eight m %u k %u", fmt,
-                m, kdim);
+                "%s one slot at pass widths one, four, eight and sixteen m %u "
+                "k %u",
+                fmt, m, kdim);
   std::cout << (moved == 0 ? "PASS " : "FAIL ") << name << "  differing "
             << moved << "\n";
   if (moved != 0) {
@@ -410,6 +411,52 @@ void CheckInvariance(k::WeightFormat format, std::uint32_t m,
   std::cout << (shifted == 0 ? "PASS " : "FAIL ") << name << "  differing "
             << shifted << "\n";
   if (shifted != 0) {
+    ++failures;
+  }
+
+  // A group wider than the pass a launch makes: forty-eight rows' slots on two
+  // experts, which is the shape the routed projections of a whole forward
+  // present and one a table built inside one selection block could never list.
+  // Three launches of the same slots have to agree bit for bit: the wide group
+  // at the pass width of a hundred and twenty-eight rows, the same group at the
+  // pass width of eight, and the slots in a group each of their own - which is
+  // the shape the single-slot case already pins against the FP64 dot, so
+  // agreeing with it carries that pin over to the wide group.
+  constexpr std::uint32_t kDeep = 48;
+  std::vector<float> xdeep(static_cast<std::size_t>(k::kMaxGroupSlots) * kdim);
+  for (auto& v : xdeep) {
+    v = unit(rng);
+  }
+  std::vector<Group> deep{{0, {}}, {1, {}}};
+  std::vector<Group> singletons;
+  for (std::int32_t s = 0; s < static_cast<std::int32_t>(kDeep); ++s) {
+    deep[s % 2].slots.push_back(s);
+    singletons.push_back({s % 2, {s}});
+  }
+  const std::vector<float> wide_group =
+      Launch(w, xdeep, deep, format, k::kMaxGroupSlots, kSpr, m, kdim, 2);
+  const std::vector<float> narrow_group =
+      Launch(w, xdeep, deep, format, 8, kSpr, m, kdim, 2);
+  const std::vector<float> apart =
+      Launch(w, xdeep, singletons, format, k::kMaxGroupSlots, kSpr, m, kdim,
+             kDeep);
+  std::size_t crossed = 0;
+  for (std::int32_t s = 0; s < static_cast<std::int32_t>(kDeep); ++s) {
+    for (std::uint32_t row = 0; row < m; ++row) {
+      const std::size_t i = static_cast<std::size_t>(s) * m + row;
+      if (!SameBits(wide_group[i], narrow_group[i]) ||
+          !SameBits(wide_group[i], apart[i])) {
+        ++crossed;
+      }
+    }
+  }
+  std::snprintf(name, sizeof(name),
+                "%s forty-eight slots in one group across pass widths m %u "
+                "k %u",
+                fmt, m, kdim);
+  std::cout << (crossed == 0 ? "PASS " : "FAIL ") << name << "  differing "
+            << crossed << "\n";
+  if (crossed != 0) {
     ++failures;
   }
 }
@@ -695,8 +742,8 @@ int main() {
 
   // The grouped launcher says no rather than launch a shape it cannot do: an
   // activation off the boundary the loads assume, a width the super-blocks do
-  // not divide, a Q6_K row that would end mid-word, and a batch wider than a
-  // group's slot list.
+  // not divide, a Q6_K row that would end mid-word, and more rows than a
+  // group's slot list can hold.
   struct Refusal {
     const char* name;
     k::WeightFormat format;
@@ -710,11 +757,13 @@ int main() {
       {"a width the super-blocks do not divide", k::WeightFormat::kQ4_K, 2, 384,
        false},
       {"a Q6_K row of one super-block", k::WeightFormat::kQ6_K, 2, 256, false},
-      {"seventeen rows in one launch", k::WeightFormat::kQ4_K, 17, 512, false},
+      {"a batch wider than a group's slot list", k::WeightFormat::kQ4_K,
+       k::kMaxGroupSlots + 1, 512, false},
   };
   for (const Refusal& r : refusals) {
     const Built w = Build(r.format, 1, 8, 512, rng);
-    std::vector<float> x(17 * 512, 0.0F), y(18 * 8, kPoison);
+    std::vector<float> x((k::kMaxGroupSlots + 1) * 512, 0.0F),
+        y((k::kMaxGroupSlots + 2) * 8, kPoison);
     k::GroupedGemvArgs args{};
     args.format = r.format;
     args.max_groups = 1;
@@ -755,22 +804,38 @@ int main() {
       Timed(name, f, 384, 2560, 512, 1, 6, six, 384, rng);
     }
 
-    // A chunk of sixteen rows where every row chose different experts, which
-    // is the widest table one launch can be given: ninety-six groups is the
-    // most slots a batch can hold, so a bound above it only dispatches blocks
-    // that find no group.
-    std::vector<Group> wide;
+    // The two shapes the mixture can be given at the same number of slots: one
+    // table over a hundred and twenty-eight rows, where an expert appears once
+    // and its weights pay once, and the same slots cut into the tables a
+    // sixteen-row step would produce, where the experts a hot row chose are
+    // read again in every piece. Seven hundred and sixty-eight slots over
+    // three hundred and eighty-four experts, two slots each, which is the
+    // average a hundred and twenty-eight rows of this model produce, against
+    // ninety-six slots over ninety-six experts - and eight of the latter make
+    // the width the one table covers.
+    std::vector<Group> whole;
+    for (std::int32_t e = 0; e < 384; ++e) {
+      whole.push_back({e, {2 * e, 2 * e + 1}});
+    }
+    std::vector<Group> stepped;
     for (std::int32_t s = 0; s < 96; ++s) {
-      wide.push_back({s, {s}});
+      stepped.push_back({s, {s}});
     }
     for (const k::WeightFormat f : formats) {
       const char* fmt = f == k::WeightFormat::kQ4_K ? "Q4_K" : "Q6_K";
       char name[96];
-      std::snprintf(name, sizeof(name), "%s expert 512x2560 16r bound 96", fmt);
-      Timed(name, f, 384, 512, 2560, 16, 6, wide, 96, rng);
-      std::snprintf(name, sizeof(name), "%s expert 512x2560 16r bound 384",
+      std::snprintf(name, sizeof(name), "%s expert 512x2560 16r bound 96 x8",
                     fmt);
-      Timed(name, f, 384, 512, 2560, 16, 6, wide, 384, rng);
+      Timed(name, f, 384, 512, 2560, 16, 6, stepped, 96, rng);
+      std::snprintf(name, sizeof(name), "%s expert 512x2560 128r bound 384",
+                    fmt);
+      Timed(name, f, 384, 512, 2560, 128, 6, whole, 384, rng);
+      std::snprintf(name, sizeof(name), "%s expert 2560x512 16r bound 96 x8",
+                    fmt);
+      Timed(name, f, 384, 2560, 512, 16, 6, stepped, 96, rng);
+      std::snprintf(name, sizeof(name), "%s expert 2560x512 128r bound 384",
+                    fmt);
+      Timed(name, f, 384, 2560, 512, 128, 6, whole, 384, rng);
     }
   }
 

@@ -572,12 +572,17 @@ void SubEpsilonBoundary(std::mt19937& rng) {
 
 /// (d) The group table: a leading count, the experts that were used in
 /// increasing order, their slots in increasing order, and no word spent on the
-/// experts nobody chose. Five experts serve every row of the batch and four
-/// serve one row each, so both shapes of group appear, and two of the five share
-/// a score so that a tie cannot reorder the table into something the count
-/// disagrees with.
-void GroupTable(std::mt19937& rng) {
-  constexpr std::uint32_t rows = 9;
+/// experts nobody chose. Five experts serve every row of the batch and one
+/// serves each row alone, so both shapes of group appear, and two of the five
+/// share a score so that a tie cannot reorder the table into something the
+/// count disagrees with.
+///
+/// Run at nine rows, where the selection builds the table inside its own block,
+/// and at forty-eight, past the rows one block holds, where a gather over the
+/// counts builds it: the five shared experts then hold forty-eight slots each,
+/// which is the shape the grouped projection reads over a whole forward and the
+/// one a per-block table could never produce.
+void GroupTable(std::mt19937& rng, std::uint32_t rows) {
   Fixture f = RandomFixture(rows, kHidden, kExperts, 0.002, 0.0, rng());
   std::vector<Craft> crafts = {{10, kAnyRow, 5.0F, 0.0F},
                                {20, kAnyRow, 4.5F, 0.0F},
@@ -636,10 +641,14 @@ void GroupTable(std::mt19937& rng) {
     membership &= seen[e] == (w.counts[e] != 0 ? 1 : 0);
   }
   // Five crafted experts serve every row of the batch and one serves each row
-  // alone, so exactly fourteen experts appear.
-  constexpr std::int32_t kGroupsInTable = 5 + static_cast<std::int32_t>(rows);
-  Report("the group table lists the used experts in order with their slots",
-         structure && matches && fits && membership &&
+  // alone, so exactly 5 + rows experts appear, and the widest of them - one of
+  // the five - holds a slot of every row, at nine rows as at forty-eight.
+  const std::int32_t kGroupsInTable = 5 + static_cast<std::int32_t>(rows);
+  const bool widest_expected = widest == static_cast<std::int32_t>(rows);
+  Report(("the group table lists used experts in order with slots at " +
+          std::to_string(rows) + " rows")
+             .c_str(),
+         structure && matches && fits && membership && widest_expected &&
              listed == rows * kUsed && count == kGroupsInTable,
          "count=" + std::to_string(count) + " slots=" + std::to_string(listed) +
              " of " + std::to_string(rows * kUsed) + ", widest group " +
@@ -667,52 +676,62 @@ void Counts(std::mt19937& rng) {
              std::to_string(*std::max_element(g.counts.begin(), g.counts.end())));
 }
 
-/// (f) The same row alone and inside the widest batch the table can hold, for a
-/// random row and for a row sitting on the sub-epsilon boundary.
+/// (f) The same row alone and inside a batch, for a random row and for a row
+/// sitting on the sub-epsilon boundary - and in a batch wide enough that the
+/// table is gathered rather than built in the selection's own block, which is
+/// not allowed to disturb a row's numbers either.
 void BatchInvariance(std::mt19937& rng) {
   constexpr std::uint32_t kShared = 7;
-  for (int which = 0; which < 2; ++which) {
-    Fixture batch = which == 0
-                        ? RandomFixture(16, kHidden, kExperts, 0.02, 0.5, rng())
-                        : RandomFixture(16, kHidden, kExperts, 0.002, 0.0, rng());
-    if (which == 1) {
-      CraftLogits(&batch, {{10, kAnyRow, 5.0F, 0.0F},
-                           {20, kAnyRow, 4.5F, 0.0F},
-                           {30, kAnyRow, 4.0F, 0.0F},
-                           {40, kAnyRow, 3.5F, 0.0F},
-                           {50, kAnyRow, 3.0F, 0.0F},
-                           {300, kAnyRow, 1.0F, 0.0F},
-                           {12, kAnyRow, std::nextafterf(1.0F, 0.0F), 1e-9F}});
-    }
-    Fixture alone = batch;
-    alone.rows = 1;
-    alone.x.assign(
-        batch.x.begin() + static_cast<std::ptrdiff_t>(kShared) * kHidden,
-        batch.x.begin() + static_cast<std::ptrdiff_t>(kShared + 1) * kHidden);
+  for (const std::uint32_t rows : {16U, k::kMaxGroupSlots}) {
+    for (int which = 0; which < 2; ++which) {
+      Fixture batch =
+          which == 0
+              ? RandomFixture(rows, kHidden, kExperts, 0.02, 0.5, rng())
+              : RandomFixture(rows, kHidden, kExperts, 0.002, 0.0, rng());
+      if (which == 1) {
+        CraftLogits(&batch,
+                    {{10, kAnyRow, 5.0F, 0.0F},
+                     {20, kAnyRow, 4.5F, 0.0F},
+                     {30, kAnyRow, 4.0F, 0.0F},
+                     {40, kAnyRow, 3.5F, 0.0F},
+                     {50, kAnyRow, 3.0F, 0.0F},
+                     {300, kAnyRow, 1.0F, 0.0F},
+                     {12, kAnyRow, std::nextafterf(1.0F, 0.0F), 1e-9F}});
+      }
+      Fixture alone = batch;
+      alone.rows = 1;
+      alone.x.assign(
+          batch.x.begin() + static_cast<std::ptrdiff_t>(kShared) * kHidden,
+          batch.x.begin() + static_cast<std::ptrdiff_t>(kShared + 1) * kHidden);
 
-    const Got wide = Launch(batch, Ask{});
-    const Got single = Launch(alone, Ask{});
-    bool ids_same = true;
-    bool weights_same = true;
-    for (std::uint32_t j = 0; j < kUsed; ++j) {
-      // Bit for bit rather than within a tolerance: a batch boundary must not
-      // change a token's numbers at all.
-      ids_same &= wide.ids[kShared * kUsed + j] == single.ids[j];
-      weights_same &= wide.weights[kShared * kUsed + j] == single.weights[j];
+      const Got wide = Launch(batch, Ask{});
+      const Got single = Launch(alone, Ask{});
+      bool ids_same = true;
+      bool weights_same = true;
+      for (std::uint32_t j = 0; j < kUsed; ++j) {
+        // Bit for bit rather than within a tolerance: a batch boundary must not
+        // change a token's numbers at all.
+        ids_same &= wide.ids[kShared * kUsed + j] == single.ids[j];
+        weights_same &= wide.weights[kShared * kUsed + j] == single.weights[j];
+      }
+      bool logits_same = true;
+      for (std::uint32_t e = 0; e < batch.experts; ++e) {
+        logits_same &= wide.logits[static_cast<std::size_t>(kShared) *
+                                   batch.experts + e] == single.logits[e];
+      }
+      Report((std::string(which == 0
+                              ? "a row alone gets the ids and weights of the "
+                                "same row in a batch of "
+                              : "a row on a sub-epsilon boundary survives a "
+                                "batch boundary at ") +
+              std::to_string(rows) + " rows")
+                 .c_str(),
+             ids_same && weights_same && logits_same,
+             std::string(which == 0 ? "random" : "crafted") + " row " +
+                 std::to_string(kShared) + ": six ids, six weights and " +
+                 std::to_string(batch.experts) +
+                 " logits identical bit for bit");
     }
-    bool logits_same = true;
-    for (std::uint32_t e = 0; e < batch.experts; ++e) {
-      logits_same &=
-          wide.logits[static_cast<std::size_t>(kShared) * batch.experts + e] ==
-          single.logits[e];
-    }
-    Report(which == 0
-               ? "a row alone gets the ids and weights of the same row in a batch"
-               : "a row on a sub-epsilon boundary survives a batch boundary",
-           ids_same && weights_same && logits_same,
-           std::string(which == 0 ? "random" : "crafted") + " row " +
-               std::to_string(kShared) + ": six ids, six weights and " +
-               std::to_string(batch.experts) + " logits identical bit for bit");
   }
 }
 
@@ -758,7 +777,10 @@ void Refusals() {
     const char* name;
   };
   const Bad bad[] = {
-      {17, kHidden, kExperts, kUsed, "seventeen rows"},
+      {k::kMaxGroupSlots + 1, kHidden, kExperts, kUsed,
+       "more rows than the group table holds"},
+      {k::kMaxGroupSlots, kHidden, k::kGatherExperts + 1, kUsed,
+       "a wide table over more experts than the gather has threads"},
       {4, kHidden, kExperts, kExperts + 1,
        "more experts used per row than the model has"},
       {4, 2500, kExperts, kUsed,
@@ -787,9 +809,10 @@ void Refusals() {
   }
 }
 
-/// Not a gate: the numbers steer the launcher.
+/// Not a gate: the numbers steer the launcher. The wide row count is in there
+/// because the gather it takes is a launch the narrow ones never pay for.
 void Timed(std::mt19937& rng) {
-  for (const std::uint32_t rows : {1U, 16U}) {
+  for (const std::uint32_t rows : {1U, 16U, k::kMaxGroupSlots}) {
     const Fixture f = RandomFixture(rows, kHidden, kExperts, 0.02, 0.5, rng());
     float* dx = Device(f.x);
     float* dr = Device(f.router);
@@ -800,6 +823,8 @@ void Timed(std::mt19937& rng) {
     std::int32_t* dids = Device(ids);
     float* dw = Device(weights);
     std::int32_t* dg = Device(groups);
+    std::vector<std::uint32_t> counts(f.experts, 0);
+    std::uint32_t* dcounts = Device(counts);
     k::MoeRouteArgs a{};
     a.x = dx;
     a.router = dr;
@@ -807,12 +832,21 @@ void Timed(std::mt19937& rng) {
     a.ids = dids;
     a.weights = dw;
     a.groups = dg;
+    a.counts = dcounts;
     a.rows = rows;
     a.hidden = f.hidden;
     a.experts = f.experts;
     a.used = f.used;
-    for (int i = 0; i < 20; ++i) {
+    // The gather of a wide table reads the counts, and the engine zeroes them
+    // before every layer, so the timing carries the memset: leaving it out
+    // would time a launch the model never makes.
+    const auto route_once = [&] {
+      HIP_CHECK(hipMemsetAsync(dcounts, 0,
+                               f.experts * sizeof(std::uint32_t), nullptr));
       k::MoeRoute(a, nullptr);
+    };
+    for (int i = 0; i < 20; ++i) {
+      route_once();
     }
     hipEvent_t first = nullptr;
     hipEvent_t last = nullptr;
@@ -820,7 +854,7 @@ void Timed(std::mt19937& rng) {
     HIP_CHECK(hipEventCreate(&last));
     HIP_CHECK(hipEventRecord(first));
     for (int i = 0; i < 200; ++i) {
-      k::MoeRoute(a, nullptr);
+      route_once();
     }
     HIP_CHECK(hipEventRecord(last));
     HIP_CHECK(hipEventSynchronize(last));
@@ -832,7 +866,8 @@ void Timed(std::mt19937& rng) {
     HIP_CHECK(hipEventDestroy(last));
     for (void* p : {static_cast<void*>(dx), static_cast<void*>(dr),
                     static_cast<void*>(db), static_cast<void*>(dids),
-                    static_cast<void*>(dw), static_cast<void*>(dg)}) {
+                    static_cast<void*>(dw), static_cast<void*>(dg),
+                    static_cast<void*>(dcounts)}) {
       HIP_CHECK(hipFree(p));
     }
   }
@@ -853,7 +888,8 @@ int main() {
   BiasMovesSelectionOnly(rng);
   Ties(rng);
   SubEpsilonBoundary(rng);
-  GroupTable(rng);
+  GroupTable(rng, 9);
+  GroupTable(rng, 48);
   Counts(rng);
   BatchInvariance(rng);
   SmallShapeAndOptionalOutputs(rng);

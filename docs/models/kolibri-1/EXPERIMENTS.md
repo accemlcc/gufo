@@ -5,6 +5,23 @@ the released Q4_K_M unless stated.
 
 ## Retained
 
+- **One group table over the forward, not one per sixteen rows.** The routed
+  stage measured flat at 2.21 ms per token from width 16 to width 128, and that
+  flatness was recorded as the grouped table doing its job. It was doing
+  nothing of the sort: `kMaxGroupSlots` was 16, so `Executor::Experts` cut a
+  128-row forward into eight mixtures and each read the experts of its own
+  rows — traffic per step is constant in the step's width by construction, so
+  a stepped stage cannot fall no matter how wide the forward gets. The bound is
+  the table's, and it is 128 now. Past the sixteen rows one block of the
+  selection covers, a block cannot see the slots of the rows it does not own, so
+  the selection publishes ids and counts and a second launch gathers the whole
+  table from them; `counts` is required whenever a table beyond `kSelectRows` is
+  asked for, which is a contract the callers and the timing helper had to learn
+  (the helper had no counts buffer and aborted the wide case on first touch).
+  On synthetic tables at the artifact's shapes the same 768 slots cost 1.86-1.97×
+  more as eight 96-group tables than as one 384-group table, at the same
+  190-226 GB/s in both columns — fewer reads, not a faster kernel
+  ([BENCHMARKS](BENCHMARKS.md#one-group-table-over-the-forward)).
 - **Staged weight upload.** A GGUF tensor is one host row-major block. The old
   upload copied every tensor whole into one device buffer and mapped it
   column-major. The 3-D expert tensors are the largest rows in the file
@@ -111,3 +128,10 @@ the released Q4_K_M unless stated.
   this target. Eight is the largest count that keeps the accumulators in
   registers; with 6-of-384 routing, eight slots collide on an expert so rarely
   that the extra passes cost nothing measurable.
+  The premise was decode-shaped, where a row's six experts almost never share a
+  group. It stopped holding the moment the routed stage ran one table over a
+  hundred and twenty-eight rows, where two slots per expert is the average and
+  a hot one carries a row each. The check drives a group to forty-eight slots
+  and demands it come out bit-identical at every pass width, which is what the
+  pass-width handling is for. The rejection of *sixteen accumulators* stands;
+  what is gone is the assumption that a group is short.

@@ -25,7 +25,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
-
+#include <string>
 #include "src/core/hip/hip_utils.hpp"
 
 namespace gufo::models::kolibri1::rocm {
@@ -107,11 +107,13 @@ RouterKernel(const float* __restrict__ x, const float* __restrict__ router,
 // Selection, weights, counts and the group table
 // ---------------------------------------------------------------------------
 
-/// Sixteen waves, so one block covers the widest launch the group table can
-/// hold. The selection reads six times the experts in logits, which is small
-/// enough for one block and needs no second barrier to be sure every logit of
-/// a row exists.
+/// One block covers kSelectRows rows: sixteen waves, one per row. A launch may
+/// span more of the forward than that - the rows are independent here - but
+/// then the table cannot be built inside the blocks that made it, and goes to
+/// GatherGroupsKernel instead.
 constexpr std::uint32_t kSelectThreads = 512;
+static_assert(kSelectThreads / kWave == kSelectRows,
+              "the selection block must hold exactly its rows in waves");
 /// What a lane holds of the best it has seen. The list is a fixed depth so the
 /// insert and the pop stay unrolled at compile time: a depth that grew with
 /// `used` would be indexed at run time and spill.
@@ -144,6 +146,9 @@ SelectKernel(const float* __restrict__ logits, const float* __restrict__ bias,
              std::uint32_t experts, std::uint32_t used) {
   const std::uint32_t lane = threadIdx.x % kWave;
   const std::uint32_t wave = threadIdx.x / kWave;
+  // The row this wave selects out of the whole launch, so a grid of blocks
+  // walks the forward instead of only its first kSelectRows.
+  const std::uint32_t r = blockIdx.x * kSelectRows + wave;
 
   double best_score[kMaxUsed];
   std::int32_t best_id[kMaxUsed];
@@ -154,8 +159,8 @@ SelectKernel(const float* __restrict__ logits, const float* __restrict__ bias,
   }
 
   const float* row = nullptr;
-  if (wave < rows) {
-    row = logits + static_cast<std::size_t>(wave) * experts;
+  if (r < rows) {
+    row = logits + static_cast<std::size_t>(r) * experts;
     for (std::uint32_t e = lane; e < experts; e += kWave) {
       // The sum is exact in double: two floats added there lose nothing, so a
       // tie here is a tie in the arithmetic and not an artefact of rounding.
@@ -210,7 +215,7 @@ SelectKernel(const float* __restrict__ logits, const float* __restrict__ bias,
         best_id[kMaxUsed - 1] = kNoExpert;
       }
       if (lane == j) {  // used <= kMaxUsed <= 16, so one lane per round
-        const std::size_t slot = static_cast<std::size_t>(wave) * used + j;
+        const std::size_t slot = static_cast<std::size_t>(r) * used + j;
         ids[slot] = id;
         weights[slot] = Sigmoid(row[id]);
         if (counts != nullptr) {
@@ -228,8 +233,10 @@ SelectKernel(const float* __restrict__ logits, const float* __restrict__ bias,
   // while they were written row by row. One thread per expert collects its own
   // out of shared memory, and a block scan over the experts that have any
   // places the groups, which puts them in increasing expert order by
-  // construction.
-  __shared__ std::int32_t s_ids[kMaxGroupSlots * kMaxUsed];
+  // construction. Reached only for a launch of at most kSelectRows rows, which
+  // is what makes this block's ids the whole table's ids; beyond it the caller
+  // passes no table and the gather builds it from the counts.
+  __shared__ std::int32_t s_ids[kSelectRows * kMaxUsed];
   __shared__ int s_scan[kSelectThreads];
   __syncthreads();  // every wave's ids are visible to this block
   const std::uint32_t slots = rows * used;
@@ -288,11 +295,87 @@ SelectKernel(const float* __restrict__ logits, const float* __restrict__ bias,
   }
 }
 
+/// One block gathers the group table of a selection that ran over more rows
+/// than a single block holds.
+///
+/// Thread e owns expert e. Its slot count is the count the selection
+/// accumulated - the selection is the only writer and it counted every id it
+/// published - and its slots are those ids in increasing order, which is what a
+/// forward scan of the slots yields. The placement of the groups is a block
+/// scan over the experts that hold any, so the table lists experts in
+/// increasing order and never mentions an empty one, exactly as the in-block
+/// build of a narrower launch does; the grouped projection cannot tell which of
+/// the two wrote what it reads.
+constexpr std::uint32_t kGatherThreads = kGatherExperts;
+__global__ void __launch_bounds__(kGatherThreads)
+    GatherGroupsKernel(const std::uint32_t* __restrict__ counts,
+                       const std::int32_t* __restrict__ ids,
+                       std::int32_t* __restrict__ groups, std::uint32_t experts,
+                       std::uint32_t slots) {
+  __shared__ std::int32_t s_ids[kMaxGroupSlots * kMaxUsed];
+  __shared__ int s_scan[kGatherThreads];
+  for (std::uint32_t s = threadIdx.x; s < slots; s += kGatherThreads) {
+    s_ids[s] = ids[s];
+  }
+  const std::uint32_t e = threadIdx.x;
+  const int mine = e < experts && counts[e] > 0 ? 1 : 0;
+  s_scan[threadIdx.x] = mine;
+  __syncthreads();
+  for (std::uint32_t off = 1; off < kGatherThreads; off <<= 1) {
+    const int behind = threadIdx.x >= off ? s_scan[threadIdx.x - off] : 0;
+    __syncthreads();
+    s_scan[threadIdx.x] += behind;
+    __syncthreads();
+  }
+  if (mine == 0) {
+    if (e == kGatherThreads - 1) {
+      groups[0] = s_scan[kGatherThreads - 1];
+    }
+    return;  // an expert with no slot is not mentioned by the table at all
+  }
+  std::int32_t* g =
+      groups + 1 + static_cast<std::size_t>(s_scan[e] - 1) * kGroupInts;
+  g[0] = static_cast<std::int32_t>(e);
+  const std::uint32_t n = counts[e];
+  g[1] = static_cast<std::int32_t>(n);
+  int w = 0;
+  for (std::uint32_t s = 0; s < slots; ++s) {
+    if (s_ids[s] == static_cast<std::int32_t>(e)) {
+      // At most one slot of a group per row, so a group never needs more than
+      // the kMaxGroupSlots the kGroupInts stride leaves room for.
+      g[2 + w++] = static_cast<std::int32_t>(s);
+    }
+  }
+  if (e == kGatherThreads - 1) {
+    groups[0] = s_scan[kGatherThreads - 1];
+  }
+}
+
 }  // namespace
 
 void MoeRoute(const MoeRouteArgs& args, hipStream_t stream) {
+  if (args.rows == 0) {
+    return;
+  }
   if (args.rows > kMaxGroupSlots) {
-    throw std::invalid_argument("MoeRoute covers at most sixteen rows");
+    throw std::invalid_argument(
+        "MoeRoute covers at most " + std::to_string(kMaxGroupSlots) + " rows");
+  }
+  // A table over more rows than one block selects cannot be built from a
+  // block's own ids: the gather reads the counts, which the caller then has to
+  // provide, and it gives each expert one thread, which bounds the experts of
+  // that path alone.
+  if (args.groups != nullptr && args.rows > kSelectRows) {
+    if (args.counts == nullptr) {
+      throw std::invalid_argument(
+          "MoeRoute gathers a wide group table from the counts");
+    }
+    if (args.experts > kGatherExperts) {
+      throw std::invalid_argument(
+          "MoeRoute's gather gives one thread to each expert, so a wide table "
+          "covers at most " +
+              std::to_string(kGatherExperts) + " experts");
+    }
   }
   if (args.used > args.experts) {
     throw std::invalid_argument(
@@ -311,9 +394,6 @@ void MoeRoute(const MoeRouteArgs& args, hipStream_t stream) {
     throw std::invalid_argument(
         "MoeRoute needs the input, the router, the bias, ids and weights");
   }
-  if (args.rows == 0) {
-    return;
-  }
 
   // The caller's own buffer serves as the hand-over when it asked for the raw
   // scores; otherwise the scratch is stream-ordered, so two requests on two
@@ -330,9 +410,19 @@ void MoeRoute(const MoeRouteArgs& args, hipStream_t stream) {
   const dim3 router_grid((args.experts + kRouterWaves - 1) / kRouterWaves);
   RouterKernel<<<router_grid, kRouterThreads, 0, stream>>>(
       args.x, args.router, logits, args.rows, args.hidden, args.experts);
-  SelectKernel<<<1, kSelectThreads, 0, stream>>>(
-      logits, args.bias, args.ids, args.weights, args.counts, args.groups,
-      args.rows, args.experts, args.used);
+  // One block of rows each; the table of a single block is built inside it,
+  // and the one of several blocks by the gather over the published ids.
+  const dim3 select_grid((args.rows + kSelectRows - 1) / kSelectRows);
+  const bool in_block_table = args.rows <= kSelectRows;
+  SelectKernel<<<select_grid, kSelectThreads, 0, stream>>>(
+      logits, args.bias, args.ids, args.weights, args.counts,
+      in_block_table ? args.groups : nullptr, args.rows, args.experts,
+      args.used);
+  if (args.groups != nullptr && !in_block_table) {
+    GatherGroupsKernel<<<1, kGatherThreads, 0, stream>>>(
+        args.counts, args.ids, args.groups, args.experts,
+        args.rows * args.used);
+  }
   if (scratch != nullptr) {
     HIP_CHECK(hipFreeAsync(scratch, stream));
   }
