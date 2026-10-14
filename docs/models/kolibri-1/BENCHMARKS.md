@@ -842,6 +842,25 @@ the same launches in both legs, so the 0.166 ms per token that left `route` was
 the router's own read, and what stays at 0.085 — 0.44 ms of a 256-row layer,
 against the 373 µs the kernel takes by itself — is the selection around it.
 
+Served, same window, same two builds, one session, `--context 16384
+--sessions 1`, no disk cache, `tools/kolibri/served_pp.py --sentences 1000
+--repeats 3` with a fresh marker per request and the server's own
+`timings.prompt_per_second`:
+
+| Leg | narrow | tiled | |
+| --- | ---: | ---: | --- |
+| pp13,055, run 1 | 613.9 tok/s | **686.0** | |
+| pp13,055, run 2 | 608.5 | **674.4** | |
+| pp13,055, run 3 | 606.8 | **673.4** | |
+| pp13,055, median | 608.5 tok/s | **674.4 tok/s** | **+10.8 %** |
+
+The served gain is smaller than the engine-direct one because the served leg
+carries the chat template, the scheduler and the continuation cache around a
+forward the router no longer dominates; it is the number a user of `gufo serve`
+feels. Absolute reads do not travel between windows — this narrow build reads
+608.5 where the one-table window's build read 539.0 at the same depth — so the
+claim is the pair, not either figure.
+
 ## Not measured
 
 | Cell | Status |
@@ -857,7 +876,7 @@ against the 373 µs the kernel takes by itself — is the selection around it.
 | Served forward width | Measured — 1.83× at 1,572 and 2.00× at 13,030 prompt tokens, decode flat, ttft halved ([Served forward width](#served-forward-width)) |
 | Whole model on one group table | Measured in one window, both builds: routed stage 2.225-2.253 → 1.103-1.189 ms/token (**1.96×**), prefill total 2.72 → 1.61 ms/token, pp8192 351.6 → 563.4 tok/s (**1.60×**), served pp13k 336.9 → 538.3 tok/s (**1.60×**), decode unchanged, golden forward exact against the scalar reference at chunk 16 and 128 ([The same change on the model, device to itself](#the-same-change-on-the-model-device-to-itself)) |
 | Routed stage split by launch | Measured, device to itself, both switches. Prefill at 128 and 256 rows — `MoeRoute` 0.269/0.261, gate 0.335/0.294, up 0.325/0.288, down 0.320/0.263, `memset` + `act` + `finish` under 0.03 ms per token — and decode, routing 2.74, three GEMVs 4.37, three small launches 1.10, of an 8.21 ms stage ([Forward width 256, served](#forward-width-256-served), [Decode's routed stage](#decodes-routed-stage-apart-from-the-memory-it-never-touches)) |
-| Router shape | Measured on this device, the same source built at both settings of `kRouterTiledMinRows`: 29.4 µs against 51.0 at one row, 61.9 against 48.8 at eight, 1,217.2 against 374.5 at 256 (**3.25×**), logits equal at every width and across the builds; in the engine `route` 0.251 → 0.085 ms per token, forward 1.464 → 1.288, prefill 682 → 775 tok/s (**+13.6 %**), decode 52.1 unmoved; golden forward `max_abs 3.28e-3` with argmax equal ([The router reads each operand once](#the-router-reads-each-operand-once)) |
+| Router shape | Measured on this device, the same source built at both settings of `kRouterTiledMinRows`: 29.4 µs against 51.0 at one row, 61.9 against 48.8 at eight, 1,217.2 against 374.5 at 256 (**3.25×**), logits equal at every width and across the builds; in the engine `route` 0.251 → 0.085 ms per token, forward 1.464 → 1.288, prefill 682 → 775 tok/s (**+13.6 %**), served pp13,055 608.5 → 674.4 tok/s (**+10.8 %**), decode 52.1 unmoved; golden forward `max_abs 3.28e-3` with argmax equal ([The router reads each operand once](#the-router-reads-each-operand-once)) |
 
 ## Performance items
 

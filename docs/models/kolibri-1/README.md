@@ -143,7 +143,8 @@ artifacts/kolibri/throughput <model.gguf> [pp] [tg] [chunk] [max_context]
   and not a law — tiled, eight rows against eight experts per block
   (`kRouterTiledMinRows`), the same launch is 3.25× cheaper at 256 rows, the
   stage gives up 17 % more of itself and prefill **13.6 %** more
-  engine-direct at 4 K, decode unmoved and every logit bit-identical
+  engine-direct at 4 K — **10.8 %** of it served at 13 K — with decode unmoved
+  and every logit bit-identical
   ([Benchmarks](BENCHMARKS.md#the-router-reads-each-operand-once)). `gufo chat`, `gufo
   prompt` and `gufo serve` pass this constant. The scheduler's `--prefill-chunk`
   is a different number — the budget of prompt tokens between decode rounds —

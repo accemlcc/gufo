@@ -66,8 +66,9 @@ the released Q4_K_M unless stated.
   gigaflop at 256 rows. Tiled (eight rows against eight experts per block, the
   gate rows staged through shared memory, the hidden dimension in tiles of 256
   floats) the same launch is 3.25× cheaper at 256 rows and `route` goes 0.251 →
-  0.085 ms per token inside the forward: **+13.6 % prefill** (682 → 775 tok/s),
-  decode untouched at 52.1 tok/s because one row keeps the old shape — the two
+  0.085 ms per token inside the forward: **+13.6 % prefill** (682 → 775 tok/s
+  engine-direct, and 608.5 → 674.4 served at 13,055, **+10.8 %**), decode
+  untouched at 52.1 tok/s because one row keeps the old shape — the two
   curves cross between four and eight rows, which is `kRouterTiledMinRows`. The
   re-tiling does not touch the reduction order: the hash sweep over both shapes
   agrees bit for bit at every width, and the golden forward still reads
