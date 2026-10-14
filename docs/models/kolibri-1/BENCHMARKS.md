@@ -100,7 +100,9 @@ table was measured at forward width **16**, the width the runner passed until
 comparison lives in [Served forward width](#served-forward-width). That older run
 read the server's `event=completed` line (`prompt_tokens prefill_tokens
 cached_tokens prefill_tps decode_tps ttft_ms cache_restore_ms queue_ms`); the
-build measured against it answers with a `timings` object per request.
+build measured against it answers with a `timings` object per request. For the
+shipped width at depth, use
+[Served depth, cold, at 128 rows](#served-depth-cold-at-128-rows).
 
 | Depth of prompt | pp (tok/s) | tg (tok/s) | ttft |
 | ---: | ---: | ---: | ---: |
@@ -310,6 +312,65 @@ artifact, the same width-128 build and a 13 K prompt measured 336.9 tok/s on
 1.83×/2.00× width ratios are ratios inside one window and stand, the absolute
 tok/s do not carry across the two configurations. See
 ([The same change on the model, device to itself](#the-same-change-on-the-model-device-to-itself)).
+
+
+## Served depth, cold, at 128 rows
+
+`tools/kolibri/serve_check.py sweep` walks one cold prompt per depth against a
+live server: m1, 2026-10-14, `--context 131072 --sessions 1`, forward width 128
+(the shipped constant), 64 generated tokens per leg, artifact
+`Kolibri-1-Q4_K_M.gguf` at 47,454,113,472 bytes, which is the byte size the
+Hob-forge repository reports for that file. Both rates are the server's own
+`timings`, and the depth is what the server counted, not what was estimated
+from the text.
+
+Every prompt begins with a fresh random marker, because prefix reuse here is
+byte-exact from the first token. The `cached` column is the coldness proof: 42
+tokens in every leg, which is the conversation frame, identical bytes in every
+request, and nothing of the filler.
+
+| Prompt | pp (tok/s) | tg (tok/s) | prefill | cache hit |
+| ---: | ---: | ---: | ---: | ---: |
+| 3,203 | 571.8 | 59.2 | 5.5 s | 42 |
+| 4,135 | 545.3 | 58.3 | 7.5 s | 42 |
+| 16,336 | 480.2 | 53.1 | 33.9 s | 42 |
+| 32,654 | 420.1 | 47.5 | 77.6 s | 42 |
+| 65,240 | 335.9 | 39.5 | 194.1 s | 42 |
+| 97,873 | 279.3 | 33.9 | 350.4 s | 42 |
+
+Five of those legs fit `T(n) = a*n + b*n^2` with almost nothing left over:
+`a=1.781e-3 s/token`, `b=1.835e-8 s/token^2`, and the largest error on any one
+leg is 0.36 s, on the shortest leg of 5.5 s. The sixth leg was measured after
+the fit, kept out of it, and the fit said 350.1 s against the 350.4 s it took:
+0.10 %. The quadratic share of a prompt's time — the ten patternless layers
+attending the whole past — is 3.4 %
+at 3,203, 25.2 % at 32,654 and 50.2 % at 97,873: past about 87 K positions,
+prefill is mostly attention rather than weights.
+
+That is worth putting against the older numbers on this page, because the
+comparison says two things the single deep legs of the [Served
+path](#served-path) section could not.
+
+* **Width, on the same artifact.** The width-16 run read 158.8 tok/s at 39,292
+  and 97.9 at 108,627; this curve interpolates to 399.7 and 264.9 there, so
+  **2.52× and 2.71×**. [Served forward width](#served-forward-width) measured
+  **1.83× and 2.00×** at 1,572 and 13,030: the wider forward keeps, and a
+  little grows, its gain at depths where the work is attention rather than the
+  routed experts.
+* **Fit quality.** The old coefficients came from two points, and read
+  `a=4.14e-3`, `b=5.51e-8`. Forward width cannot change how many token pairs
+  the patternless layers attend, so `b` three times larger is not a kernel
+  difference: two points pin a curve by their endpoints alone, and every depth
+  beyond 39 K in the older section is that fit talking. `b` here is constrained
+  by a 30× span of depths with a 0.4 s residual.
+
+Decode follows the same one-regime bandwidth model as before, which is also the
+check that the wider forward did not move work onto the decode side: weights
+~1.95 GB plus 20,480 bytes of patternless cache per position, over the measured
+rate, gives 119 GB/s at 3,203, 124 at 32,654 and 134 at 97,873 (1.87 GiB of
+that cache at the deepest leg). Device state through the run: 84 GiB of GTT
+resident, 51,188 MiB of it from the load and the rest the snapshot cache's
+configured 32 GiB, flat with depth.
 
 ## Where the forward's time sits
 
@@ -548,7 +609,7 @@ window with the device to itself.
 | --- | --- |
 | Concurrency (2/4/8 users) | TODO — one session per forward today; `SupportedPlans` is serial width 1 |
 | Q6_K / Q8_0 / Q5_K_M | TODO |
-| Contexts beyond 39,292 | Measured once, at 108,627 ([Served path](#served-path)); nothing between 39K and it |
+| Contexts beyond 97,873 | The cold curve runs to 97,873 at width 128 ([Served depth](#served-depth-cold-at-128-rows)); the only deeper leg, 108,627 in [Served path](#served-path), is a width-16 build, so nothing above 97,873 is measured on what ships |
 | llama.cpp prefill beyond 2,048 | TODO — the table above stops at pp2048, so its ratio says nothing about depth; the reference build has never been run at 8K/32K/99K |
 | Continuation cache, prefix reuse | Measured ([Served path](#served-path), [Quality](QUALITY.md)) |
 | Tool-call round-trip | Measured ([Quality](QUALITY.md)) |

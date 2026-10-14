@@ -5,6 +5,18 @@ the released Q4_K_M unless stated.
 
 ## Retained
 
+- **A depth curve needs cold legs at one build.** The served depth numbers on
+  this page were two points at forward width 16, fitted as `T(n) = a*n + b*n^2`
+  and then quoted at every depth beyond them. `serve_check.py sweep` now walks
+  cold legs (fresh marker per prompt, so no byte-exact prefix reuse, and the
+  reported `cached` is the proof) across 3.2 K to 97.9 K on the shipped width:
+  `a=1.781e-3`, `b=1.835e-8`, worst leg off by 0.36 s, and a leg held back from
+  the fit landing 0.10 % off. Two things came of it — `b` three times the old
+  value was a two-point artifact and not a kernel change, since forward width
+  cannot change the number of token pairs the patternless layers attend; and
+  the width gain measured at 13 K (1.83×, 2.00×) holds at 39 K and 108 K
+  (2.52×, 2.71×), where attention rather than the routed experts is the work
+  ([BENCHMARKS](BENCHMARKS.md#served-depth-cold-at-128-rows)).
 - **A timing helper that repeats one table measures the L2.** `gemv_test`'s TIME
   cases reported 305-348 GB/s for the six-group decode launch — 4.42 MB read
   twenty times out of a cache that holds it whole — which is the number anyone

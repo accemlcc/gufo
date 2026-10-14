@@ -8,14 +8,17 @@ The engine proves pp/tg offline; what only the served path can show is
   sessions interleaving two conversations never lets one read the other's state,
   prefix   a repeated conversation reuses the cached prefix, proven by the
            server's own `usage.cached_tokens` and by wall-clock, with a
-           different-prefix control so a warm cache cannot masquerade as reuse.
+           different-prefix control so a warm cache cannot masquerade as reuse,
+  sweep    served pp and tg against context depth, every leg cold, so the
+           falling decode rate with depth is a curve and not two legs.
 
-All three run over HTTP. The server is neither modified nor instrumented.
+All four run over HTTP. The server is neither modified nor instrumented.
 
 Usage:
   serve_check.py recall   [--tokens N]
   serve_check.py sessions
   serve_check.py prefix   [--tokens N]
+  serve_check.py sweep    [--depths 1024,4096,...] [--gen N]
   serve_check.py all
 
 Environment:
@@ -509,15 +512,85 @@ def cmd_coldpair() -> int:
     return 1 if failed else 0
 
 
+def per_line_tokens() -> float:
+    """Tokens per filler line, from one short leg instead of a guess.
+
+    A sweep has to report how deep it actually went, so the filler is sized from
+    the server's own count. Two hundred needle-free lines cost about a second and
+    the marker in front of each leg keeps that calibration from being a cached
+    prefix of the legs behind it.
+    """
+    payload, _ = chat([{"role": "user",
+                        "content": build_long_prompt(200, needles=False)}],
+                      max_tokens=1)
+    got = prompt_tokens(payload)
+    if not got:
+        raise SystemExit("server meldet keine prompt_tokens")
+    return got / 200.0
+
+
+def cmd_sweep(depths: list, gen: int) -> int:
+    """Served pp and tg against context depth, one cold leg per depth.
+
+    Both rates come from the server (`timings`), over the tokens it really
+    processed: pp says what a prompt of that depth costs, tg says what a
+    generated token costs once the ten patternless layers hold `depth`
+    positions. The weights do not move between legs - only the attention does -
+    so the fall in tg across the run is the depth itself.
+
+    Each prompt carries a fresh marker in front: prefix reuse here is byte-exact
+    from the first token, so a repeated prefix would report a cache hit as a
+    prefill. `cached` is printed because that is the one way to see a leg was
+    not cold. A small constant in it is expected and means nothing: the chat
+    template's opening tokens are the same bytes in every request, so they are
+    always reused. What would mean something is a hit that grows with the leg -
+    filler that was already prefilled - so the check is on growth, not on the
+    count.
+
+    `timings` names the decode leg `predicted_*` (`generation_metrics.hpp`);
+    reading a `generation_*` key here would silently report zero decode.
+
+    """
+    per_line = per_line_tokens()
+    print(f"kalibrierung: {per_line:.2f} tokens/zeile, {gen} generationstokens")
+    print(f"{'prompt':>9} {'pp':>8} {'tg':>8} {'cached':>7} {'wall':>9}")
+    failed = []
+    for depth in depths:
+        lines = max(64, int(depth / per_line))
+        prompt = (f"[sweep {os.urandom(8).hex()}]\n"
+                  + build_long_prompt(lines, needles=False))
+        payload, wall = chat([{"role": "user", "content": prompt}],
+                             max_tokens=gen)
+        timings = payload.get("timings") or {}
+        got, hit = prompt_tokens(payload), cached(payload)
+        usage = payload.get("usage") or {}
+        pp = timings.get("prompt_per_second") or 0.0
+        tg = (timings.get("predicted_per_second")
+              or usage.get("completion_tokens_per_second") or 0.0)
+        print(f"{got:>9} {pp:>8.1f} {tg:>8.1f} {hit:>7} {wall:>8.1f}s")
+        if hit > max(64, got // 50):
+            print(f"  FEHLER: leg {got} prefillte nicht kalt "
+                  f"({hit} cached von {got})")
+            failed.append(f"{got}-warm")
+    print("SWEEP " + ("FEHLER: " + ",".join(failed) if failed else "OK"))
+    return 1 if failed else 0
+
+
 def main() -> int:
     global LOG_PATH
     ap = argparse.ArgumentParser()
     ap.add_argument("mode",
-                    choices=("recall", "sessions", "prefix", "coldpair", "all"))
+                    choices=("recall", "sessions", "prefix", "coldpair",
+                             "sweep", "all"))
     ap.add_argument("--tokens", type=int, default=110_000,
                     help="approximate prompt size for recall/prefix probes")
     ap.add_argument("--log", default=os.environ.get("KOLIBRI_LOG", ""),
                     help="server log file; enables prefill/cached accounting")
+    ap.add_argument("--depths", default="1024,4096,16384,32768,65536,98304",
+                    help="prompt depths for sweep, comma separated")
+    ap.add_argument("--gen", type=int, default=64,
+                    help="generated tokens per sweep leg (64 matches the "
+                         "depth legs already in BENCHMARKS.md)")
     args = ap.parse_args()
     LOG_PATH = args.log
     rc = 0
@@ -529,6 +602,10 @@ def main() -> int:
         rc |= cmd_prefix(args.tokens)
     if args.mode in ("coldpair", "all"):
         rc |= cmd_coldpair()
+    if args.mode == "sweep":
+        # Deliberately not part of `all`: the sweep holds the server's single
+        # session slot for tens of minutes, the checks above run in a minute.
+        rc |= cmd_sweep([int(n) for n in args.depths.split(",")], args.gen)
     return rc
 
 
