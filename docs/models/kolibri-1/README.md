@@ -121,16 +121,20 @@ artifacts/kolibri/throughput <model.gguf> [pp] [tg] [chunk] [max_context]
   With the 6-of-384 routing of this model, a pass almost never repeats an
   expert, which is why the small bin count does not re-read weights.
 - **Prefill** re-reads the expert weights per forward, so the forward's row
-  count (`ModelOptions::prefill_chunk`) is a real knob — and it is 128 now,
-  measured served at 2× of width 16 at both 1,572 and 13,030 prompt tokens with
-  decode unmoved, because since `17eada37` a wide block sends the seven dense
-  projections to the matrix cores instead of stepping them through the
-  batch-invariant GEMV. What is left of a wide prefill is the routed experts, and
-  their per-token cost is identical at 16 and at 128, which is why width stops
-  paying there ([Benchmarks](BENCHMARKS.md)). `gufo chat`, `gufo prompt` and
-  `gufo serve` pass this constant. The scheduler's `--prefill-chunk` is a
-  different number — the budget of prompt tokens between decode rounds — and
-  reaches the model as `max_input_tokens`.
+  count (`ModelOptions::prefill_chunk`) is a real knob — and it is 256 now, in
+  three takings: 16 → 128 doubled served prefill (2× at 1,572 and at 13,030
+  prompt tokens, decode unmoved), because since `17eada37` a wide block sends
+  the seven dense projections to the matrix cores instead of stepping them
+  through the batch-invariant GEMV; 128 with one group table over the forward
+  took the routed stage to 1.96× of itself; and 128 → 256 added **12.9 % to
+  18.4 %** served across 3.2 K to 97.9 K with decode and memory unmoved. That is
+  where it stops: the routed stage's bytes per token halve from 128 to 256 and
+  its time falls 11 %, because `MoeRoute` walks every row and so is flat in the
+  width — 13.5 % of the forward, at any width
+  ([Benchmarks](BENCHMARKS.md#forward-width-256-served)). `gufo chat`, `gufo
+  prompt` and `gufo serve` pass this constant. The scheduler's `--prefill-chunk`
+  is a different number — the budget of prompt tokens between decode rounds —
+  and reaches the model as `max_input_tokens`.
 - **Cache:** the 10 patternless layers keep the whole context; the 40 sliding
   layers keep a ring of the window plus one forward's rows, rounded up to a
   power of two — `next_pow2(513 + rows)`, so 1,024 slots for any forward up to

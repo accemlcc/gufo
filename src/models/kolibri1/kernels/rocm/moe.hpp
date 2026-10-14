@@ -40,8 +40,14 @@ enum class WeightFormat : std::uint32_t {
 /// piece, which is what held the routed stage at the same cost per token from
 /// sixteen rows to a hundred and twenty-eight. One table over the forward makes
 /// the cost per token fall with the width, as it does for every other part of
-/// the model.
-inline constexpr std::uint32_t kMaxGroupSlots = 128;
+/// the model - and it is where the width stops. Raised from 128 to 256 the
+/// stage goes 1.279 -> 1.132 ms per token while its expert bytes halve
+/// (287 -> 163 MB per token): 0.269 ms of it is `MoeRoute`, which walks every
+/// row and so is flat per token at any width, and the three launches below it
+/// are not bound by the bytes they save. Widening past the table would only
+/// step the forward again, and a step re-reads
+/// (`docs/models/kolibri-1/BENCHMARKS.md#forward-width-256-served`).
+inline constexpr std::uint32_t kMaxGroupSlots = 256;
 /// Rows one block of the selection kernel holds, so `kMaxGroupSlots` rows need
 /// `kMaxGroupSlots / kSelectRows` blocks and a table built outside them.
 inline constexpr std::uint32_t kSelectRows = 16;

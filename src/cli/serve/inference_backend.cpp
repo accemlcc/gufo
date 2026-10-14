@@ -3805,12 +3805,26 @@ private:
 // max_abs 3.3e-3, mean 4.6e-4, argmax equal, and the chunked case across the
 // width boundary exact at 0).
 //
-// The price is bounded and stated once: a Kolibri tree stored under another width
-// re-prefills one time, because `prefill_chunk_rows=` is in its identity and the
-// weights are untouched. Past 128 nothing is on the table before the routed
-// experts leave the GEMV - their 2.21 ms per token is the same at width 16 as at
-// 128, and at 128 they are 81 % of the prefill.
-constexpr std::uint32_t kKolibriPrefillChunk = 128;
+// 256, measured served on m1 (2026-10-14, same command, cold legs 3.2 K to
+// 97.9 K, one window per binary and a control leg in the same window, the two
+// binaries md5-verified apart): pp 542.6 to 639.1 at 3.2 K and 277.3 to 313.2
+// at 97.9 K - between +12.9 % and +18.4 % - with decode unmoved (five of six
+// legs identical to the decimal) and memory unmoved (513 + 256 still rounds to
+// 1,024 ring slots). Same numerics, not merely same order: at
+// `KOLIBRI_TEST_PREFILL_CHUNK` 256 the forward gives prefill max_abs 3.3e-3,
+// mean 4.6e-4, argmax equal, a 517-token prompt across the boundary exact at 0,
+// and `kolibri1_route_test` a row bit-identical alone and inside 256.
+//
+// The price is bounded and stated once: a Kolibri tree stored under another
+// width re-prefills one time, because `prefill_chunk_rows=` is in its identity
+// and the weights are untouched. And width is spent where it was always going
+// to be spent: split by launch, the routed stage is 1.279 ms per token at 128
+// rows and 1.132 at 256, where its expert bytes halve, because 0.269 ms of it
+// is `MoeRoute` walking every row and the three expert launches are not bound
+// by the bytes the wider forward saves. At 256 rows that stage is 66 % of the
+// forward; what is left belongs to the grouped GEMV and the router, not to more
+// rows (`docs/models/kolibri-1/BENCHMARKS.md`).
+constexpr std::uint32_t kKolibriPrefillChunk = 256;
 
 using KolibriModel = models::kolibri1::Model;
 using KolibriSession = models::kolibri1::Session;

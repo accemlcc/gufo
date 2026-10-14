@@ -372,6 +372,140 @@ that cache at the deepest leg). Device state through the run: 84 GiB of GTT
 resident, 51,188 MiB of it from the load and the rest the snapshot cache's
 configured 32 GiB, flat with depth.
 
+## Forward width 256, served
+
+`kKolibriPrefillChunk` and `kMaxGroupSlots` were 128; both are 256 now. It is
+the cheapest experiment the engine has — two constants, no kernel — and the byte
+model said what it should be worth: a forward reads the distinct experts of its
+own rows, so 128 rows touch 384 × (1 − (1 − 6/384)<sup>128</sup>) ≈ 333 of them
+per layer and 256 rows touch ≈ 377. Per token that is 287 MB of routed expert
+weights at 128 rows against 163 MB at 256 (2.21 MB per expert, the same figure
+the decode column of [Where the forward's time
+sits](#where-the-forwards-time-sits) is built from), and the dense projections
+and the shared expert halve by construction. Predicted, with the routed stage at
+64 % of a 128-row forward: prefill near 1.7×.
+
+Measured: **13 % to 18 %**. One window per build on m1, device to itself,
+`--context 131072 --sessions 1`, no disk cache, `serve_check.py sweep` with a
+fresh marker per leg (49.25 tokens per line on both legs), 64 generated tokens,
+the same artifact. Both binaries are branch `HEAD` out of one tree, constants
+apart (`md5 4a99c68c` at 128, `088e3969` at 256). The control leg ran *after*
+the candidate leg, and windows on this box differ by about 2 % — the width-128
+curve above read 545.3 tok/s at 4,135 where this one's control read 539.9 — so
+the gains below are six to nine times the drift they sit in.
+
+| Prompt | width 128 pp | width 256 pp | gain | tg 128 | tg 256 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 3,205 | 542.6 | 639.1 | **+17.8 %** | 58.1 | 58.8 |
+| 4,135 | 539.9 | 639.4 | **+18.4 %** | 58.3 | 58.3 |
+| 16,338 | 478.1 | 560.5 | **+17.2 %** | 53.2 | 53.2 |
+| 32,653 | 417.1 | 484.8 | **+16.2 %** | 47.3 | 47.7 |
+| 65,239 | 332.4 | 381.1 | **+14.7 %** | 39.5 | 39.4 |
+| 97,874 | 277.3 | 313.2 | **+12.9 %** | 33.9 | 33.9 |
+
+`T(n) = a*n + b*n^2` per width, five legs fitted and the deepest held back:
+
+| Width | a (s/token) | b (s/token²) | held-out leg | quadratic share at 97,874 |
+| --- | ---: | ---: | --- | ---: |
+| 128 | 1.7849e-3 | 1.8756e-8 | 354.4 s against 353.0 s (+0.40 %) | 50.7 % |
+| 256 | 1.5013e-3 | 1.7208e-8 | 311.8 s against 312.5 s (−0.23 %) | 52.9 % |
+
+All of the gain is in `a`: **−15.9 %**, which is 1/0.853 — the stage total below
+and the served curve agree to the decimal. `b` sits 8 % lower in the second
+window, and a forward width cannot change the number of pairs the ten
+patternless layers attend, so that 8 % is window drift and not attention; the
+same reading the section above reached from another pair of windows. The
+quadratic share therefore *rises* with the cheaper width. Decode is unchanged —
+five of six legs identical to the decimal, the sixth +1.2 % — and so is memory:
+the ring is `next_pow2(513 + rows)`, and 513 + 256 = 769 still lands on 1,024
+slots; served GTT 53.7 GB on both.
+
+Numerics at the new width are the same gate as at the old one, on the device and
+against the scalar reference: `kolibri1_device_forward_test` at
+`KOLIBRI_TEST_PREFILL_CHUNK=256` gives prefill `max_abs 3.28e-3`, `mean_abs
+4.57e-4`, argmax equal, a decode step `max_abs 1.94e-3`, argmax equal, and a
+517-token prompt across a chunk of 256 exact at 0 — the same three numbers the
+128 build produces in the same window. `kolibri1_route_test` covers a row
+against a batch of 256 (ids, weights and all 384 logits bit-identical alone and
+inside the batch), a sub-epsilon boundary at 256 rows, and the refusals the new
+bound makes reachable; `kolibri1_gemv_test` is unchanged and passes, its
+forty-eight-slot group included.
+
+### The 15 %, and the 43 % that did not arrive
+
+Both switches on, the same two legs (4,096 and 16,384 tokens, `--gen 32`),
+medians over the *full* forwards of each run — 232 forwards at 128 rows, 114 at
+256 — milliseconds per token:
+
+| Stage | 128 rows | 256 rows | ratio |
+| --- | ---: | ---: | ---: |
+| routed experts | 1.279 | 1.132 | 0.885 |
+| dense qkv | 0.213 | 0.167 | 0.784 |
+| attention | 0.291 | 0.265 | 0.911 |
+| output projection | 0.108 | 0.082 | 0.759 |
+| shared expert | 0.105 | 0.062 | **0.590** |
+| **total** | **1.998** | **1.704** | **0.853** |
+
+The second switch — `GUFO_KOLIBRI_ROCM_ROUTED_STAGE_PROFILE`, added with the
+five-stage one and never read until this window — splits the routed stage into
+its six launches, with `MoeFinish` carried as the difference to the stage line:
+
+| Launch | 128 rows | 256 rows | ratio | share at 128 |
+| --- | ---: | ---: | ---: | ---: |
+| counter `memset` | 0.002 | 0.001 | 0.50 | 0 % |
+| `MoeRoute` | 0.269 | 0.261 | 0.970 | 21 % |
+| gate | 0.335 | 0.294 | 0.878 | 26 % |
+| up | 0.325 | 0.288 | 0.886 | 25 % |
+| `GateUpAct` | 0.006 | 0.006 | 1.00 | 0 % |
+| down | 0.320 | 0.263 | 0.822 | 25 % |
+| `MoeFinish` | 0.018 | 0.019 | 1.06 | 1 % |
+
+Three readings.
+
+**Routing does not amortise, and this page understated it by six times.** 0.269
+ms per token at 128 rows, 0.261 at 256: the selection walks every row, so its
+cost per token is flat in the width, and it is **13.5 % of the forward** at 128
+rows and **15.3 %** at 256. [One group table over the
+forward](#one-group-table-over-the-forward) recorded it as "under two percent of
+the forward" — 31.6 ms per forward divided by a per-token figure. The probe and
+the ring agree with each other (631.6 µs per layer at 128 rows is 4.9 µs per
+token; fifty layers of that is the 0.247 ms the ring prints), so the number was
+never the problem, only the denominator.
+
+**The expert reads are not what limits the stage.** The three GEMV launches go
+0.980 → 0.845 ms per token, ratio 0.862, where the bytes promised 0.57. At face
+value that is 293 GB/s at 128 rows and 193 GB/s at 256, and 293 is above what
+this box delivers from its widest projection (225 GB/s), so the byte model is
+wrong somewhere rather than the kernel impossible. Two candidates, and one
+counter that chooses between them:
+
+* the router is not uniform: a hot tail touches fewer than the 333 distinct
+  experts the uniform model predicts at 128 rows, the stage already moves nearer
+  220 GB/s there, and there is correspondingly less to save;
+* the launches are bound per slot rather than per byte, in which case time per
+  forward follows slots (768 → 1,536) and not experts (333 → 377). Per forward
+  the three take 125 ms → 216 ms — between the two readings and nearer the slots.
+
+`MoeRoute` gathers the table anyway and could publish its group count beside it;
+the same two legs with that counter decide it in one window. Until then the
+claim on the record is the measured one: **doubling the rows bought 14 % of the
+routed stage and 17 % of the forward**, and that stage is now 66 % of it.
+
+**The control inside the measurement is the shared expert.** One fixed matrix,
+read once per forward, so its bytes per token halve exactly — and its time
+follows: 0.105 → 0.062, ratio 0.590, the closest any stage comes to the byte
+model. Every stage that gathers falls less than that. Which is also why 256 ends
+this lever instead of being a step on it: `kMaxGroupSlots` is the bound, past it
+`Experts` steps the forward and a step re-reads, and the milliseconds left are
+in the grouped GEMV and the router ([Performance
+items](#performance-items)).
+
+What the width costs is one field of the identity: `prefill_chunk_rows=256` keys
+the disk-cache tree, so a tree stored under 128 re-prefills once and the weights
+are untouched. The group table grows with the bound (`kGroupInts` is 258, so
+`GroupTableInts(384)` is about 99 KB) and the gather now runs over sixteen
+`kSelectRows` blocks rather than eight.
+
 ## Where the forward's time sits
 
 `GUFO_KOLIBRI_ROCM_PREFILL_STAGE_PROFILE=1` brackets the embedding, five stages of
@@ -423,15 +557,20 @@ depth table above says a 39 K session spends most of its step.
 
 `kMaxGroupSlots` was sixteen, so a 128-row forward walked `Executor::Experts`
 through eight mixtures and each mixture read the experts of its own rows. The
-bound is now 128 rows, one table per forward, and past one block's rows the
+bound was 128 rows then — one table per forward — and past one block's rows the
 table is gathered by a second launch from the ids and counts the selection
-leaves behind (`MoeRoute`, `kSelectRows`).
+leaves behind (`MoeRoute`, `kSelectRows`). It is 256 rows now, which is a
+served-width change rather than a new mechanism, measured in [Forward width 256,
+served](#forward-width-256-served).
 
 **This corrects the section above.** "The routed experts do not amortise" was
 read from 2.212 ms per token at width 16 against 2.218 at 128 and recorded as
 the grouped table doing its job. A step's traffic is constant in its own width
 by construction, so a stage that steps is flat by construction too: the
-flatness was the mixture count, not the ceiling. Width is not spent.
+flatness was the mixture count, not the ceiling. Width was not spent — it went
+to 256 rows and bought 17 % more
+([Forward width 256, served](#forward-width-256-served)), which is also where
+it stops.
 
 Kernel numbers, synthetic 384-expert tables at the artifact's own shapes, m1.
 **Those runs shared the device with a Qwen forward**, so their absolute times
@@ -456,8 +595,14 @@ above it.
 Routing itself, per layer, same shared device: 30.2 µs at one row, 109.6 at
 sixteen, **631.6 µs at 128** — the wide number carries the counts memset and the
 gather launch the narrow ones never pay. Across fifty layers that is 31.6 ms of
-a 128-row step, which at the prefill rates recorded above is under two percent
-of the forward. The table is not free; it is cheap.
+a 128-row step — 0.25 ms per token, which is **12 % of that step and not the
+"under two percent" this sentence used to say**: it divided a per-forward figure
+by a per-token one. The ring agrees with the probe from inside a live forward
+(0.269 ms per token at 128 rows, 0.261 at 256, flat because the selection walks
+every row), so what was wrong was the denominator and not the measurement
+([Forward width 256, served](#forward-width-256-served)). The table is not free:
+it is the routed stage's second item, and it is why that stage did not halve
+when its bytes did.
 
 Correctness on the device: `kolibri1_gemv_test` matches the FP64 dot on every
 case, now including a group of forty-eight slots compared bit for bit at pass
@@ -592,16 +737,29 @@ whole gate projection, for two launches — `RouterKernel` and a single-block
 `SelectKernel`. The same test's wide rows (130.5 µs at 16, 698.6 at 128) are the
 prefill shape, where `GatherGroupsKernel` joins them.
 
-So the decode step's 7.55 ms of routed stage is roughly 3.8 ms of grouped GEMV at
-the rate a cold launch actually gets, at least 1.6 ms of routing, and about
-2.2 ms the stage bucket cannot attribute to any measured kernel. That last piece
-is why `GUFO_KOLIBRI_ROCM_ROUTED_STAGE_PROFILE` now exists: set together with the
-five-stage switch, `Forward` prints a second line splitting the stage into
-`memset`, `route`, `gate`, `up`, `act`, `down` and the `finish` left over
-(`Executor::Experts`, `Executor::Forward`). Markers are recorded only for a
-single-piece forward, and each costs about a microsecond, so its decode line
-reads high: it answers *which launch* the time sits in, and it still needs a
-window with the device to itself.
+So the decode step's 7.55 ms of routed stage was read as roughly 3.8 ms of
+grouped GEMV at the rate a cold launch actually gets, at least 1.6 ms of
+routing, and about 2.2 ms the stage bucket could not attribute to any measured
+kernel. That last piece is why `GUFO_KOLIBRI_ROCM_ROUTED_STAGE_PROFILE` exists:
+set together with the five-stage switch, `Forward` prints a second line
+splitting the stage into `memset`, `route`, `gate`, `up`, `act`, `down` and the
+`finish` left over (`Executor::Experts`, `Executor::Forward`). Markers are
+recorded only for a single-piece forward, and each costs about a microsecond, so
+its decode line reads high: it answers *which launch* the time sits in.
+
+**The window came, and the 2.2 ms has a name.** The two profile legs of
+[Forward width 256, served](#forward-width-256-served) carry decode rows too —
+62 steps per leg behind 4 K and 16 K prompts, nothing else on the device, and
+the two builds' medians identical to the third decimal, which is itself the
+control that width does not touch decode. One step, ms per token: `route` 2.740,
+`down` 1.643, `gate` 1.363, `up` 1.360, `finish` 0.586, `memset` 0.265, `act`
+0.249 — 8.21 of a 19.96 ms step, with qkv 3.55, o_proj 2.62, attention 2.53,
+shared expert 1.52 and head 1.16 around it. The routed stage is therefore 4.37 ms
+of grouped GEMV, 2.74 ms of routing — 1.7× what the isolated probe charges,
+because a live step does not run its gate matrix hot across 200 rounds the way
+the probe does — and **1.10 ms of three launches that move almost nothing**: the
+384-counter memset at 5.3 µs per layer, `GateUpAct` at 5.0, `MoeFinish` at 11.7.
+Launch latency, 5.5 % of a decode step, and the first thing a fusion removes.
 
 ## Not measured
 
@@ -609,7 +767,7 @@ window with the device to itself.
 | --- | --- |
 | Concurrency (2/4/8 users) | TODO — one session per forward today; `SupportedPlans` is serial width 1 |
 | Q6_K / Q8_0 / Q5_K_M | TODO |
-| Contexts beyond 97,873 | The cold curve runs to 97,873 at width 128 ([Served depth](#served-depth-cold-at-128-rows)); the only deeper leg, 108,627 in [Served path](#served-path), is a width-16 build, so nothing above 97,873 is measured on what ships |
+| Contexts beyond 97,873 | The cold curve runs to 97,874 at both shipped widths, 128 and 256 ([Served depth](#served-depth-cold-at-128-rows), [Forward width 256](#forward-width-256-served)); the only deeper leg, 108,627 in [Served path](#served-path), is a width-16 build, so nothing above 97,873 is measured on what ships |
 | llama.cpp prefill beyond 2,048 | TODO — the table above stops at pp2048, so its ratio says nothing about depth; the reference build has never been run at 8K/32K/99K |
 | Continuation cache, prefix reuse | Measured ([Served path](#served-path), [Quality](QUALITY.md)) |
 | Tool-call round-trip | Measured ([Quality](QUALITY.md)) |
@@ -617,27 +775,31 @@ window with the device to itself.
 | Whole-model prefill on the matrix-core path | Measured — 1.11× best, 1.38× median at width 128, spread 29 % → 2.4 % ([Prefill width, both dense paths](#prefill-width-both-dense-paths)) |
 | Served forward width | Measured — 1.83× at 1,572 and 2.00× at 13,030 prompt tokens, decode flat, ttft halved ([Served forward width](#served-forward-width)) |
 | Whole model on one group table | Measured in one window, both builds: routed stage 2.225-2.253 → 1.103-1.189 ms/token (**1.96×**), prefill total 2.72 → 1.61 ms/token, pp8192 351.6 → 563.4 tok/s (**1.60×**), served pp13k 336.9 → 538.3 tok/s (**1.60×**), decode unchanged, golden forward exact against the scalar reference at chunk 16 and 128 ([The same change on the model, device to itself](#the-same-change-on-the-model-device-to-itself)) |
-| Routed stage split by launch | Instrumented (`GUFO_KOLIBRI_ROCM_ROUTED_STAGE_PROFILE`), not yet read: the box's GPU holds a served Qwen forward's 95 GB of GTT, and the split needs a window with the device to itself ([Decode's routed stage, apart from the memory it never touches](#decodes-routed-stage-apart-from-the-memory-it-never-touches)) |
+| Routed stage split by launch | Measured, device to itself, both switches. Prefill at 128 and 256 rows — `MoeRoute` 0.269/0.261, gate 0.335/0.294, up 0.325/0.288, down 0.320/0.263, `memset` + `act` + `finish` under 0.03 ms per token — and decode, routing 2.74, three GEMVs 4.37, three small launches 1.10, of an 8.21 ms stage ([Forward width 256, served](#forward-width-256-served), [Decode's routed stage](#decodes-routed-stage-apart-from-the-memory-it-never-touches)) |
 
 ## Performance items
 
-1. **Forward width — taken twice: the dense path under it, then the table over
-   it.** The runner passes 128 now: served, 1.83× at 1,572 prompt tokens and
-   2.00× at 13,030, decode unmoved
+1. **Forward width — taken three times, and closed.** The runner passed 128:
+   served, 1.83× at 1,572 prompt tokens and 2.00× at 13,030, decode unmoved
    ([Served forward width](#served-forward-width)). What made that width pay the
    first time was the dense matrix-core path underneath it, without which extra
    rows are mostly re-reads. What capped it afterwards was `kMaxGroupSlots` at
    sixteen rows: `Experts` stepped the wide forward through eight mixtures, each
    reading its own experts, which is why the routed stage read as finished at
-   2.21 ms per token. The bound is 128 now and the step is the forward
-   ([One group table over the forward](#one-group-table-over-the-forward)); the
-   whole-model number is measured: **1.60× prefill served and engine-direct,
-   decode unmoved**
-   ([The same change on the model, device to itself](#the-same-change-on-the-model-device-to-itself)).
-   The cost that stays on the record:
-   `prefill_chunk_rows` is part of the disk-cache identity
-   (`inference_backend.cpp:348`), so a width change re-prefills every stored
-   tree once.
+   2.21 ms per token. The bound is the forward now, and the second taking is
+   measured: **1.60× prefill served and engine-direct, decode unmoved**
+   ([One group table over the forward](#one-group-table-over-the-forward),
+   [The same change on the model, device to
+   itself](#the-same-change-on-the-model-device-to-itself)). The third, 128 to
+   256, is measured too: **+12.9 % to +18.4 %** served across 3.2 K to 97.9 K,
+   decode and memory unmoved, numerics identical to the 128 build's
+   ([Forward width 256, served](#forward-width-256-served)) — and it is the last
+   one. The routed stage gave up 11 % of itself on bytes that halved, because
+   0.269 ms per token of it is `MoeRoute`, which walks every row and never
+   amortises; past `kMaxGroupSlots` a forward is stepped and a step re-reads.
+   The cost that stays on the record: `prefill_chunk_rows` is part of the
+   disk-cache identity (`inference_backend.cpp:348`), so a width change
+   re-prefills every stored tree once.
 2. **The prefill GEMM: tensor cores in two steps; a is built, b is next.**
    The reference's advantage is a tensor-core path, not a better schedule, and the
    ladder is measurable in front of us — `gemma4` was cut from the same GEMV and
@@ -698,11 +860,17 @@ window with the device to itself.
    as context grows; widening the sliding window is not, since those layers are
    precisely the ones that cannot slide.
 
-6. **Decode's routed stage: what to take, in the order the evidence ranks it.**
-   Of its 7.55 ms per token, ~3.8 ms is grouped GEMV at the rate a cold launch
-   gets, ≥1.6 ms is routing, and ~2.2 ms is unattributed
+6. **Decode's routed stage: attributed now, and ranked by that.** One quiet
+   window with both switches closed the last piece: of an 8.21 ms routed stage
+   inside a 19.96 ms step, 4.37 ms is the grouped GEMV, 2.74 ms is routing and
+   **1.10 ms is three launches that move almost nothing** — counter `memset`
+   0.265, `GateUpAct` 0.249, `MoeFinish` 0.586
    ([Decode's routed stage, apart from the memory it never touches](#decodes-routed-stage-apart-from-the-memory-it-never-touches)).
-   One quiet window with both stage switches answers the last piece, and then:
+  - **Fuse the tail of a routed row.** Those three are 5.0-11.7 µs per layer
+    apiece on payloads of a few kilobytes: launch latency, 5.5 % of a decode
+    step. `act` belongs in the down GEMV's input read, `finish` in its epilogue,
+    and the counters in neither. This is now the best-evidenced item on the list
+    and the only one whose size is measured rather than modelled.
   - **Fused gate and up**, one launch over `blockIdx.z`: 206 GB/s against 187 for
     the same bytes in two launches, arithmetic unchanged (`0.00e+00` against the
     reference). 4.4 µs per layer, ~0.22 ms per token, and it needs no re-baseline.
@@ -711,16 +879,21 @@ window with the device to itself.
     (`route.hip.cpp:221-222`), but only `GatherGroupsKernel` reads them and that
     runs only past `kSelectRows` (`route.hip.cpp:368`, `:422`). Passing
     `counts = nullptr` for a forward of at most `kSelectRows` rows deletes an
-    atomic per slot and one serialized launch per layer; a wide forward still
-    zeroes before it gathers, since the memset lives in the same place for it.
-    Effect size unmeasured — the ring's `memset=` segment is what would price it.
+    atomic per slot and one serialized launch per layer. The ring prices it now:
+    `memset=` is 0.265 ms per token of decode, 1.3 % of the step for zeroing 1.5
+    KB — small, and the same launch the item above wants deleted anyway. A wide
+    forward still zeroes before it gathers, since the memset lives in the same
+    place for it.
   - **The split at `k=512`**: 4 % on the shipped Q4_K down, 12 % on a Q6_K one.
     The artifact's routed down is Q4_K — 13.2 MB per layer only adds up as three
     launches of 4.42 MB — so the larger number belongs to a build still on the
     list above. Both sit behind a golden re-check, because a split reorders a
     reduction.
-  - **The router**, if the ring says the time is in `RouterKernel` and not in the
-    single-block `SelectKernel`: 3.93 MB of F32 gate matrix per layer is a
-    bandwidth item of ~20 µs at the machine's rate, so only a narrower gate
-    matrix moves it, and a narrower gate matrix is an expert-selection risk that
-    owes `QUALITY.md` a study before it owes decode a millisecond.
+  - **The router is second, at 2.74 ms per token** — 1.7× what the isolated probe
+    charges it, because a live step does not keep the gate matrix hot across 200
+    rounds the way the probe does. 3.93 MB of F32 gate matrix per layer is ~20 µs
+    at the machine's rate, so the rest is the single-block `SelectKernel` and
+    logits nobody reads; splitting which of the two it is needs a counter the
+    ring cannot give. On the prefill side the same segment is 0.269 ms per token
+    at 128 rows and flat at 256, and it is the reason a wider forward stopped
+    paying.

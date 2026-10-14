@@ -5,6 +5,35 @@ the released Q4_K_M unless stated.
 
 ## Retained
 
+- **Width 256: the byte model is a ceiling, not a schedule.** `kKolibriPrefillChunk`
+  and `kMaxGroupSlots` went 128 → 256 for the cheapest reason — a forward reads
+  the distinct experts of its rows, so doubling the rows should have taken the
+  routed stage's bytes from 287 to 163 MB per token and prefill with it. Served,
+  in one window per build with a control leg and the device to itself: **+12.9 %
+  to +18.4 %** prefill across 3.2 K to 97.9 K, decode identical on five of six
+  legs, ring and served GTT unmoved (513 + 256 still rounds to 1,024 slots), and
+  the numerics gate the same as at 128 to the digit — prefill `max_abs 3.28e-3`,
+  argmax equal, a 517-token prompt across the boundary exact at 0. The stage
+  profile says why it is not 1.7×: the routed stage fell to 0.885 on bytes that
+  halved; the shared expert, which *is* a fixed-weight read with nothing
+  gathered, fell to 0.590. The byte model holds exactly where nothing gathers
+  and dissolves where something does. Width is closed as a lever here — the
+  remaining prefill time is 66 % routed stage, and its next millisecond is a
+  kernel change ([BENCHMARKS](BENCHMARKS.md#forward-width-256-served)).
+- **A percentage needs its denominator, and the routed stage needed a window.**
+  `GUFO_KOLIBRI_ROCM_ROUTED_STAGE_PROFILE` existed and had never been read. Read
+  on a device with nothing else on it: `MoeRoute` is **0.269 ms per token at 128
+  rows and 0.261 at 256** — it walks every row, so it is flat in the width, and
+  that is 13.5 % of the forward. [One group table over the
+  forward](BENCHMARKS.md#one-group-table-over-the-forward) had recorded "under
+  two percent of the forward" by dividing 31.6 ms per *forward* by a per-*token*
+  figure; probe and ring agree with each other at 4.9 µs per token, so the
+  instrument was never the problem. The same legs carry decode: of an 8.21 ms
+  routed stage, 4.37 ms is grouped GEMV, 2.74 ms routing, and **1.10 ms is
+  `memset` + `GateUpAct` + `MoeFinish`** at 5.0-11.7 µs per layer — three
+  launches of a few kilobytes, which is the "2.2 ms unattributed" the decode
+  section had left open, and it is launch latency, not any kernel's arithmetic
+  ([BENCHMARKS](BENCHMARKS.md#decodes-routed-stage-apart-from-the-memory-it-never-touches)).
 - **A depth curve needs cold legs at one build.** The served depth numbers on
   this page were two points at forward width 16, fitted as `T(n) = a*n + b*n^2`
   and then quoted at every depth beyond them. `serve_check.py sweep` now walks
