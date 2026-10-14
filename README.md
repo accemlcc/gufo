@@ -4,6 +4,21 @@
   <img src="assets/gufo-logo.jpg" alt="Gufo logo" width="180">
 </p>
 
+> [!IMPORTANT]
+> **`kolibri` is a fork branch: it runs Kolibri-1, and it is not `main`.** The
+> addition is a native engine for the `kolibri1` architecture: Aleph Alpha's
+> Kolibri-1, a 78-billion-parameter mixture of experts with 3.46 billion active
+> per token, German and English. It is built on `feat/gemma` (tip `22341ae7`,
+> 2026-10-11) rather than on `main`, because the serve-layer wiring an added
+> architecture needs - reasoning markers in the output, the tool grammar, the
+> runner registry - lives in that lineage and not on current main, and upstream
+> is not taking new model architectures at the moment. This branch therefore
+> also carries the Gemma 4 engine, and `main` has moved ahead of it. Every row
+> of the table below except Kolibri-1 describes upstream's build and
+> measurements; for Kolibri-1 read the
+> [model card](docs/models/kolibri-1/README.md): what is verified, what is
+> fast, what is broken.
+
 Gufo is a vertical local inference engine specifically built and optimized for the AMD Strix Halo hardware:
 Ryzen AI MAX+ 395 systems with Radeon 8060S (`gfx1151`), up to 128 GiB of unified memory.
 
@@ -24,6 +39,7 @@ All model documentation lives under [docs/models](docs/models/README.md):
 | [Qwen3.8 27B](docs/models/qwen3.8-27b/README.md) | Q4/Q8, images, AR, DFlash2 | Unsloth [Q4_K_XL](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/blob/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q4_K_XL.gguf) / [Q8_K_XL](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/blob/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q8_K_XL.gguf) · [DFlash2 Q4_K_M](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2-GGUF/blob/2d9571f8ce46e151f61c6499c99dee6079e1d610/Qwen3.8-27B-DFlash2-Q4_K_M.gguf) | Q4: **656.33 tok/s pp**; up to **70.56 tok/s tg** single user and **123.00 aggregated tok/s** on 8 concurrent requests with DFlash2 · [Benchmarks](docs/models/qwen3.8-27b/BENCHMARKS.md) | [Quality](docs/models/qwen3.8-27b/QUALITY.md) |
 | [Qwen3.8 Flash-Next](docs/models/qwen3.8-flash-next/README.md) | Q4, images, AR, MTP | Unsloth [Q4_K_XL](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/tree/38bb39ee97821de2c9009abb7e93950eec396e66/UD-Q4_K_XL) · [MTP Q8_0](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/blob/38bb39ee97821de2c9009abb7e93950eec396e66/MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf) | **1,702.93 tok/s pp**; up to **65.25 tok/s tg** single user and **184.74 aggregated tok/s** on 8 concurrent requests with MTP · [Benchmarks](docs/models/qwen3.8-flash-next/BENCHMARKS.md) | [Quality](docs/models/qwen3.8-flash-next/QUALITY.md) |
 | [DeepSeek V4 Flash](docs/models/deepseek-v4-flash/README.md) | AR, DSpark | [antirez Flash 0731 IQ2XXS](https://huggingface.co/antirez/deepseek-v4-gguf/blob/1cd7b564460821938add0475a60b942c409295e0/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf) · [DSpark](https://huggingface.co/antirez/deepseek-v4-gguf/blob/e7f04037032990db0346398d249baf9fb9df1ccc/DeepSeek-V4-Flash-DSpark-support-0731.gguf) | **484.62 tok/s pp**; up to **26.62 tok/s tg** single user and **54.74 aggregated tok/s** on 8 concurrent requests with DSpark · [Benchmarks](docs/models/deepseek-v4-flash/BENCHMARKS.md) | [Quality](docs/models/deepseek-v4-flash/QUALITY.md) |
+| [Kolibri-1](docs/models/kolibri-1/README.md) (this fork) | Q4, AR, tools, reasoning; no images, no speculation | Hob-forge [Q4_K_M](https://huggingface.co/Hob-forge/Kolibri-1-GGUF/blob/main/Kolibri-1-Q4_K_M.gguf) | **571.8 tok/s pp** cold at 3,203 tokens and **279.3** at 97,873; **59.2 tok/s tg** single user at that depth, **33.9** at 97,873 · [Benchmarks](docs/models/kolibri-1/BENCHMARKS.md) | [Quality](docs/models/kolibri-1/QUALITY.md) |
 | [Qwen3-ASR 1.7B](docs/models/qwen3-asr/README.md) | Speech recognition | [BF16](https://huggingface.co/Qwen/Qwen3-ASR-1.7B/tree/7278e1e70fe206f11671096ffdd38061171dd6e5) | **15.27× realtime** · [Benchmarks](docs/models/qwen3-asr/BENCHMARKS.md) | [Quality](docs/models/qwen3-asr/QUALITY.md) |
 | [Qwen3-TTS 1.7B](docs/models/qwen3-tts/README.md) | Speech synthesis and voice cloning | BF16 [CustomVoice](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) / [VoiceDesign](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign) / [Base](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base) | Up to **2.54× realtime**; **201 ms** to first audio (CustomVoice) · [Benchmarks](docs/models/qwen3-tts/BENCHMARKS.md) | [Quality](docs/models/qwen3-tts/QUALITY.md) |
 | [Qwen-Image-2.1](docs/models/qwen-image-2.1/README.md) | BF16 image generation and editing | [Complete pipeline](https://huggingface.co/Qwen/Qwen-Image-2.1/tree/b3179ad355be050328e483a9dfdd9e60cd62adfa) | In progress · [Benchmarks](docs/models/qwen-image-2.1/BENCHMARKS.md) | [Quality](docs/models/qwen-image-2.1/QUALITY.md) |
@@ -129,6 +145,79 @@ Reasoning tokens count toward that response limit.
   system turn, so Gufo moves them there. The request that introduces one is
   prefilled again; later requests reuse the cache. See the
   [API contract](docs/SERVER.md).
+
+## Kolibri-1
+
+`src/models/kolibri1` is the addition: config, weight binding, an FP32 scalar
+oracle the device kernels are checked against, HIP kernels (attention with a
+513-token window for the sliding layers and no positional encoding at all for
+the other ten, a 384-expert router selecting on `logit + expert_bias` and
+weighting by un-renormalized sigmoid, grouped expert GEMV), the chat template,
+the tokenizer, the engine, the serve runner and its sampling preset.
+
+This is still not a general GGUF graph executor. `weights.cpp` binds the tensor
+types this architecture needs — Q4_K experts, F32 norms, router gate and
+`expert_bias` — and fails on a tensor whose format it did not expect, so a file
+that is not Kolibri-1 keeps going through the engine that owns its architecture
+key.
+
+Weights (Apache-2.0; the conversion is independent and ships a llama.cpp patch,
+which Gufo does not need):
+
+```sh
+hf download Hob-forge/Kolibri-1-GGUF Kolibri-1-Q4_K_M.gguf \
+  --repo-type model \
+  --local-dir models/Kolibri-1-GGUF
+```
+
+The published `gufo-runtime` image contains upstream, not this engine, so
+Kolibri-1 needs a source build of this branch, see
+[Build from source](#build-from-source), no flags changed. Then:
+
+```sh
+scripts/kolibri-gufo.sh start          # port 8102, --context 131072, one session
+scripts/kolibri-gufo.sh status
+scripts/kolibri-gufo.sh logs 200
+scripts/kolibri-gufo.sh stop
+```
+
+`start` gates on measured state instead of hoping: it refuses below 16 GiB of
+available memory and with more than 8 GiB of GTT still resident, prints the
+processes holding the device when it refuses, and does not report ready until
+`/health` answers. It stops nothing on its own unless `KOLIBRI_PEER` names a
+container, and even then only after both gates pass: which engine loses the
+unified memory is the operator's decision, not a script's. `KOLIBRI_BIN`,
+`KOLIBRI_MODEL`, `KOLIBRI_PORT`, `KOLIBRI_CTX`, `KOLIBRI_LOG` and
+`KOLIBRI_MIN_AVAILABLE` override the defaults.
+
+Without the script:
+
+```sh
+./build/release/gufo serve llm \
+  --model models/Kolibri-1-GGUF/Kolibri-1-Q4_K_M.gguf \
+  --served-model-name Kolibri-1 \
+  --context 131072 --sessions 1 \
+  --host 0.0.0.0 --port 8102
+```
+
+Clients go to `http://127.0.0.1:8102/v1`; set the client's context to the same
+capacity the server was started with. The architecture's own window is 262,144,
+but capacity is what the ten patternless layers are sized by, and it decides
+what else can be resident. On a 128 GiB machine at `--context 131072` the
+server's own log reports 51,188 MiB of device memory when the load finishes,
+47.45 GB of which is the weight file, rising to 84 GiB once the conversation
+snapshot cache has taken its configured 32 GiB.
+
+`tools/kolibri/serve_check.py` checks the served path from the outside:
+`recall` at depth, `sessions` for isolation, `prefix` and `coldpair` for the
+cache, and `sweep` for pp and tg against context depth. What is known to be
+wrong is written down with the numbers it was seen in:
+[Quality](docs/models/kolibri-1/QUALITY.md) and
+[BENCHMARKS](docs/models/kolibri-1/BENCHMARKS.md). For a tool client the three
+that matter today: `tool_choice: required` can leave the reasoning delimiter in
+`content`, `parallel_tool_calls: true` lets the grammar accept a second
+identical call, and a small `max_tokens` with `reasoning_effort: high` can
+finish with empty `content` because the thinking budget was spent first.
 
 ## Build from source
 
