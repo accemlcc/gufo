@@ -210,3 +210,12 @@ headroom.
   times the sliding window, so all forty rings sit behind the facts and only the
   ten patternless layers can carry them. The cache geometry supports 262,144;
   nothing has been scored between 109,656 and that.
+- **A narrower KV cache.** The cache here is binary16. Aleph Alpha serves the
+  FP8 checkpoint with an FP8 KV cache (their plugin's serve command; drop the
+  flag on `Kolibri-1-BF16`) and argues in report §2.1.3 with Appendix I.4.1
+  that per-head QK normalisation bounds every query and key element inside the
+  FP8 range, so the cache cannot overflow. That is their checkpoint, their
+  hardware and their accuracy run: nothing here has scored FP8-or-narrower KV
+  on the Q4_K_M artifact, so the KV-width proposal in
+  [BENCHMARKS](BENCHMARKS.md) stays a proposal, gated on the same recall probe
+  (`tools/kolibri/serve_check.py recall`) that graded binary16 at depth.

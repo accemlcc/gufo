@@ -5,6 +5,32 @@ the released Q4_K_M unless stated.
 
 ## Retained
 
+- **The vendor reference landed after the port, and the engine matches it.** Two
+  sources arrived once Kolibri was already running here: the Kolibri tech report
+  (§2.1, Table 2) and Aleph Alpha's own inference plugin
+  `Aleph-Alpha/aleph-alpha-inference`, whose `kolibri1.py` subclasses vLLM's
+  Qwen3-MoE. Every semantic this engine had chosen by reading the conversion and
+  the patched llama.cpp was re-read against them: `lo = position + 1 - window`
+  (`attention.hip.cpp:83`) gives 513 keys — query plus 512 preceding, which is
+  the window the report sizes; RoPE only where the layer slides
+  (`qkv_post.hip.cpp:73,83,122` gate on `apply_rope`, set per layer by the
+  executor) and per-head Q/K norm before the rotation; selection on
+  `logit + expert_bias` scored from fp32 router logits, weights from the
+  **unbiased** sigmoid, no renorm; shared expert added at weight 1 beside the
+  six weighted ones (`blocks.hip.cpp:198-211`); sandwich norms in the same
+  order. The reference's whole reason to exist is the router: vLLM's built-in
+  sigmoid scoring selects on `sigmoid(logit) + bias`, which is the wrong sum —
+  this engine had it right before the reference said so. One deliberate
+  difference survives: our selection sum is in `double`
+  (`route.hip.cpp:166-169`) where they add in fp32 and let `torch.topk` order
+  ties as it likes; ours breaks ties by expert id, so a replay here is a replay
+  there only where no two scores collide — and the numerics gate is unchanged by
+  it, which is the only honesty available on a tie. The check's real finding was
+  in our own documentation: the README had called the tokenizer "SentencePiece
+  Unigram with byte fallback". The report (§2.1.2) says UniBPE and the artifact
+  agrees — `tokenizer.ggml.model = gpt2`, `pre = kolibri1`, 127,644 ranked
+  merges — with byte coverage from the GPT-2 symbol map, not a SentencePiece
+  proto. Corrected in [README](README.md#architecture).
 - **Width 256: the byte model is a ceiling, not a schedule.** `kKolibriPrefillChunk`
   and `kMaxGroupSlots` went 128 → 256 for the cheapest reason — a forward reads
   the distinct experts of its rows, so doubling the rows should have taken the

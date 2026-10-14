@@ -859,6 +859,12 @@ Launch latency, 5.5 % of a decode step, and the first thing a fusion removes.
    across the ten full-attention layers, is the only lever that keeps decode flat
    as context grows; widening the sliding window is not, since those layers are
    precisely the ones that cannot slide.
+   The vendor agrees that this is the lever — the released stack is served with
+   an FP8 KV cache, and report §2.1.3 with Appendix I.4.1 argues that per-head
+   QK normalisation bounds every query and key element inside the FP8 range so
+   the cache cannot overflow. That is a quality argument on their FP8
+   checkpoint and Hopper hardware, not a measurement of a narrower cache on
+   Q4_K_M here; the recall probe is still what would have to pass.
 
 6. **Decode's routed stage: attributed now, and ranked by that.** One quiet
    window with both switches closed the last piece: of an 8.21 ms routed stage

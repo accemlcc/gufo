@@ -21,10 +21,13 @@ architecture has no draft head here) and no wide-batch prefill.
 
 - **Layers:** 50, hidden width 2560, 48 query heads, 4 KV heads, head dim 128.
   Q projection is 2560 → 6144, K/V are 2560 → 512.
-- **Attention pattern:** four sliding layers, then one without any positional
-  encoding — layers 4, 9, …, 49. Sliding layers attend over a 513-token window
-  and rotate Q/K by RoPE (`rope.freq_base` from the file); the patternless
-  layers see the whole past and are not rotated. RMSNorm eps 1e-6.
+- **Attention pattern:** four sliding layers, then one with no positional
+  encoding (NoPE) — layers 4, 9, …, 49, read from
+  `attention.sliding_window_pattern` (1 = sliding, 0 = patternless). Sliding
+  layers attend over `attention.sliding_window` = **513 keys**: the query plus
+  the 512 preceding tokens, which is the window the tech report sizes, and
+  rotate Q/K by RoPE base 10,000 (`rope.freq_base`); the patternless layers see
+  the whole past and are not rotated. RMSNorm eps 1e-6.
 - **Per-head QK norm:** Q and K are normalized per head (a 128-wide weight each)
   before the scores.
 - **Mixture:** 384 routed experts per layer, 6 per token, each a 512-wide SwiGLU
@@ -35,9 +38,15 @@ architecture has no draft head here) and no wide-batch prefill.
 - **Sandwich norms:** each of the two branches is normalized before (`attn_norm`,
   `ffn_norm`) and after (`post_attention_norm`, `post_ffw_norm`), and the residual
   is added after the second norm.
-- **Vocabulary:** 128,000, SentencePiece Unigram with byte fallback. The released
-  artifact ships an untied `output.weight`; a tied file binds the same view.
-  Max context 262,144.
+- **Vocabulary:** 128,000 **UniBPE** — merges built bottom-up like BPE, each
+  one chosen by Unigram loss (report §2.1.2), so it ships as GPT-2-style BPE:
+  `tokenizer.ggml.model = gpt2`, `tokenizer.ggml.pre = kolibri1` (the loader
+  rejects any other `pre`, `tokenizer.cpp:317-320`), 127,644 ranked merges, no
+  added-token array, `eos = 127906`, `pad = 127901`, `add_bos = add_eos = 0`.
+  Unknown text is carried by every byte having a symbol through GPT-2's
+  `bytes_to_unicode` map (`tokenizer.cpp:62-66`) — there is no SentencePiece
+  model in the file. The released artifact ships an untied `output.weight`; a
+  tied file binds the same view. Max context 262,144 (trained to 256k).
 
 ### Quantizations
 
@@ -152,3 +161,27 @@ That is the number a co-resident engine has to leave room for.
 start below 16 GiB of available memory **and** while more than 8 GiB of GTT is
 already resident, naming the holder (`amd-smi process`) instead of stopping a
 container on a guess, and it waits for `/health` before reporting ready.
+
+## Sources
+
+- **Architecture of record:** Aleph Alpha, *Kolibri: A Sovereign European
+  Model on the Pareto Frontier* (tech report, 3 October 2026), §2.1 and
+  Table 2: 78.1 B total parameters, 3.46 B active per token excluding
+  embeddings, 50 blocks with no leading dense layer, 10 patternless against
+  40 sliding, window of 512 preceding tokens, RoPE θ = 10,000 on the sliding
+  blocks only, per-head QK RMSNorm before the rotation, 6 routed experts of
+  384 plus one shared per layer, weights not renormalised after selection.
+- **Official inference path:**
+  [`Aleph-Alpha/aleph-alpha-inference`](https://github.com/Aleph-Alpha/aleph-alpha-inference)
+  — a vLLM plugin (`aleph_alpha_inference/kolibri1.py`, `reasoning.py`, and the
+  chat template its tests render). This build does not run it; it is the
+  reference the engine's semantics were checked against, alongside the patched
+  llama.cpp in `tools/kolibri/run_parity.sh`.
+- **What actually ships** is the artifact's own metadata, readable with
+  `tools/kolibri/gguf_meta.py`: `general.architecture = kolibri1`, 903 tensors,
+  `attention.head_count = 48` / `head_count_kv = 4`, `key_length = 128`,
+  `layer_norm_rms_epsilon = 1e-6`, `attention.sliding_window = 513`,
+  `sliding_window_pattern` four 1s then a 0 across the 50 layers,
+  `rope.freq_base = 10000.0`, and `tokenizer.chat_template` carrying the same
+  template text the official plugin tests — which is what `chat_template.cpp`
+  reproduces byte for byte.
