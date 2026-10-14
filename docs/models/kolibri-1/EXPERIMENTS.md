@@ -22,7 +22,7 @@ the released Q4_K_M unless stated.
   sigmoid scoring selects on `sigmoid(logit) + bias`, which is the wrong sum —
   this engine had it right before the reference said so. One deliberate
   difference survives: our selection sum is in `double`
-  (`route.hip.cpp:166-169`) where they add in fp32 and let `torch.topk` order
+  (`route.hip.cpp:309-310`) where they add in fp32 and let `torch.topk` order
   ties as it likes; ours breaks ties by expert id, so a replay here is a replay
   there only where no two scores collide — and the numerics gate is unchanged by
   it, which is the only honesty available on a tie. The check's real finding was
@@ -49,8 +49,8 @@ the released Q4_K_M unless stated.
 - **A percentage needs its denominator, and the routed stage needed a window.**
   `GUFO_KOLIBRI_ROCM_ROUTED_STAGE_PROFILE` existed and had never been read. Read
   on a device with nothing else on it: `MoeRoute` is **0.269 ms per token at 128
-  rows and 0.261 at 256** — it walks every row, so it is flat in the width, and
-  that is 13.5 % of the forward. [One group table over the
+  rows and 0.261 at 256** — it walked every row, so it was flat in the width,
+  and that is 13.5 % of the forward. [One group table over the
   forward](BENCHMARKS.md#one-group-table-over-the-forward) had recorded "under
   two percent of the forward" by dividing 31.6 ms per *forward* by a per-*token*
   figure; probe and ring agree with each other at 4.9 µs per token, so the
@@ -60,6 +60,19 @@ the released Q4_K_M unless stated.
   launches of a few kilobytes, which is the "2.2 ms unattributed" the decode
   section had left open, and it is launch latency, not any kernel's arithmetic
   ([BENCHMARKS](BENCHMARKS.md#decodes-routed-stage-apart-from-the-memory-it-never-touches)).
+- **The router's cost was its shape, not its arithmetic.** The kernel above gave
+  one wave one expert and walked every row of the forward under it, so a row of
+  `x` was read once per expert — two gigabytes through the caches for half a
+  gigaflop at 256 rows. Tiled (eight rows against eight experts per block, the
+  gate rows staged through shared memory, the hidden dimension in tiles of 256
+  floats) the same launch is 3.25× cheaper at 256 rows and `route` goes 0.251 →
+  0.085 ms per token inside the forward: **+13.6 % prefill** (682 → 775 tok/s),
+  decode untouched at 52.1 tok/s because one row keeps the old shape — the two
+  curves cross between four and eight rows, which is `kRouterTiledMinRows`. The
+  re-tiling does not touch the reduction order: the hash sweep over both shapes
+  agrees bit for bit at every width, and the golden forward still reads
+  `max_abs 3.28e-3` with argmax equal, decode `1.94e-3`, chunked prefill exact
+  at 0 ([BENCHMARKS](BENCHMARKS.md#the-router-reads-each-operand-once)).
 - **A depth curve needs cold legs at one build.** The served depth numbers on
   this page were two points at forward width 16, fitted as `T(n) = a*n + b*n^2`
   and then quoted at every depth beyond them. `serve_check.py sweep` now walks

@@ -137,10 +137,14 @@ artifacts/kolibri/throughput <model.gguf> [pp] [tg] [chunk] [max_context]
   through the batch-invariant GEMV; 128 with one group table over the forward
   took the routed stage to 1.96× of itself; and 128 → 256 added **12.9 % to
   18.4 %** served across 3.2 K to 97.9 K with decode and memory unmoved. That is
-  where it stops: the routed stage's bytes per token halve from 128 to 256 and
-  its time falls 11 %, because `MoeRoute` walks every row and so is flat in the
-  width — 13.5 % of the forward, at any width
-  ([Benchmarks](BENCHMARKS.md#forward-width-256-served)). `gufo chat`, `gufo
+  where the bytes stop: the routed stage's bytes per token halve from 128 to
+  256 and its time fell 11 % then, because `MoeRoute` re-read a row of the
+  layer input once per expert and so was flat in the width. That was a shape
+  and not a law — tiled, eight rows against eight experts per block
+  (`kRouterTiledMinRows`), the same launch is 3.25× cheaper at 256 rows, the
+  stage gives up 17 % more of itself and prefill **13.6 %** more
+  engine-direct at 4 K, decode unmoved and every logit bit-identical
+  ([Benchmarks](BENCHMARKS.md#the-router-reads-each-operand-once)). `gufo chat`, `gufo
   prompt` and `gufo serve` pass this constant. The scheduler's `--prefill-chunk`
   is a different number — the budget of prompt tokens between decode rounds —
   and reaches the model as `max_input_tokens`.

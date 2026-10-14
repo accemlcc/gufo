@@ -472,6 +472,12 @@ the ring agree with each other (631.6 µs per layer at 128 rows is 4.9 µs per
 token; fifty layers of that is the 0.247 ms the ring prints), so the number was
 never the problem, only the denominator.
 
+**That reading held until the shape changed.** The flatness was not a property
+of routing; it was this kernel's decomposition — a wave per expert, every row
+re-read under it. Tiled, the same launch is 3.25× cheaper at 256 rows and 0.085
+ms per token inside the forward ([The router reads each operand
+once](#the-router-reads-each-operand-once)).
+
 **The expert reads are not what limits the stage.** The three GEMV launches go
 0.980 → 0.845 ms per token, ratio 0.862, where the bytes promised 0.57. At face
 value that is 293 GB/s at 128 rows and 193 GB/s at 256, and 293 is above what
@@ -603,6 +609,11 @@ every row), so what was wrong was the denominator and not the measurement
 ([Forward width 256, served](#forward-width-256-served)). The table is not free:
 it is the routed stage's second item, and it is why that stage did not halve
 when its bytes did.
+
+The three numbers at the start of that sentence were the narrow shape's, and
+the last of them was flat for the reason above: tiled, `MoeRoute` is 0.087 ms
+per token at 256 rows, and the stage's second item is the three expert
+launches again.
 
 Correctness on the device: `kolibri1_gemv_test` matches the FP64 dot on every
 case, now including a group of forty-eight slots compared bit for bit at pass
@@ -761,6 +772,76 @@ the probe does — and **1.10 ms of three launches that move almost nothing**: t
 384-counter memset at 5.3 µs per layer, `GateUpAct` at 5.0, `MoeFinish` at 11.7.
 Launch latency, 5.5 % of a decode step, and the first thing a fusion removes.
 
+## The router reads each operand once
+
+`RouterKernel` gave one wave one expert and let it walk every row of the
+forward, so a row of `x` was read once per expert: 256 rows over 384 experts is
+two gigabytes through the caches for half a gigaflop. That is the shape that
+made the routed stage flat per token from sixteen rows to two hundred and
+fifty-six, and it is now chosen per launch.
+
+The tiled shape covers eight rows against eight experts in a block — four waves
+of two rows held in registers, the eight gate rows staged through 8 KB of
+shared memory, the hidden dimension in tiles of 256 floats. Timed both ways over
+a fixed synthetic input — the same source built with `kRouterTiledMinRows` at
+one and then past every width the tool sweeps, one session, logits hashed, µs
+per launch (`tools/kolibri/router_hash.cpp`, built by `build_router_hash.sh`,
+device to itself):
+
+| Rows | one wave per expert | tiled | ratio |
+| ---: | ---: | ---: | ---: |
+| 1 | 29.4 | 51.0 | 0.58 |
+| 2 | 33.6 | 45.5 | 0.74 |
+| 4 | 41.9 | 45.6 | 0.92 |
+| 8 | 61.9 | 48.8 | **1.27** |
+| 16 | 106.7 | 66.5 | 1.60 |
+| 32 | 177.3 | 91.3 | 1.94 |
+| 64 | 316.0 | 140.3 | 2.25 |
+| 128 | 625.8 | 209.0 | 3.00 |
+| 256 | 1,217.2 | 374.5 | **3.25** |
+
+An earlier window of the same sweep agreed within 8 % at every width above one
+row — the tiled launch at 256 rows repeated to 0.1 % — while the one-row
+launches moved by up to 14 %, which is the noise of a 30 µs launch and not a
+difference between the shapes.
+
+**The logits of both shapes are equal at every width.** Both reduce a row
+against an expert in the same order — lane `l` over the quads l, l+32, l+64 …,
+four float chains, the narrowing to double, the four-way add, the butterfly —
+and a shared-memory tile only cuts that sequence at a fixed point, so
+re-tiling cannot move a logit: the sweep hashes all 384 logits of every width
+above and both columns agree bit for bit. The golden forward reads it the same
+way afterwards: prefill `max_abs 3.28e-3` with argmax equal, decode step
+`1.94e-3`, a 37-token prompt across a 16-row chunk exact at 0 — the same
+figures the page carried before the change.
+
+**Below eight rows the tiles lose, and occupancy is why.** At one row the
+narrow launch spreads its 3.9 MB of gate matrix over 96 blocks (384 waves,
+about nine per compute unit) and the tiled one over 48 (192 waves, about five),
+with nothing for a tile to reuse in between. The two lines cross between four
+and eight rows, so `kRouterTiledMinRows = 8`.
+
+Inside the engine — the same source built at both settings of the threshold,
+both profile switches on, 4,096 tokens at chunk 256, device to itself, mean over
+the forwards, ms per token:
+
+| | narrow | tiled | |
+| --- | ---: | ---: | --- |
+| `route` of the routed stage | 0.251 | **0.085** | 2.9× less |
+| routed stage | 1.014 | **0.845** | −17 % |
+| forward | 1.464 | **1.288** | −12 % |
+| prefill 4,096 tokens | 682 tok/s | **775 tok/s** | **+13.6 %** |
+| decode 32 tokens | 52.1 tok/s | 52.1 tok/s | unmoved |
+
+Decode is unmoved by construction: one row is below the threshold, and the two
+legs print `route` 2.66 and 2.71 ms per step for it, which is the same launch
+either way. That is also the counter the
+[decode section](#decodes-routed-stage-apart-from-the-memory-it-never-touches)
+said the ring could not give. `SelectKernel`, the gather and the counters are
+the same launches in both legs, so the 0.166 ms per token that left `route` was
+the router's own read, and what stays at 0.085 — 0.44 ms of a 256-row layer,
+against the 373 µs the kernel takes by itself — is the selection around it.
+
 ## Not measured
 
 | Cell | Status |
@@ -776,6 +857,7 @@ Launch latency, 5.5 % of a decode step, and the first thing a fusion removes.
 | Served forward width | Measured — 1.83× at 1,572 and 2.00× at 13,030 prompt tokens, decode flat, ttft halved ([Served forward width](#served-forward-width)) |
 | Whole model on one group table | Measured in one window, both builds: routed stage 2.225-2.253 → 1.103-1.189 ms/token (**1.96×**), prefill total 2.72 → 1.61 ms/token, pp8192 351.6 → 563.4 tok/s (**1.60×**), served pp13k 336.9 → 538.3 tok/s (**1.60×**), decode unchanged, golden forward exact against the scalar reference at chunk 16 and 128 ([The same change on the model, device to itself](#the-same-change-on-the-model-device-to-itself)) |
 | Routed stage split by launch | Measured, device to itself, both switches. Prefill at 128 and 256 rows — `MoeRoute` 0.269/0.261, gate 0.335/0.294, up 0.325/0.288, down 0.320/0.263, `memset` + `act` + `finish` under 0.03 ms per token — and decode, routing 2.74, three GEMVs 4.37, three small launches 1.10, of an 8.21 ms stage ([Forward width 256, served](#forward-width-256-served), [Decode's routed stage](#decodes-routed-stage-apart-from-the-memory-it-never-touches)) |
+| Router shape | Measured on this device, the same source built at both settings of `kRouterTiledMinRows`: 29.4 µs against 51.0 at one row, 61.9 against 48.8 at eight, 1,217.2 against 374.5 at 256 (**3.25×**), logits equal at every width and across the builds; in the engine `route` 0.251 → 0.085 ms per token, forward 1.464 → 1.288, prefill 682 → 775 tok/s (**+13.6 %**), decode 52.1 unmoved; golden forward `max_abs 3.28e-3` with argmax equal ([The router reads each operand once](#the-router-reads-each-operand-once)) |
 
 ## Performance items
 
@@ -795,8 +877,10 @@ Launch latency, 5.5 % of a decode step, and the first thing a fusion removes.
    decode and memory unmoved, numerics identical to the 128 build's
    ([Forward width 256, served](#forward-width-256-served)) — and it is the last
    one. The routed stage gave up 11 % of itself on bytes that halved, because
-   0.269 ms per token of it is `MoeRoute`, which walks every row and never
-   amortises; past `kMaxGroupSlots` a forward is stepped and a step re-reads.
+   0.269 ms per token of it was `MoeRoute`, which walked every row and so never
+   amortised — since re-tiled, and the stage falls with the width again
+   ([The router reads each operand once](#the-router-reads-each-operand-once));
+   past `kMaxGroupSlots` a forward is stepped and a step re-reads.
    The cost that stays on the record: `prefill_chunk_rows` is part of the
    disk-cache identity (`inference_backend.cpp:348`), so a width change
    re-prefills every stored tree once.
@@ -833,7 +917,7 @@ Launch latency, 5.5 % of a decode step, and the first thing a fusion removes.
   - **b) Routed experts** (2.4 of 6.9 GFLOP, ~90 % of the bytes) as a WMMA tile
     over per-expert padded buckets — `gemma4/kernels/rocm/moe_prefill.hip.cpp`
     is Q4_K/Q6_K → binary16 already, and `MoeRoute` emits the `counts` such a
-    `RoutedCompact` needs (`route.hip.cpp:216-220`). With every expert read once
+    `RoutedCompact` needs (`route.hip.cpp:358-365`). With every expert read once
     per ≥256-row chunk, traffic drops to 93-184 MB/token, a memory floor of
     800-1600 tok/s, and the tensor core supplies the FLOPs. This is the step that
     reaches the reference's 1,217 pp, and it inherits the accuracy review that
@@ -848,7 +932,7 @@ Launch latency, 5.5 % of a decode step, and the first thing a fusion removes.
    16 three of four in-block row groups are masked-idle and up to half the launched
    blocks do nothing (coverage is still complete). And `MoeRoute` does a
    `hipMallocAsync`/`hipFreeAsync` pair plus a single-block top-6 kernel **per
-   16-row step** (`route.hip.cpp:232`, `:330-340`) — ~25,600 of both per 8,192-token
+   16-row step** (`route.hip.cpp:546`, `:576`) — ~25,600 of both per 8,192-token
    prompt. Effect sizes not measured.
 4. **Repeated-cell measurement protocol.** `~/kolibri-stats.py` exists; the
    engine-direct harness should run n repetitions itself rather than leave it to
@@ -882,8 +966,8 @@ Launch latency, 5.5 % of a decode step, and the first thing a fusion removes.
     reference). 4.4 µs per layer, ~0.22 ms per token, and it needs no re-baseline.
   - **No counters on the decode path.** `Experts` memsets 384 counters every
     layer and `SelectKernel` `atomicAdd`s them
-    (`route.hip.cpp:221-222`), but only `GatherGroupsKernel` reads them and that
-    runs only past `kSelectRows` (`route.hip.cpp:368`, `:422`). Passing
+    (`route.hip.cpp:362-365`), but only `GatherGroupsKernel` reads them and that
+    runs only past `kSelectRows` (`route.hip.cpp:510`, `:576`). Passing
     `counts = nullptr` for a forward of at most `kSelectRows` rows deletes an
     atomic per slot and one serialized launch per layer. The ring prices it now:
     `memset=` is 0.265 ms per token of decode, 1.3 % of the step for zeroing 1.5
@@ -895,11 +979,16 @@ Launch latency, 5.5 % of a decode step, and the first thing a fusion removes.
     launches of 4.42 MB — so the larger number belongs to a build still on the
     list above. Both sit behind a golden re-check, because a split reorders a
     reduction.
-  - **The router is second, at 2.74 ms per token** — 1.7× what the isolated probe
-    charges it, because a live step does not keep the gate matrix hot across 200
-    rounds the way the probe does. 3.93 MB of F32 gate matrix per layer is ~20 µs
-    at the machine's rate, so the rest is the single-block `SelectKernel` and
-    logits nobody reads; splitting which of the two it is needs a counter the
-    ring cannot give. On the prefill side the same segment is 0.269 ms per token
-    at 128 rows and flat at 256, and it is the reason a wider forward stopped
-    paying.
+  - **The router was second, at 2.74 ms per token** — 1.7× what the isolated
+    probe charges it, because a live step does not keep the gate matrix hot
+    across 200 rounds the way the probe does. On the prefill side the same
+    segment was 0.269 ms per token at 128 rows and flat at 256, which is the
+    reason a wider forward stopped paying. Both halves of that have an answer
+    now: the counter came as a second shape of the same kernel rather than a
+    new instrument, and it says the read was the cost — tiled, prefill `route`
+    is 0.087 ms per token, and the ~0.07 ms per 256-row layer left over the
+    kernel's own time is the selection and its gather
+    ([The router reads each operand once](#the-router-reads-each-operand-once)).
+    Decode still runs the narrow shape, so its 2.74 ms stands: 3.93 MB of F32
+    gate matrix is ~20 µs at the machine's rate, and the gap is the single-block
+    `SelectKernel` plus logits nobody reads.

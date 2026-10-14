@@ -55,6 +55,31 @@ __device__ __forceinline__ float Sigmoid(float logit) {
 constexpr std::uint32_t kRouterWaves = 4;
 constexpr std::uint32_t kRouterThreads = kWave * kRouterWaves;
 
+/// Tile of the wide shape: rows a wave keeps in registers across the whole
+/// gate, and expert rows a block stages through shared memory. Together they
+/// are the reuse this kernel exists for — one expert row serves the block's
+/// four waves and both of its rows, one row of `x` serves its eight experts.
+constexpr std::uint32_t kRouterRowsPerWave = 2;
+constexpr std::uint32_t kRouterExpertsPerBlock = 8;
+/// Quads of the hidden size per shared-memory tile: 256 floats per expert row,
+/// eight kilobytes for the eight experts. Bigger would stretch the barrier and
+/// the load in front of it; smaller would re-read both operands more often.
+constexpr std::uint32_t kRouterChunkQuads = 64;
+static_assert(kRouterChunkQuads % kWave == 0,
+              "the tile has to split along the lanes of a wave");
+
+/// From this many rows the launch takes the tiled shape, below it the one wave
+/// per expert. Measured on this device over a fixed input, microseconds per
+/// launch: the narrow shape is 29.4 at one row, 33.6 at two, 41.9 at four and
+/// 61.9 at eight, the tiled shape 51.0, 45.5, 45.6 and 48.8 at the same widths.
+/// They cross between four and eight, and above it the tiled lead grows to 3.25×
+/// at 256 rows (`tools/kolibri/router_hash.cpp`, which hashes the logits of
+/// both shapes as well and finds them identical at every width — the choice is
+/// a timing question and not a numerics one). To re-measure the crossover on
+/// another device, build that tool against this file twice, once with this
+/// constant at one and once past the widest width it sweeps.
+constexpr std::uint32_t kRouterTiledMinRows = 8;
+
 /// One wave per expert: lane l reads the float4s of router[e] at l + 32 i, so
 /// a wavefront touches 512 contiguous bytes, and dots them with the same slice
 /// of every row of x.
@@ -64,10 +89,17 @@ constexpr std::uint32_t kRouterThreads = kWave * kRouterWaves;
 /// lane, which is what limits the waves in flight against the memory latency
 /// the same kernel depends on; the re-read of a 10 KB row lands in the CU's own
 /// cache instead and costs no bandwidth a row of x does not cost anyway.
+///
+/// For one row that is the whole story: there is nothing to reuse, and all that
+/// is left is covering the latency of a 3.9 MB read. This shape spreads it over
+/// 96 blocks — 384 waves, about nine on a compute unit — where the tiled one
+/// below brings 192 waves, about five. At one row that difference is the whole
+/// cost: 29.4 µs here against 51.0 there.
 __global__ void __launch_bounds__(kRouterThreads)
-RouterKernel(const float* __restrict__ x, const float* __restrict__ router,
-             float* __restrict__ logits, std::uint32_t rows,
-             std::uint32_t hidden, std::uint32_t experts) {
+RouterKernelNarrow(const float* __restrict__ x,
+                   const float* __restrict__ router,
+                   float* __restrict__ logits, std::uint32_t rows,
+                   std::uint32_t hidden, std::uint32_t experts) {
   const std::uint32_t lane = threadIdx.x % kWave;
   const std::uint32_t e = blockIdx.x * kRouterWaves + threadIdx.x / kWave;
   // A wave past the last expert leaves rather than waits: this kernel has no
@@ -99,6 +131,96 @@ RouterKernel(const float* __restrict__ x, const float* __restrict__ router,
     if (lane == 0) {
       logits[static_cast<std::size_t>(r) * experts + e] =
           static_cast<float>(acc);
+    }
+  }
+}
+
+/// A block covers eight rows against eight experts, its four waves two rows
+/// each, and the hidden dimension in tiles of `kRouterChunkQuads` quads.
+///
+/// The shape above reads a row of `x` once per expert: at 256 rows over 384
+/// experts that is two gigabytes through the caches for half a gigaflop, 4.8 µs
+/// per row, and the reason `MoeRoute` never amortised with the width of a
+/// forward — a token inside 256 paid the same routing as a token alone. Here
+/// a block reads each operand once per tile instead of once per pair, which is
+/// 374 µs at 256 rows against 1.22 ms: 3.25×.
+///
+/// The arithmetic per (row, expert) is the arithmetic of the shape above:
+/// lane l reduces the quads l, l+32, l+64 … of a row against the same quads of
+/// an expert, in four accumulators, in quad order. A shared-memory tile only
+/// cuts that sequence at a fixed point, so both the sequence and its order
+/// survive; after it comes the same narrowing to double, the same four-way add
+/// and the same butterfly. Re-tiling therefore cannot move a logit by one bit,
+/// and `tools/kolibri/router_hash.cpp` hashes every width of it over a fixed
+/// input before this file changes.
+__global__ void __launch_bounds__(kRouterThreads)
+RouterKernelTiled(const float* __restrict__ x, const float* __restrict__ router,
+                  float* __restrict__ logits, std::uint32_t rows,
+                  std::uint32_t hidden, std::uint32_t experts) {
+  __shared__ float4 w_tile[kRouterExpertsPerBlock][kRouterChunkQuads];
+  const std::uint32_t lane = threadIdx.x % kWave;
+  const std::uint32_t wave = threadIdx.x / kWave;
+  const std::uint32_t quads = hidden / 4;
+  const std::uint32_t r0 =
+      blockIdx.x * (kRouterWaves * kRouterRowsPerWave) +
+      wave * kRouterRowsPerWave;
+  const std::uint32_t e0 = blockIdx.y * kRouterExpertsPerBlock;
+  const float4* const xr = reinterpret_cast<const float4*>(x);
+  const float4* const wr = reinterpret_cast<const float4*>(router);
+  const float4 zero = make_float4(0.0F, 0.0F, 0.0F, 0.0F);
+
+  float acc[kRouterRowsPerWave][kRouterExpertsPerBlock][4] = {};
+
+  for (std::uint32_t chunk = 0; chunk * kRouterChunkQuads < quads; ++chunk) {
+    const std::uint32_t base = chunk * kRouterChunkQuads;
+    for (std::uint32_t i = threadIdx.x;
+         i < kRouterExpertsPerBlock * kRouterChunkQuads; i += kRouterThreads) {
+      const std::uint32_t e = i / kRouterChunkQuads;
+      const std::uint32_t q = i % kRouterChunkQuads;
+      const std::uint32_t gq = base + q;
+      w_tile[e][q] = (e0 + e < experts && gq < quads)
+                         ? wr[static_cast<std::size_t>(e0 + e) * quads + gq]
+                         : zero;
+    }
+    float4 xv[kRouterRowsPerWave][kRouterChunkQuads / kWave];
+    for (std::uint32_t r = 0; r < kRouterRowsPerWave; ++r) {
+      const std::uint32_t row = r0 + r;
+      for (std::uint32_t j = 0; j < kRouterChunkQuads / kWave; ++j) {
+        const std::uint32_t gq = base + j * kWave + lane;
+        xv[r][j] = (row < rows && gq < quads)
+                       ? xr[static_cast<std::size_t>(row) * quads + gq]
+                       : zero;
+      }
+    }
+    __syncthreads();
+    for (std::uint32_t j = 0; j < kRouterChunkQuads / kWave; ++j) {
+      const std::uint32_t q = j * kWave + lane;
+      for (std::uint32_t e = 0; e < kRouterExpertsPerBlock; ++e) {
+        const float4 w = w_tile[e][q];
+        for (std::uint32_t r = 0; r < kRouterRowsPerWave; ++r) {
+          const float4 v = xv[r][j];
+          acc[r][e][0] = __builtin_fmaf(w.x, v.x, acc[r][e][0]);
+          acc[r][e][1] = __builtin_fmaf(w.y, v.y, acc[r][e][1]);
+          acc[r][e][2] = __builtin_fmaf(w.z, v.z, acc[r][e][2]);
+          acc[r][e][3] = __builtin_fmaf(w.w, v.w, acc[r][e][3]);
+        }
+      }
+    }
+    __syncthreads();
+  }
+
+  for (std::uint32_t e = 0; e < kRouterExpertsPerBlock; ++e) {
+    for (std::uint32_t r = 0; r < kRouterRowsPerWave; ++r) {
+      double a = ((static_cast<double>(acc[r][e][0]) +
+                   static_cast<double>(acc[r][e][1])) +
+                  (static_cast<double>(acc[r][e][2]) +
+                   static_cast<double>(acc[r][e][3])));
+      a = WaveSum(a);
+      const std::uint32_t row = r0 + r;
+      if (lane == 0 && row < rows && e0 + e < experts) {
+        logits[static_cast<std::size_t>(row) * experts + e0 + e] =
+            static_cast<float>(a);
+      }
     }
   }
 }
@@ -407,9 +529,21 @@ void MoeRoute(const MoeRouteArgs& args, hipStream_t stream) {
         stream));
     logits = scratch;
   }
-  const dim3 router_grid((args.experts + kRouterWaves - 1) / kRouterWaves);
-  RouterKernel<<<router_grid, kRouterThreads, 0, stream>>>(
-      args.x, args.router, logits, args.rows, args.hidden, args.experts);
+  // The wide forward takes the tiles, a narrow launch the wave per expert. The
+  // shapes differ only in where the operands are read from, so the same rows
+  // produce the same logits either way.
+  if (args.rows >= kRouterTiledMinRows) {
+    const dim3 router_grid(
+        (args.rows + kRouterWaves * kRouterRowsPerWave - 1) /
+            (kRouterWaves * kRouterRowsPerWave),
+        (args.experts + kRouterExpertsPerBlock - 1) / kRouterExpertsPerBlock);
+    RouterKernelTiled<<<router_grid, kRouterThreads, 0, stream>>>(
+        args.x, args.router, logits, args.rows, args.hidden, args.experts);
+  } else {
+    const dim3 router_grid((args.experts + kRouterWaves - 1) / kRouterWaves);
+    RouterKernelNarrow<<<router_grid, kRouterThreads, 0, stream>>>(
+        args.x, args.router, logits, args.rows, args.hidden, args.experts);
+  }
   // One block of rows each; the table of a single block is built inside it,
   // and the one of several blocks by the gather over the published ids.
   const dim3 select_grid((args.rows + kSelectRows - 1) / kSelectRows);

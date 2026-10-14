@@ -498,6 +498,9 @@
   "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_122RoutedHalfKQuantKernelILNS2_12ExpertFormatE2ELi96ELb1ELb1EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
    "max_scratch": 8
   },
+  "_ZN4gufo6models8kolibri14rocm12_GLOBAL__N_117RouterKernelTiledEPKfS5_Pfjjj": {
+   "max_scratch": 32
+  },
   "_ZN4gufo6models9qwen3_asr3hip12_GLOBAL__N_120TextQkNormRoPEKernelILj128EEEvPfS5_S5_PKfS7_mjjjjffS5_S5_jj": {
    "max_scratch": 8
   },
