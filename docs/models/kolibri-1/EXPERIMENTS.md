@@ -235,7 +235,11 @@ the released Q4_K_M unless stated.
 Two findings from qualifying the upstream merge, recorded with the measurements
 that came out of `kolibri1_device_forward_test` on M1 (`gfx1151`, Q4_K_M, tree
 `b11d8084`, prompt of 37 tokens, chunk of 16). Neither is caused by the merge:
-the shapes involved are this engine's own. Both are unresolved.
+the shapes involved are this engine's own. The hunt after the first one
+continued on 2026-10-15 on the tree after `b11d8084`; the sub-bullets under it
+are that day's numbers. Neither is resolved. The first now has a suspect — the
+userspace ROCm the engine is run against — and no containment, and the attempts
+at one say something about the defect.
 
 - **A chunk split moves the logits about a third of the time; the one-piece
   append never moves.** Thirteen comparisons: five `FAIL`s, `max_abs` 0.632,
@@ -245,15 +249,13 @@ the shapes involved are this engine's own. Both are unresolved.
   differed in seven, including two runs where `split` happened to agree with
   `whole` and still disagreed with itself. So the two-piece append is the
   unstable side, and its instability is not visible when it agrees by luck.
-  - What the two shapes differ in, at the forward that produces the answer, is
-    nothing but timing. `Append(37)` runs 16, 16, 5 rows; `Append(16)` then
-    `Append(21)` runs 16, 16, 5 rows too — same batches, same cache writes. The
-    only extra work is the logits row the first append computes at its first
-    chunk (`logit_rows = {15}`), which writes `logit_x_` and `logits_`, and
-    those are read only by the device-to-host copy. Arithmetic cannot depend on
-    them, so the difference has to come from when kernels run, not what is in
-    the arena.
-  - Poisoning says the same. Filling the whole scratch arena (4,638,976 B, from
+  What follows is the hunt for why, on the same box, artifact and shapes.
+  - **The two shapes do not differ in data.** `Append(37)` runs forwards of 16,
+    16, 5 rows; `Append(16)` then `Append(21)` runs 16, 16, 5 rows too — same
+    batches, same cache writes, same scratch. The head no longer stages its row
+    either (`logit_x_` is gone; `Project` reads the frontier row of `h_` in
+    place), so the split's only extra work is timing and one logits copy.
+    Poisoning says the same: filling the whole scratch arena (4,638,976 B, from
     a trace knob that prints the layout: `h=163840 attn=786432 shared=1441792
     moe_gate=1605632 moe_act=1998848 moe_out=2195456 moe_groups=3181056
     dense_groups=3577600 logit_x=3594496 logits=3604736 partials=4116736
@@ -261,27 +263,157 @@ the shapes involved are this engine's own. Both are unresolved.
     the cache, left the rate where it was — one failure in four and two in four
     against one in three unpoisoned. A read of memory the run did not write
     would have stopped, because poisoned content is identical for both shapes.
-    It did not, so this is not stale scratch and not stale cache.
-  - `HIP_LAUNCH_BLOCKING=1` — every launch completing before the next is
-    enqueued — passed four of four in the same conditions that failed a run in
-    three without it. Everything in the engine launches on the executor's own
-    non-blocking stream, checked across every `.hip.cpp` of the model and the
-    shared quantised GEMM; there is no second stream to blame, so the overlap
-    that matters is subtler than a wrong stream argument.
-  - Ruled out beforehand on shape grounds: group truncation (`kMaxGroupSlots`
-    is 256, sixteen rows can fill at most sixteen slots of one expert) and
-    pass-width summation order (`gemv_test` drives a group to forty-eight slots
-    and demands bit equality at every pass width, and passes).
-  - Next, in order. (1) A positive control on a smaller budget: a temporary
-    `hipStreamSynchronize` after each stage of `Forward` — norm, QKV, attention,
-    MoE, projection — bisected to the pair of stages that must not overlap.
-    (2) `compute-sanitizer --tool racecheck` is not installed in the build
-    container, so either it goes in the image or the hunt stays manual; the
-    tiny fixture would make a racecheck run cheap but its shapes are not these
-    shapes, so a clean result there would prove little. (3) Whether the served
-    path is harmed: the winner never moved in thirteen samples, and a fixed
-    prompt scored at two different chunk offsets (`tools/kolibri/serve_check.py`)
-    is the cheap way to turn "the winner held" into a number.
+  - **An amplifier turns it from a third to an always.**
+    `GUFO_KOLIBRI_LOGITS_EACH_CHUNK=1` asks for the frontier row after every
+    chunk of a split append instead of only the last, so a vocabulary head
+    (128,256 × 2,560, the largest single read of the run) lands at forward
+    boundaries instead of once per append. The split then drifted in 6 of 8 and
+    8 of 8 trials in two of three processes at a sweep of six to eight, while
+    the one-piece append stayed bit-identical in 0 of 8 and 0 of 24. The rate
+    tracks what runs at a forward boundary; it does not track what is stored.
+  - **Where the wait sits decides, and one place is the worst of everything.**
+    Masks re-run one per fresh process under the amplifier, six trials each, host
+    userspace, engine with no wait compiled in. Mask 1 — one wait after the
+    embedding, once per forward — drifted `6/6`, `6/6`, `6/6` on all three
+    columns. Mask 2 (fifty waits, after qkv) and mask 8 (fifty, after the output
+    branch) were `0/6` clean, mask 32 (fifty, after the routed experts) `1/6`,
+    mask 64 (one wait after the logits head) `0/6`, and mask 0 (no waits, five
+    processes) two trials in five. Waits per forward is therefore not the
+    variable: one clean, one catastrophic, fifty clean. And the one-piece column,
+    bit-stable in every other configuration measured here, drifts 6 of 6 under
+    mask 1 — the sharpest datum in this entry: **one `hipStreamSynchronize` in one
+    place makes every shape nondeterministic, and one in another place makes it
+    stop.**
+  - **A forward starts from identical bytes and ends different.** Recording
+    only the embedding and the output norm (`GUFO_KOLIBRI_STAGE_SNAP=129`,
+    device-to-device copies only, no wait) put the first difference, in every
+    sick process, at **the normed stream at the output norm of a forward whose
+    embedding output matched bit for bit**, magnitudes 2.2 to 32.5 on a stream
+    whose elements are order 1. The forward's inputs are its embedding, the
+    weights, and the cache rows the earlier forward wrote — and that earlier
+    forward's own normed stream matched, so the bytes it wrote are the bytes
+    both shapes read. Fifty layers computed different numbers from the same
+    inputs, and `h_` shows it, not a wrong token id.
+  - **Recording the whole layer under the worst mask names the stage.** One
+    instrument now does both: `Probe` waits first and copies after, so a forced
+    schedule can be recorded (`GUFO_KOLIBRI_SNAP_SYNC` feeds the mask to the
+    recording phase). With every boundary of every forward recorded, mask 1, the
+    amplifier and the host runtime, three processes of six trials each moved in
+    four of eighteen comparisons, in two of the three processes - and every one
+    of the four moved at the same place: **forward 1, after the routed experts**
+    (layer 27 three times, layer 29 once; magnitudes 0.29, 0.32, 1.28, 1.48).
+    That forward's qkv, attention, output branch and shared expert were
+    bit-identical at their boundaries, and forward 0 was bit-identical at every
+    boundary of all fifty layers in all eighteen trials. The SDK arm of the same
+    configuration: 0 of 6. Recording is not the free instrument it was hoped for
+    - mask 1 alone moved 6 of 6, this moved 4 of 18 - localising without
+    reproducing at will.
+  - **The stage it names has no ordering hazard to give.** The audit of the locus
+    came back empty, which is worth keeping because it closes the easy theories:
+    there is one stream, so the six launches of a layer cannot overlap; the group
+    table is deterministic (experts increasing, a group's slots increasing, no
+    empty group) and the only atomic in the model, `route.hip.cpp:344`, bumps an
+    integer count whose return value is thrown away, so no slot index and no
+    summation order depends on block order; `MoeFinish` sums
+    `shared[r] + sum_j weights[r][j] * routed[r*used + j]`, row-major, so the
+    float order belongs to the row and not to the grouping; and the grouped
+    projection's own contract is that "the arithmetic of a slot must not depend
+    on which other slots share the launch with it" (`moe.hpp:25-28`), each slot
+    written once. So there is no racing pair of launches to name: identical
+    inputs, identical launch configuration and identical summation order produced
+    different numbers, and the only thing measured to move that is the userspace
+    ROCm under the engine. That the model's widest scatter of small weight tiles
+    is where a difference first surfaces is a shape argument, not a finding.
+  - **Not an overrun.** `GUFO_KOLIBRI_GUARDS=1` places 256 B after every scratch
+    buffer and checks them on the host where the logits are copied back. Eight
+    of eight trials drifted and no band ever reported a write, so nothing is
+    being written outside the buffer it belongs to. Ruled out beforehand on
+    shape grounds: group truncation (`kMaxGroupSlots` is 256, sixteen rows fill
+    at most sixteen slots of one expert) and pass-width summation order
+    (`gemv_test` drives a group to forty-eight slots and demands bit equality at
+    every pass width, and passes).
+  - **Three things do reliably remove it, and none of them is something to serve
+    with: waits inside the layer, `HIP_LAUNCH_BLOCKING`, and recording every
+    boundary with nothing else forced.** Recording every boundary of every layer
+    (`GUFO_KOLIBRI_STAGE_SNAP=-1`, 253 device-to-device copies and about 24 MB per
+    forward) is clean in four of four fresh processes: 0 of 6 sweep comparisons
+    and 0 of 8 snapshot comparisons, 23,964,160 floats each. Put the worst
+    placement's wait back underneath that same recording (`SNAP_SYNC=1`) and 4 of
+    18 comparisons move again: recording neither creates the drift nor keeps the
+    schedule that invites it out of the build.
+    `HIP_LAUNCH_BLOCKING=1`, every launch completing before the next is enqueued,
+    is clean in four of four. The guard run's device-to-host copy and its wait sit
+    at the append boundary and change nothing, still 8 of 8.
+    `GPU_MAX_HW_QUEUES=1` and `HSA_ENABLE_SDMA=0` change nothing, and a 1,600
+    round free-run of 300 chained GEMV and layernorm launches in a standalone HIP
+    probe is bit-exact, so a long queue of ordinary kernels is not enough by
+    itself.
+  - **The containment that was tried, and why it is gone.** A wait after the
+    logits head, at the same stream position as mask 64, was compiled into
+    `Forward` behind `GUFO_KOLIBRI_FORWARD_SYNC` and run against itself
+    interleaved, three pairs in one window: with the wait the split drifted 4 of 4
+    and 2 of 4 and the one-piece column drifted 4 of 4 and 2 of 4; with the wait
+    off the same three processes gave one-piece 0 of 4 in all three. Against the
+    SDK userspace with the wait on, both processes came out bit-identical. Mask
+    64, which syncs at that same place through the diagnostic hook, is 0 of 6 in a
+    fresh process. Same position in the stream, opposite results — so this
+    contrast cannot be reproduced from the engine's side either, and the wait and
+    its switch are reverted out. The wait had cost nothing (prefill 247.9 against
+    248.5 tok/s, decode 59.19 against 59.03 at a chunk of sixteen; a wait per
+    *layer* is not free: 227.3 and 29.14 after qkv), which is why it was worth the
+    try.
+  - **What the earlier reading got wrong was the inference, not the sweep.**
+    Masks 2 and 8 stay clean when run one per process, so the sweep's ordering was
+    not the problem. What was wrong was concluding from "a wait here and there
+    makes it go away, a deep queue makes it come back" that queue depth was the
+    variable: mask 1 caps the queue at one forward exactly like mask 64 and drifts
+    six of six. Placement decides and depth does not explain it. The suppression
+    observations that hold are `HIP_LAUNCH_BLOCKING=1`, recording every boundary,
+    and the per-layer waits — none of them a configuration to serve on.
+  - **Where the exposed shape comes from.** The runner stops a prefill "exactly
+    on the next shared-prefix boundary so it can be persisted" and at
+    checkpoints (`src/cli/serve/text_model_runner.cpp:1351-1368`), and each stop
+    is one `Session::Append` (`src/cli/serve/inference_backend.cpp:4128-4153`).
+    A prompt whose prefix the cache can share is therefore fed in pieces, which
+    is the shape that drifted. Decode appends one row and each `Append` already
+    ended with a logits copy and a wait, so decode was never in it. The earlier
+    note here said every prompt over sixteen tokens crosses a boundary and is on
+    the exposed path; that was wrong — chunks *inside* one append are the
+    one-piece shape, and they were bit-identical in every trial measured.
+  - **The stack the measurement was made on, because it is not one stack.** The
+    binary is built in `gufo-buildenv` against the pinned SDK mounted at
+    `/opt/rocm` (`~/rocm-sdk`, `libamdhip64.so.7.15.26333`) and has been run on
+    the M1 host's userspace (`libamdhip64.so.7.2.70201`); the served
+    `gufo-runtime` image ships CLR 7.2.3 (`libamdhip64.so.7.2.53211`). Kernel
+    driver 7.2.0 on both.
+  - **Changing only the userspace runtime changes the result.** Same binary,
+    same shapes, same amplifier, no stage waits, on M1, with nothing but
+    `LD_LIBRARY_PATH` different: against the SDK the binary was built with
+    (`~/rocm-sdk/lib`, `libamdhip64.so.7.15.26333`) every comparison came out
+    bit-identical — 0 of 12 across three processes, and 0 of 8 across an earlier
+    pair, over all three columns (`split` against `whole`, `whole` repeated,
+    `split` repeated) with the oracle check passing in all five. Against the
+    host's userspace (`/opt/rocm/lib`, `libamdhip64.so.7.2.70201`) the same three
+    processes drifted in 4 of 12, in two of the three. `ldd` says the two arms
+    load the two libraries; the kernel driver, the artifact and the order are the
+    same. This is the first factor that has separated the runs cleanly.
+  - **The separation survived the cleanup, and the dev loop is pinned to it.**
+    After the stage hash, the residual dump and the routed paint came out of the
+    executor and the binary was rebuilt, eight fresh processes of the plain
+    amplified check (five against the SDK, three against the host) gave: SDK 0 of
+    5, `chunked prefill` bit-identical in every one (`max_abs=0`); host 1 of 3
+    drifting, `max_abs=0.900824` with the argmax unchanged. Both arms still
+    passed the embedding, gather, prefill and decode checks, so this is not a
+    story about the checks being wrong on the host - it is one shape, some of the
+    time. `tools/kolibri/m1.sh` now runs every host-side check against
+    `/home/arnomatic/rocm-sdk/lib`, the release the compile used, and
+    `KOLIBRI_ROCM_LIB=/opt/rocm/lib` is how the host arm is still produced.
+  - **The served forward width is exposed too.** The server runs
+    `kKolibriPrefillChunk = 256` (`inference_backend.cpp:3903`) against the
+    engine default of 16 (`engine.hpp:30`). At 256, host userspace, no waits:
+    three processes gave 0, 3 of 4 and 0 trials drifting, worst 3.5952 — the same
+    signature, and the one-piece column clean as ever. A chunk of 32 gave 0 of 8.
+    Width moves the rate, not the exposure.
 - **The scalar reference and the device disagree by 5.07 on a 37-token prompt
   and agree to 0.003 on a 5-token one.** In a run where both device shapes were
   bit-identical, each was 5.07351 (`max_abs`) from `Reference::Forward` at the
@@ -297,8 +429,24 @@ the shapes involved are this engine's own. Both are unresolved.
   which of the two to believe. Until then these documents claim reference
   parity at short prompts only.
 - Both measurements need the 45 GiB artifact on the device and cannot run while
-  the model is served, which is why they stopped at the numbers above. The
-  reproducer stayed in the test behind `GUFO_KOLIBRI_CHUNK_BOUNDARY_CHECK=1`,
-  with the reference comparison behind `GUFO_KOLIBRI_LONG_ORACLE=1` (it is
-  minutes of CPU); the poison and trace knobs that produced the layout were
-  diagnostic scaffolding and are gone.
+  the model is served. The reproducer is
+  `GUFO_KOLIBRI_CHUNK_BOUNDARY_CHECK=1 kolibri1_device_forward_test`, opt-in
+  because it fails at random, and `GUFO_KOLIBRI_LOGITS_EACH_CHUNK=1` turns it
+  from occasional to every trial (`GUFO_KOLIBRI_CHUNK_SWEEP=8` is eight
+  comparisons per process). The stage waits are `GUFO_KOLIBRI_SYNC_STAGES`, the
+  boundary recordings `GUFO_KOLIBRI_STAGE_SNAP` — the test derives the number of
+  records a forward makes from the same mask — the guard bands
+  `GUFO_KOLIBRI_GUARDS`. The reference comparison stays behind
+  `GUFO_KOLIBRI_LONG_ORACLE=1`, which is minutes of CPU. A recording run can
+  carry stage waits anyway - `GUFO_KOLIBRI_SNAP_SYNC` names the mask a
+  `SNAP_DIFF` run applies - because recording every boundary is itself a
+  perturbation and the point of recording is to see a schedule that fails. The
+  poison and trace knobs that produced the arena layout were diagnostic
+  scaffolding and are gone, and so are the host-side stage hash (`STAGE_HASH`,
+  `STAGE_DIFF`), the per-forward residual dump (`DUMP_HIDDEN`, `HIDDEN_DIFF`),
+  the painted routed slots (`PROBE_ROUTED`) and `GUFO_KOLIBRI_FORWARD_SYNC`,
+  which left with the containment that failed. The ring of `STAGE_SNAP` answers
+  what all of those asked, and asks it without waiting, which is the only way
+  the answer means anything. One rule for the sweep, learned the hard way: masks
+  are only comparable to masks taken the same way, and `GUFO_KOLIBRI_CHUNK_MASKS`
+  runs its list in one process, so a mask that matters gets a process of its own.

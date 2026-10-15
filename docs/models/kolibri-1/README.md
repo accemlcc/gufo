@@ -98,6 +98,12 @@ those numbers.
 `tools/kolibri/m1.sh` builds inside the ROCm container on the M1 box and ships
 the artifact back; everything below runs there.
 
+Host-side runs (`model-test`, `bench`) load the ROCm release the build container
+compiled against - `libamdhip64` 7.15 under `~/rocm-sdk/lib` - because running
+the same binary under the host's own 7.2 changes what the device schedule does
+([EXPERIMENTS](EXPERIMENTS.md), entry 2026-10-15). `KOLIBRI_ROCM_LIB` overrides
+it, which is how a run against the host runtime is still made.
+
 ```sh
 # scalar oracle logits (CPU, no ROCm needed). The prompts file holds token ids,
 # one prompt per line; with no file they come from the command line.
@@ -122,9 +128,12 @@ artifacts/kolibri/throughput <model.gguf> [pp] [tg] [chunk] [max_context]
 - **Decode** packs rows to `max_rows` slots in one launch: a slot holds the
   query projections (the 6144-wide block spans 12 warps so each head's norm has
   one owner), then attention reads the cache, then the router and the grouped
-  expert projection, shared expert last. Attention, the shared expert and the
-  down projections overlap on their own streams, and the host fetch of the logits
-  waits on the event that closes all of them.
+  expert projection, shared expert before routed. Everything launches on the
+  executor's one non-blocking stream — there is no second stream to overlap on —
+  and the host fetch of the logits is a stream-ordered copy with a wait. No
+  wait placed between two forwards has contained the drift recorded in
+  [EXPERIMENTS](EXPERIMENTS.md), and no ordering defect turned up under it: the
+  factor that separates the runs cleanly is the userspace ROCm a run loads.
 - **The grouped projection** bins rows by expert and runs the experts in passes
   of eight slots (`kSlots`). `bin[8]{expert,rows,base}` lives in constant memory.
   With the 6-of-384 routing of this model, a pass almost never repeats an

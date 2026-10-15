@@ -49,6 +49,14 @@ struct KvCache {
   std::vector<std::uint16_t*> v;
 };
 
+/// DIAGNOSTIC ONLY: a band of bytes that no scratch buffer owns, behind one
+/// named buffer of the arena. See `Executor::CheckGuards`.
+struct Band {
+  char* at;
+  std::size_t bytes;
+  const char* name;
+};
+
 /// Runs the Kolibri 1 graph on device-resident weights. Scratch is shared by
 /// every session of one executor and calls are serialized on one stream.
 class Executor {
@@ -90,6 +98,28 @@ public:
   [[nodiscard]] std::uint32_t ring() const noexcept { return ring_; }
   [[nodiscard]] const DeviceModel& model() const noexcept { return model_; }
 
+  /// DIAGNOSTIC ONLY, same race: the residual copied to a device ring at every
+  /// stage boundary. A host synchronization at every boundary hides the race,
+  /// so the ring records with device-to-device copies only and the readback
+  /// happens once the sequence is over.
+  [[nodiscard]] const float* snapshot_ring() const noexcept {
+    return snapshot_;
+  }
+  [[nodiscard]] std::size_t snapshot_count() const noexcept {
+    return snapshot_count_;
+  }
+  [[nodiscard]] std::size_t snapshot_stride() const noexcept {
+    return snapshot_stride_;
+  }
+  void clear_snapshots() noexcept {
+    snapshot_count_ = 0;
+    snapshot_bits_.clear();
+  }
+  /// Which stage boundary each slot of the ring was taken at, in the same bit
+  /// pattern the probes use.
+  [[nodiscard]] const std::vector<int>& snapshot_bits() const noexcept {
+    return snapshot_bits_;
+  }
 private:
   /// y[rows][w.rows] = x[rows][w.cols] . W^T. Up to `kProjectRows` this is the
   /// batch-invariant GEMV with its prebuilt single-group table; a wider block
@@ -97,6 +127,11 @@ private:
   /// See `MatrixCoreProjection` in the definition for what decides.
   void Project(const DeviceTensor& w, const float* x, std::uint32_t rows,
                float* y);
+  /// DIAGNOSTIC ONLY: with GUFO_KOLIBRI_GUARDS set, reads the whole scratch
+  /// arena back and reports every band a kernel wrote into. It is called where
+  /// the executor already waits for the stream, so it costs no wait of its own
+  /// and the schedule under test stays the one that fails.
+  void CheckGuards() const;
   /// The routed experts of one layer over the rows of `h`, writing
   /// count * experts_used rows of expert output into `routed` and their routing
   /// weights into `weights`.
@@ -112,6 +147,13 @@ private:
   std::uint32_t max_context_;
   std::uint32_t ring_;
   hipStream_t stream_{nullptr};
+  float* snapshot_{nullptr};       // DIAGNOSTIC ONLY
+  std::size_t snapshot_count_{0};  // DIAGNOSTIC ONLY
+  std::size_t snapshot_stride_{0}; // DIAGNOSTIC ONLY
+  std::vector<int> snapshot_bits_;  // DIAGNOSTIC ONLY
+  std::vector<Band> bands_;               // DIAGNOSTIC ONLY
+  std::size_t arena_bytes_{0};            // DIAGNOSTIC ONLY
+  mutable std::vector<char> seen_arena_;  // DIAGNOSTIC ONLY
 
   /// Off unless GUFO_KOLIBRI_ROCM_PREFILL_STAGE_PROFILE is set, which is the
   /// same shape as the deepseek runtime's stage-profile switches. When on,
@@ -166,7 +208,6 @@ private:
   /// reads, so one buffer serves every layer of a forward.
   void* act_q8_{nullptr};
   std::size_t act_q8_bytes_{0};
-  float* logit_x_{nullptr};
   float* partials_{nullptr};
 };
 

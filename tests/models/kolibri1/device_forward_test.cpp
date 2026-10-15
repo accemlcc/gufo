@@ -21,9 +21,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "src/core/hip/hip_utils.hpp"
@@ -280,7 +282,205 @@ int main() {
                                    session->logits().end());
     std::cout << "prefill of " << longer.size() << " tokens across a chunk of "
               << chunk << "\n";
+
     Report("chunked prefill", Compare(whole, split), 0.02, 0.002);
+
+    // DIAGNOSTIC ONLY, for the bisect of the open race: sweep the executor's
+    // stage-sync mask and count how often the two-piece append moves away from
+    // the one-piece answer computed under the same mask. Masks: 0 nothing, 127
+    // every stage, and each single stage dropped from all of them. The drop
+    // that brings the drift back names the boundary whose sync was hiding the
+    // overlap.
+    if (const char* sweep = std::getenv("GUFO_KOLIBRI_CHUNK_SWEEP");
+        sweep != nullptr) {
+      const int iterations = std::atoi(sweep);
+      const auto Once = [&](const bool halves) {
+        session->Reset();
+        if (halves) {
+          session->Append({longer.data(), chunk});
+          session->Append({longer.data() + chunk, longer.size() - chunk});
+        } else {
+          session->Append(longer);
+        }
+        return std::vector<float>(session->logits().begin(),
+                                  session->logits().end());
+      };
+      std::vector<int> masks{0, 127, 126, 125, 123, 119, 111, 95, 63, 31, 127};
+      if (const char* list = std::getenv("GUFO_KOLIBRI_CHUNK_MASKS");
+          list != nullptr) {
+        masks.clear();
+        std::string_view rest(list);
+        while (!rest.empty()) {
+          const std::size_t comma = rest.find(',');
+          masks.push_back(
+              std::atoi(std::string(rest.substr(0, comma)).c_str()));
+          rest = comma == std::string_view::npos ? std::string_view{}
+                                                 : rest.substr(comma + 1);
+        }
+      }
+      for (const int mask : masks) {
+        char name[8];
+        std::snprintf(name, sizeof name, "%d", mask);
+        setenv("GUFO_KOLIBRI_SYNC_STAGES", name, 1);
+        const std::vector<float> base = Once(false);
+        int differs = 0;
+        int same_shape = 0;
+        int split_again = 0;
+        float worst = 0.0F;
+        float worst_again = 0.0F;
+        float worst_split_again = 0.0F;
+        // A two-piece append, a further one-piece append and another two-piece
+        // append per trial. The first count is the drift the report is about;
+        // the second says whether the one-piece shape repeats bit for bit; the
+        // third says the same about the shape that drifts, which is what tells
+        // a run-to-run race from a shape that settles on another answer.
+        std::vector<float> previous = Once(true);
+        for (int i = 0; i < iterations; ++i) {
+          const std::vector<float> split = Once(true);
+          const float drift = Compare(base, split).max_abs;
+          if (drift > 0.02F) {
+            ++differs;
+          }
+          worst = std::max(worst, drift);
+          const float again = Compare(base, Once(false)).max_abs;
+          if (again > 0.02F) {
+            ++same_shape;
+          }
+          worst_again = std::max(worst_again, again);
+          const float repeated = Compare(previous, split).max_abs;
+          if (repeated > 0.02F) {
+            ++split_again;
+          }
+          worst_split_again = std::max(worst_split_again, repeated);
+          previous = split;
+        }
+        std::cout << "mask " << mask << ": split differs " << differs << "/"
+                  << iterations << " worst " << worst << "; one-piece differs "
+                  << same_shape << "/" << iterations << " worst " << worst_again
+                  << "; split against itself " << split_again << "/"
+                  << iterations << " worst " << worst_split_again << "\n";
+      }
+      setenv("GUFO_KOLIBRI_SYNC_STAGES", "0", 1);
+    }
+    // DIAGNOSTIC ONLY: the one-piece append against the two-piece append, on
+    // residual snapshots the device took with device-to-device copies only.
+    // Every other view of this race waits for the stream somewhere inside a
+    // forward and the race does not survive the wait. GUFO_KOLIBRI_STAGE_SNAP
+    // says which boundaries are recorded, so a run can record one stage of a
+    // layer and still keep the schedule that fails.
+    if (const char* snap_env = std::getenv("GUFO_KOLIBRI_SNAP_DIFF");
+        snap_env != nullptr) {
+      auto* exec = model->executor().get();
+      const std::size_t d = exec->model().config().hidden_size;
+      const int trials = std::max(1, std::atoi(snap_env));
+      // Recording every boundary is itself a perturbation, so the phase can be
+      // run under a stage-sync mask: GUFO_KOLIBRI_SNAP_SYNC names the waits of
+      // GUFO_KOLIBRI_SYNC_STAGES that a recording run should carry, which is
+      // how a configuration that is known to drift can still be observed.
+      const std::string snap_sync = [] {
+        const char* value = std::getenv("GUFO_KOLIBRI_SNAP_SYNC");
+        return value != nullptr ? std::string(value) : std::string("0");
+      }();
+      setenv("GUFO_KOLIBRI_SYNC_STAGES", snap_sync.c_str(), 1);
+      const auto Run = [&](const bool halves) {
+        exec->clear_snapshots();
+        session->Reset();
+        if (halves) {
+          session->Append({longer.data(), chunk});
+          session->Append({longer.data() + chunk, longer.size() - chunk});
+        } else {
+          session->Append(longer);
+        }
+        std::vector<float> out(exec->snapshot_count() *
+                               exec->snapshot_stride());
+        HIP_CHECK(hipMemcpy(out.data(), exec->snapshot_ring(),
+                            out.size() * sizeof(float), hipMemcpyDeviceToHost));
+        return std::make_pair(std::move(out), exec->snapshot_bits());
+      };
+      const auto Stage = [](int bit) -> std::string {
+        switch (bit) {
+          case 1: return "embedding";
+          case 2: return "qkv";
+          case 4: return "attention";
+          case 8: return "attention out";
+          case 16: return "shared expert";
+          case 32: return "routed experts";
+          case 64: return "head";
+          default: return "output norm";
+        }
+      };
+      // Both shapes run the same three forwards - the second append chunks its
+      // tokens into a chunk and the rest - so slot i of one answers slot i of
+      // the other, and only a forward's own rows were written into a stride.
+      const std::size_t rows_of[3] = {chunk, chunk, longer.size() - 2 * chunk};
+      int moved = 0;
+      for (int t = 0; t < trials; ++t) {
+        const auto a = Run(false);
+        const auto b = Run(true);
+        const std::size_t stride = exec->snapshot_stride();
+        // Which forward a record belongs to: the mask says how many
+        // boundaries one forward records, so the record index says the rest.
+        // Counting only the embedding records went blind when a run recorded
+        // nothing at the embedding and compared zero floats for every record.
+        const int snap_mask = std::atoi(std::getenv("GUFO_KOLIBRI_STAGE_SNAP"));
+        std::size_t per = (snap_mask & 1) != 0 ? 1U : 0U;
+        per += (snap_mask & 64) != 0 ? 1U : 0U;
+        per += (snap_mask & 128) != 0 ? 1U : 0U;
+        for (const int stage : {2, 4, 8, 16, 32}) {
+          per += (snap_mask & stage) != 0 ? 50U : 0U;  // one per layer
+        }
+        std::size_t compared = 0;
+        std::string where = "identical";
+        float worst = 0.0F;
+        for (std::size_t i = 0;
+             i < a.second.size() && i < b.second.size() && where == "identical";
+             ++i) {
+          const std::size_t forward = per != 0 ? i / per : 0;
+          const std::size_t within = per != 0 ? i % per : 0;
+          const std::size_t floats =
+              forward < 3 ? rows_of[forward] * d : 0;
+          compared += floats;
+          for (std::size_t j = 0; j < floats; ++j) {
+            if (a.first[i * stride + j] != b.first[i * stride + j]) {
+              // Every layer records five boundaries, so the place inside the
+              // forward says which layer it was; the bit says which of the
+              // layer's stages.
+              std::string at = Stage(a.second[i]);
+              if (within >= 1 && within + 2 < per) {
+                at = "layer " + std::to_string((within - 1) / 5) + " " + at;
+              }
+              where = "forward " + std::to_string(forward) + " after " + at;
+              worst =
+                  std::abs(a.first[i * stride + j] - b.first[i * stride + j]);
+              break;
+            }
+          }
+        }
+        if (where != "identical") {
+          ++moved;
+        }
+        std::cout << "trial " << t << ": " << where << ", magnitude " << worst
+                  << " over " << compared << " floats\n";
+      }
+      std::cout << moved << " of " << trials << " snapshot comparisons moved\n";
+    }
+    // DIAGNOSTIC ONLY: the prompt and the device's frontier row, so the patched
+    // llama.cpp (tools/kolibri/llama_logits.cpp) can answer the same question
+    // over the very same tokens.
+    if (const char* dump = std::getenv("GUFO_KOLIBRI_CHUNK_DUMP");
+        dump != nullptr) {
+      const std::string prefix(dump);
+      std::ofstream ids(prefix + ".ids");
+      for (std::size_t i = 0; i < longer.size(); ++i) {
+        ids << (i == 0 ? "" : " ") << longer[i];
+      }
+      ids << "\n";
+      std::ofstream bits(prefix + ".whole.bin", std::ios::binary);
+      bits.write(reinterpret_cast<const char*>(whole.data()),
+                 static_cast<std::streamsize>(whole.size() * sizeof(float)));
+      std::cout << "dumped " << longer.size() << " tokens and " << whole.size()
+                << " logits to " << prefix << "\n";
+    }
 
     // Which side is wrong is open: the reference runs the whole prompt at once
     // and is minutes of CPU at this length, so its answer is opt-in too.
@@ -295,6 +495,14 @@ int main() {
                 << "split vs reference: max_abs=" << Compare(split, oracle_frontier).max_abs
                 << " argmax " << Compare(split, oracle_frontier).device_best << '/'
                 << Compare(split, oracle_frontier).oracle_best << "\n";
+      if (const char* dump = std::getenv("GUFO_KOLIBRI_CHUNK_DUMP");
+          dump != nullptr) {
+        std::ofstream bits(std::string(dump) + ".reference.bin",
+                           std::ios::binary);
+        bits.write(reinterpret_cast<const char*>(oracle_frontier.data()),
+                   static_cast<std::streamsize>(oracle_frontier.size() *
+                                                sizeof(float)));
+      }
     }
   }
 

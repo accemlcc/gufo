@@ -195,18 +195,36 @@ headroom.
   where a parser promises one: the typed call syntax of Gemma 4, while marker
   presets assert that deltas arrive at all and before the terminal event
   (`RELEASES_ARGUMENT_ON_VALUE` in `tool_streaming.py`).
-- **A prompt split across chunk boundaries can drift from the same prompt fed
-  whole.** Across thirteen runs of a thirty-seven token prompt at a chunk of
-  sixteen, the one-piece append gave bit-identical logits every time and the
-  two-piece append differed from it in five: `max_abs` 0.63 to 3.41, `mean_abs`
-  up to 0.46 over the 128,000-wide vocabulary. The argmax was the same token in
-  every sample, including the failing ones, so nothing here shows a wrong word
-  being chosen — but every served prompt longer than sixteen tokens crosses a
-  boundary, so the drift is on the normal path, and its effect on text quality
-  is unmeasured. Cause open; see the "Chunk boundaries" entry of
-  [EXPERIMENTS](EXPERIMENTS.md). The reproducer is
-  `GUFO_KOLIBRI_CHUNK_BOUNDARY_CHECK=1 kolibri1_device_forward_test`, opt-in
-  because it would otherwise fail the suite at random.
+- **A prompt fed in more than one piece can drift from the same prompt fed in
+  one, and nothing contains it.** Across thirteen runs of a thirty-seven token
+  prompt at a chunk of sixteen, the one-piece append gave bit-identical logits
+  every time and the two-piece append differed from it in five: `max_abs` 0.63 to
+  3.41, `mean_abs` up to 0.46 over the 128,000-wide vocabulary. The argmax was
+  the same token in every sample, including the failing ones, so nothing here
+  shows a wrong word being chosen — but a `max_abs` of 3.3 is a large change to a
+  sampling distribution. The shape is on the served path: the runner stops a
+  prefill at each shared-prefix boundary and checkpoint
+  (`src/cli/serve/text_model_runner.cpp:1351-1368`) and each stop is one
+  `Session::Append` (`src/cli/serve/inference_backend.cpp:4128-4153`); at the
+  served forward width of 256 the drift appears too — 3 of 4 trials in one of
+  three processes, worst 3.60. Chunks *inside* one append are not the exposed
+  shape, so this is not "any prompt over sixteen tokens". No placement of stream
+  waits helps: a wait after every forward leaves the split drifting and makes the
+  one-piece shape drift as well, which no earlier trial had, so it was reverted;
+  `HIP_LAUNCH_BLOCKING=1` and recording every stage boundary do suppress it, and
+  neither is a configuration to serve on. The cleanest fact so far is that the
+  same binary with only the userspace ROCm changed — the SDK it was built against
+  (`libamdhip64.so.7.15.26333`) against the host's (`7.2.70201`) — gave 0 of 20
+  drifting comparisons on one and 4 of 12 on the other, and again, after the
+  diagnostic instruments came out and the binary was rebuilt, 0 of 5 against the
+  SDK and 1 of 3 against the host. Host-side checks now run against the SDK
+  (`KOLIBRI_ROCM_LIB` in `tools/kolibri/m1.sh`). The served `gufo-runtime` image
+  ships a third build, CLR 7.2.3, untested here — a 7.2 line, which is the line
+  the drift was seen on. Until that is pinned down, continuations of long prompts
+  are not bit-reproducible on this engine; see the chunk-split entry of
+  [EXPERIMENTS](EXPERIMENTS.md).
+  The reproducer is `GUFO_KOLIBRI_CHUNK_BOUNDARY_CHECK=1
+  kolibri1_device_forward_test`, opt-in because it fails at random.
 - **The scalar reference and the device disagree about the same thirty-seven
   token prompt, deterministically.** Where the two device shapes agree exactly,
   both sit 5.07 (`max_abs`) from `Reference::Forward` at the frontier row while

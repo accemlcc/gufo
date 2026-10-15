@@ -24,7 +24,9 @@
 #   - KOLIBRI_REMOTE_SRC and KOLIBRI_CONTAINER pick another source tree and
 #     container, which is how parallel work on the one GPU stays apart.
 #   - the model-backed checks read a 45 GB artifact that is not mounted into the
-#     container. They run on the remote host instead, which has ROCm too.
+#     container. They run on the remote host instead, and a binary built against
+#     the container's ROCm has to run against that same release there, not the
+#     host's own - see KOLIBRI_ROCM_LIB below.
 #
 #   tools/kolibri/m1.sh build kolibri1_attention_test
 #   tools/kolibri/m1.sh test  kolibri1_chat_template
@@ -47,6 +49,16 @@ container="${KOLIBRI_CONTAINER:-gufokolibri}"
 gpu_container="${KOLIBRI_GPU_CONTAINER:-gufokolibri-run}"
 build_dir="${KOLIBRI_BUILD:-build/gpu-test}"
 artifact="${KOLIBRI_ARTIFACT:-/home/arnomatic/models/Kolibri-1-GGUF/Kolibri-1-Q4_K_M.gguf}"
+# The runtime libraries a host-side run loads. The binary is compiled against
+# the ROCm of the build container (bind-mounted there as /opt/rocm); the host
+# keeps another release under its own /opt/rocm. Running one under the other was
+# measured to change what the device schedule does: the same binary, the
+# amplified chunk-boundary check, drift in four of twelve comparisons across
+# three processes against the host runtime and in none of twenty across five
+# against the matching one (docs/models/kolibri-1/EXPERIMENTS.md, entry
+# 2026-10-15). KOLIBRI_ROCM_LIB overrides this, which is how a run against the
+# host runtime is still made.
+rocm_lib="${KOLIBRI_ROCM_LIB:-/home/arnomatic/rocm-sdk/lib}"
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 
 # The root CMakeLists.txt travels with the sources on purpose: it names the
@@ -87,7 +99,7 @@ case "$command" in
     # mount, so the binary path is spelled from the source directory.
     sync
     in_container "cmake --build $build_dir --target ${1}_test -j8 2>&1 | tail -5"
-    ssh "$remote" "LD_LIBRARY_PATH=/opt/rocm/lib GUFO_KOLIBRI1_MODEL=$artifact \
+    ssh "$remote" "LD_LIBRARY_PATH=$rocm_lib GUFO_KOLIBRI1_MODEL=$artifact \
                    $remote_src/$build_dir/tests/models/kolibri1/${1}_test"
     ;;
   gpu-test)
@@ -118,7 +130,7 @@ case "$command" in
     sync
     in_container "cmake --build $build_dir --target gufo_kolibri1 -j8 2>&1 | tail -3 && \
                   ROCM_PATH=/opt/rocm bash tools/kolibri/build_throughput.sh $build_dir 2>&1 | tail -1"
-    ssh "$remote" "LD_LIBRARY_PATH=/opt/rocm/lib GUFO_KOLIBRI1_MODEL=$artifact \
+    ssh "$remote" "LD_LIBRARY_PATH=$rocm_lib GUFO_KOLIBRI1_MODEL=$artifact \
                    ${KOLIBRI_STAGE_PROFILE:+GUFO_KOLIBRI_ROCM_PREFILL_STAGE_PROFILE=1} \
                    $remote_src/artifacts/kolibri/throughput $artifact $*"
     ;;

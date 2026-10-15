@@ -426,9 +426,13 @@ void Session::Append(std::span<const TokenId> tokens) {
     // past a chunk shorter than the append, and the forward rejects that.
     const bool last = done + n == tokens.size();
     const std::uint32_t frontier = static_cast<std::uint32_t>(n) - 1;
+    // DIAGNOSTIC ONLY, for the open race: asking for the frontier row of every
+    // chunk makes the head run where an append would skip it, so one append
+    // then does the per-chunk work an append split at that boundary does.
+    const bool each = std::getenv("GUFO_KOLIBRI_LOGITS_EACH_CHUNK") != nullptr;
     const std::span<const std::uint32_t> rows =
-        last ? std::span<const std::uint32_t>(&frontier, 1)
-             : std::span<const std::uint32_t>{};
+        (last || each) ? std::span<const std::uint32_t>(&frontier, 1)
+                       : std::span<const std::uint32_t>{};
     model_.executor()->Forward(*cache_, tokens.subspan(done, n), position(),
                               rows);
     tokens_.insert(tokens_.end(), tokens.begin() + done,

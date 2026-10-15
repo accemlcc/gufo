@@ -14,6 +14,9 @@
 
 namespace gufo::models::kolibri1::rocm {
 namespace {
+// DIAGNOSTIC ONLY: stage boundaries one run records into the snapshot ring.
+constexpr std::size_t kSnapshotBoundaries = 1024;
+
 
 /// Every scratch buffer starts on this boundary so a kernel may read a vector
 /// of floats or halves as one value.
@@ -23,17 +26,45 @@ constexpr std::size_t kAlign = 256;
   return (n + kAlign - 1) & ~static_cast<std::size_t>(kAlign - 1);
 }
 
+/// DIAGNOSTIC ONLY: a band of untouched bytes behind every scratch buffer. A
+/// kernel that writes past the buffer it was given lands in the band, and
+/// `Executor::CheckGuards` reads them back where it synchronizes anyway, so
+/// the check costs no wait of its own.
+constexpr std::size_t kGuardBytes = 256;
+constexpr unsigned char kGuardByte = 0x3C;
+
 /// Hands out the buffers of one allocation in declaration order. A forward is
 /// a long chain of kernels and every one of them wants a named piece of memory;
 /// carving them from a single allocation keeps the launch path free of the
 /// allocator and makes the model's working set one number.
+///
+/// The plan is the same list the sizes come from, so a buffer that is not the
+/// size the plan asked for is caught here instead of in a kernel.
 struct Arena {
+  char* base{nullptr};
   char* at{nullptr};
+  const std::vector<std::pair<std::size_t, const char*>>* plan{nullptr};
+  std::vector<Band> bands{};
+  std::size_t index{0};
 
   template<class T>
   T* Take(std::size_t count) {
+    const std::size_t size = Pad(count * sizeof(T));
+    if (plan != nullptr && index < plan->size() &&
+        plan->at(index).first != size) {
+      std::fprintf(
+          stderr, "kolibri1 scratch %s is %zu bytes, the plan said %zu\n",
+          plan->at(index).second, size, plan->at(index).first);
+      std::abort();
+    }
     auto* p = reinterpret_cast<T*>(at);
-    at += Pad(count * sizeof(T));
+    at += size;
+    bands.push_back({at, kGuardBytes,
+                     plan != nullptr && index < plan->size()
+                         ? plan->at(index).second
+                         : "?"});
+    ++index;
+    at += kGuardBytes;
     return p;
   }
 };
@@ -65,6 +96,22 @@ struct Arena {
   }
   return (w.type == core::GgmlType::kQ4_K || w.type == core::GgmlType::kQ6_K) &&
          w.cols % 256 == 0;
+}
+
+/// DIAGNOSTIC ONLY, for the chunk-boundary race recorded in
+/// docs/models/kolibri-1/EXPERIMENTS.md. GUFO_KOLIBRI_SYNC_STAGES is a bitmask
+/// that forces a stream sync after the stages it names, so a bisect can tell
+/// which pair of stages has to overlap for the answer to move: 1 embedding,
+/// 2 qkv and its post pass, 4 attention, 8 output branch, 16 shared expert,
+/// 32 routed experts, 128 output norm, 64 the logits head. Bits 2 to 32 name
+/// stages inside a layer, so they sync fifty times a forward; 1, 128 and 64
+/// bound a forward and sync once. Comes out with the diagnosis.
+void SyncDiag(hipStream_t stream, int bit) {
+  const char* mask = std::getenv("GUFO_KOLIBRI_SYNC_STAGES");
+  if (mask == nullptr || (std::atoi(mask) & bit) == 0) {
+    return;
+  }
+  HIP_CHECK(hipStreamSynchronize(stream));
 }
 
 }  // namespace
@@ -123,41 +170,50 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
   // Sizes in bytes, then the arena hands them out in the same order. Keeping
   // the two lists together is the only thing that keeps them honest.
   std::size_t bytes = 0;
-  const auto Need = [&](std::size_t floats) {
-    bytes += ArenaBytes(floats, 4);
+  std::vector<std::pair<std::size_t, const char*>> plan;
+  const auto Need = [&](std::size_t count, std::size_t element,
+                        const char* name) {
+    const std::size_t size = ArenaBytes(count, element);
+    bytes += size + kGuardBytes;
+    plan.emplace_back(size, name);
   };
-  Need(static_cast<std::size_t>(max_rows_) * d);       // x_
-  Need(static_cast<std::size_t>(max_rows_) * d);       // h_
-  Need(static_cast<std::size_t>(max_rows_) * q_dim);   // q_
-  Need(static_cast<std::size_t>(max_rows_) * kv_dim);  // k_
-  Need(static_cast<std::size_t>(max_rows_) * kv_dim);  // v_
-  Need(static_cast<std::size_t>(max_rows_) * q_dim);   // attn_
-  Need(static_cast<std::size_t>(max_rows_) * d);       // o_
-  Need(static_cast<std::size_t>(max_rows_) * width);   // dense_gate_
-  Need(static_cast<std::size_t>(max_rows_) * width);   // dense_up_
-  Need(static_cast<std::size_t>(max_rows_) * width);   // dense_act_
-  Need(static_cast<std::size_t>(max_rows_) * d);       // shared_
-  Need(static_cast<std::size_t>(max_rows_) * used * width);    // moe_gate_
-  Need(static_cast<std::size_t>(max_rows_) * used * width);    // moe_up_
-  Need(static_cast<std::size_t>(max_rows_) * used * width);    // moe_act_
-  Need(static_cast<std::size_t>(max_rows_) * used * d);        // moe_out_
-  Need(static_cast<std::size_t>(max_rows_) * used);            // moe_weights_
-  Need(static_cast<std::size_t>(max_rows_) * used);            // moe_ids_
-  Need(experts);                                               // moe_counts_
-  Need(GroupTableInts(experts));                               // moe_groups_
-  Need(kProjectRows * GroupTableInts(1));                      // dense_groups_
-  Need(static_cast<std::size_t>(max_rows));                    // tokens_
-  Need(static_cast<std::size_t>(max_logit_rows_) * d);         // logit_x_
-  Need(static_cast<std::size_t>(max_logit_rows_) * vocab);     // logits_
-  Need(AttentionPartialFloats(1, c.num_heads, c.head_dim, max_context));
+  Need(static_cast<std::size_t>(max_rows_) * d, 4, "x_");
+  Need(static_cast<std::size_t>(max_rows_) * d, 4, "h_");
+  Need(static_cast<std::size_t>(max_rows_) * q_dim, 4, "q_");
+  Need(static_cast<std::size_t>(max_rows_) * kv_dim, 4, "k_");
+  Need(static_cast<std::size_t>(max_rows_) * kv_dim, 4, "v_");
+  Need(static_cast<std::size_t>(max_rows_) * q_dim, 4, "attn_");
+  Need(static_cast<std::size_t>(max_rows_) * d, 4, "o_");
+  Need(static_cast<std::size_t>(max_rows_) * width, 4, "dense_gate_");
+  Need(static_cast<std::size_t>(max_rows_) * width, 4, "dense_up_");
+  Need(static_cast<std::size_t>(max_rows_) * width, 4, "dense_act_");
+  Need(static_cast<std::size_t>(max_rows_) * d, 4, "shared_");
+  Need(static_cast<std::size_t>(max_rows_) * used * width, 4, "moe_gate_");
+  Need(static_cast<std::size_t>(max_rows_) * used * width, 4, "moe_up_");
+  Need(static_cast<std::size_t>(max_rows_) * used * width, 4, "moe_act_");
+  Need(static_cast<std::size_t>(max_rows_) * used * d, 4, "moe_out_");
+  Need(static_cast<std::size_t>(max_rows_) * used, 4, "moe_weights_");
+  Need(static_cast<std::size_t>(max_rows_) * used, 4, "moe_ids_");
+  Need(experts, 4, "moe_counts_");
+  Need(GroupTableInts(experts), 4, "moe_groups_");
+  Need(kProjectRows * GroupTableInts(1), 4, "dense_groups_");
+  Need(static_cast<std::size_t>(max_rows), 4, "tokens_");
+  Need(static_cast<std::size_t>(max_logit_rows_) * vocab, 4, "logits_");
+  Need(AttentionPartialFloats(1, c.num_heads, c.head_dim, max_context), 4,
+       "partials_");
   // One projection's input rows as Q8_1 tiles. The output projection reads the
   // whole query width and every other one reads at most the hidden size, so the
   // wider of the two bounds the buffer for all of them.
   const std::size_t act_bytes =
       hip::QuantizedActivationBytes(max_rows_, std::max(d, q_dim));
-  bytes += ArenaBytes(act_bytes, 1);
+  Need(act_bytes, 1, "act_q8_");
   HIP_CHECK(hipMalloc(&scratch_, bytes));
-  Arena arena{static_cast<char*>(scratch_)};
+  arena_bytes_ = bytes;
+  // The bands behind the buffers have to hold something known before the first
+  // kernel of the first forward.
+  HIP_CHECK(hipMemset(scratch_, kGuardByte, bytes));
+  Arena arena{static_cast<char*>(scratch_), static_cast<char*>(scratch_),
+              &plan};
   x_ = arena.Take<float>(static_cast<std::size_t>(max_rows_) * d);
   h_ = arena.Take<float>(static_cast<std::size_t>(max_rows_) * d);
   q_ = arena.Take<float>(static_cast<std::size_t>(max_rows_) * q_dim);
@@ -181,13 +237,13 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
   dense_groups_ =
       arena.Take<std::int32_t>(kProjectRows * GroupTableInts(1));
   tokens_ = arena.Take<std::int32_t>(max_rows);
-  logit_x_ = arena.Take<float>(static_cast<std::size_t>(max_logit_rows_) * d);
   logits_ = arena.Take<float>(static_cast<std::size_t>(max_logit_rows_) * vocab);
   partials_ =
       arena.Take<float>(AttentionPartialFloats(1, c.num_heads, c.head_dim,
                                                max_context));
   act_q8_ = arena.Take<std::uint8_t>(act_bytes);
   act_q8_bytes_ = act_bytes;
+  bands_ = std::move(arena.bands);
 
   // The single-group table of a dense projection says: one expert, these rows
   // as its slots. Every width the executor steps through gets its own table
@@ -426,12 +482,49 @@ void Executor::Forward(KvCache& cache, std::span<const std::int32_t> tokens,
       HIP_CHECK(hipEventRecord(stage_events_[mark++], stream_));
     }
   };
+  // DIAGNOSTIC ONLY, for the race recorded in
+  // docs/models/kolibri-1/EXPERIMENTS.md. GUFO_KOLIBRI_STAGE_SNAP names the
+  // stage boundaries that copy the residual into the ring, with the same bit
+  // pattern as GUFO_KOLIBRI_SYNC_STAGES and 128 standing for the output norm.
+  // The copies are device-to-device and stay in the stream, so a boundary is
+  // recorded as the schedule leaves it; recording at every boundary costs about
+  // a launch per boundary, which by itself moves the schedule, so the mask lets
+  // a run take one stage of a layer. The waits of GUFO_KOLIBRI_SYNC_STAGES act
+  // on the same boundaries and run before the copy, so a forced configuration
+  // can still be recorded.
+  const char* snap_env = std::getenv("GUFO_KOLIBRI_STAGE_SNAP");
+  const int snap_mask = snap_env != nullptr ? std::atoi(snap_env) : 0;
+  const auto Probe = [&](int bit) {
+    SyncDiag(stream_, bit);
+    if (snap_mask == 0 ||
+        (snap_mask >= 0 && !(snap_mask & (bit == 0 ? 128 : bit)))) {
+      return;
+    }
+    // The boundaries around the head record the normed stream, because that is
+    // what the head reads: a run that only ever looks at the residual cannot
+    // see the case where the residual agrees and the logits do not.
+    if (snapshot_ == nullptr) {
+      snapshot_stride_ = static_cast<std::size_t>(max_rows_) * d;
+      HIP_CHECK(hipMalloc(&snapshot_,
+                          kSnapshotBoundaries * snapshot_stride_ *
+                              sizeof(float)));
+    }
+    if (snapshot_count_ < kSnapshotBoundaries) {
+      HIP_CHECK(hipMemcpyAsync(snapshot_ + snapshot_count_ * snapshot_stride_,
+                               (bit == 0 || bit == 64) ? h_ : x_,
+                               static_cast<std::size_t>(n) * d * sizeof(float),
+                               hipMemcpyDeviceToDevice, stream_));
+      snapshot_bits_.push_back(bit);
+      ++snapshot_count_;
+    }
+  };
   Stage();
   HIP_CHECK(hipMemcpyAsync(tokens_, tokens.data(), n * sizeof(std::int32_t),
                            hipMemcpyHostToDevice, stream_));
   EmbedRows({model_.token_embd().data, model_.token_embd().quant(), tokens_, x_,
              n, d},
             stream_);
+  Probe(1);
   Stage();
   routed_marks_ = 0;
 
@@ -452,6 +545,7 @@ void Executor::Forward(KvCache& cache, std::span<const std::int32_t> tokens,
              cache.v[l], n, c.num_heads, c.kv_heads[l], c.head_dim,
              first_position, ring, c.rms_eps, model_.theta_scale(), sliding},
             stream_);
+    Probe(2);
     Stage();
     AttentionArgs a{};
     a.q = q_;
@@ -469,35 +563,43 @@ void Executor::Forward(KvCache& cache, std::span<const std::int32_t> tokens,
     a.key_limit = first_position + n;
     a.scale = scale;
     Attention(a, stream_);
+    Probe(4);
     Stage();
     Project(w.attn_output, attn_, n, o_);
     // The sandwich norm sits on the branch, and the residual is added after it.
     RmsNormRows({o_, w.post_attn_norm.f32(), attn_, n, d, c.rms_eps}, stream_);
     AddRows({x_, attn_, static_cast<std::size_t>(n) * d}, stream_);
+    Probe(8);
     Stage();
 
     RmsNormRows({x_, w.ffn_norm.f32(), h_, n, d, c.rms_eps}, stream_);
     SharedExpert(w, h_, n, shared_);
+    Probe(16);
     Stage();
     Experts(w, h_, n, moe_out_, moe_weights_);
     MoeFinish({x_, moe_out_, shared_, moe_weights_, w.post_ffn_norm.f32(), n, d,
                c.experts_used, c.rms_eps},
               stream_);
+    Probe(32);
     Stage();
   }
 
   RmsNormRows({x_, model_.output_norm().f32(), h_, n, d, c.rms_eps}, stream_);
   Stage();
+  Probe(0);
   for (std::size_t i = 0; i < logit_rows.size(); ++i) {
     if (logit_rows[i] >= n) {
       throw std::invalid_argument("kolibri1 logit row outside the forward");
     }
-    HIP_CHECK(hipMemcpyAsync(
-        logit_x_ + i * d, h_ + static_cast<std::size_t>(logit_rows[i]) * d,
-        d * sizeof(float), hipMemcpyDeviceToDevice, stream_));
+    // The row is read where it stands. Gathering rows into a staging buffer
+    // first would cost a buffer as wide as the vocabulary per row and a copy
+    // on every append that asks for a row; `max_logit_rows` is one today, so
+    // the batched form bought nothing.
+    Project(model_.output(),
+            h_ + static_cast<std::size_t>(logit_rows[i]) * d, 1,
+            logits_ + i * model_.vocab_size());
   }
-  Project(model_.output(), logit_x_,
-          static_cast<std::uint32_t>(logit_rows.size()), logits_);
+  Probe(64);
   Stage();
   if (!stage_profile_) {
     return;
@@ -565,6 +667,38 @@ void Executor::Forward(KvCache& cache, std::span<const std::int32_t> tokens,
   }
 }
 
+// DIAGNOSTIC ONLY: the bands behind the scratch buffers, read back where the
+// executor waits for the stream anyway. A kernel that runs past the buffer it
+// was given leaves its mark here, and the names come from the arena's plan.
+void Executor::CheckGuards() const {
+  if (bands_.empty() || std::getenv("GUFO_KOLIBRI_GUARDS") == nullptr) {
+    return;
+  }
+  seen_arena_.resize(arena_bytes_);
+  HIP_CHECK(hipMemcpy(seen_arena_.data(), scratch_, arena_bytes_,
+                      hipMemcpyDeviceToHost));
+  const auto* base = reinterpret_cast<const unsigned char*>(seen_arena_.data());
+  int bands = 0;
+  for (const Band& band : bands_) {
+    const std::size_t offset = static_cast<std::size_t>(
+        reinterpret_cast<char*>(band.at) - static_cast<char*>(scratch_));
+    for (std::size_t i = 0; i < band.bytes; ++i) {
+      if (base[offset + i] != kGuardByte) {
+        if (bands < 6) {
+          std::fprintf(stderr,
+                       "kolibri1 wrote %02x into the band behind %s at +%zu\n",
+                       base[offset + i], band.name, offset + i);
+        }
+        ++bands;
+        break;
+      }
+    }
+  }
+  if (bands > 6) {
+    std::fprintf(stderr, "kolibri1: %d bands written in all\n", bands);
+  }
+}
+
 void Executor::CopyLogits(std::size_t rows, std::vector<float>* out) const {
   const std::size_t count = rows * model_.vocab_size();
   out->resize(count);
@@ -576,6 +710,7 @@ void Executor::CopyLogits(std::size_t rows, std::vector<float>* out) const {
   HIP_CHECK(hipMemcpyAsync(out->data(), logits_, count * sizeof(float),
                            hipMemcpyDeviceToHost, stream_));
   HIP_CHECK(hipStreamSynchronize(stream_));
+  CheckGuards();
 }
 
 }  // namespace gufo::models::kolibri1::rocm
