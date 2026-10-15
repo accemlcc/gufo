@@ -195,6 +195,26 @@ headroom.
   where a parser promises one: the typed call syntax of Gemma 4, while marker
   presets assert that deltas arrive at all and before the terminal event
   (`RELEASES_ARGUMENT_ON_VALUE` in `tool_streaming.py`).
+- **A prompt split across chunk boundaries can drift from the same prompt fed
+  whole.** Across thirteen runs of a thirty-seven token prompt at a chunk of
+  sixteen, the one-piece append gave bit-identical logits every time and the
+  two-piece append differed from it in five: `max_abs` 0.63 to 3.41, `mean_abs`
+  up to 0.46 over the 128,000-wide vocabulary. The argmax was the same token in
+  every sample, including the failing ones, so nothing here shows a wrong word
+  being chosen — but every served prompt longer than sixteen tokens crosses a
+  boundary, so the drift is on the normal path, and its effect on text quality
+  is unmeasured. Cause open; see the "Chunk boundaries" entry of
+  [EXPERIMENTS](EXPERIMENTS.md). The reproducer is
+  `GUFO_KOLIBRI_CHUNK_BOUNDARY_CHECK=1 kolibri1_device_forward_test`, opt-in
+  because it would otherwise fail the suite at random.
+- **The scalar reference and the device disagree about the same thirty-seven
+  token prompt, deterministically.** Where the two device shapes agree exactly,
+  both sit 5.07 (`max_abs`) from `Reference::Forward` at the frontier row while
+  agreeing to 0.003 on the five token prompt that qualifies the kernels. Both
+  agree on the winner. Which side is wrong is open — see the same entry in
+  [EXPERIMENTS](EXPERIMENTS.md); until it is settled, the reference is the
+  yardstick for short prompts only, and long-prompt parity is not claimed
+  anywhere in these documents.
 
 ## Not verified
 

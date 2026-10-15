@@ -229,3 +229,76 @@ the released Q4_K_M unless stated.
   and demands it come out bit-identical at every pass width, which is what the
   pass-width handling is for. The rejection of *sixteen accumulators* stands;
   what is gone is the assumption that a group is short.
+
+## Open
+
+Two findings from qualifying the upstream merge, recorded with the measurements
+that came out of `kolibri1_device_forward_test` on M1 (`gfx1151`, Q4_K_M, tree
+`b11d8084`, prompt of 37 tokens, chunk of 16). Neither is caused by the merge:
+the shapes involved are this engine's own. Both are unresolved.
+
+- **A chunk split moves the logits about a third of the time; the one-piece
+  append never moves.** Thirteen comparisons: five `FAIL`s, `max_abs` 0.632,
+  1.000, 2.126, 3.163, 3.405 (`mean_abs` 0.085 to 0.461 across 128,000 logits),
+  winner unchanged in all thirteen. `whole` against a second `whole` was
+  bit-identical in thirteen of thirteen; `split` against a second `split`
+  differed in seven, including two runs where `split` happened to agree with
+  `whole` and still disagreed with itself. So the two-piece append is the
+  unstable side, and its instability is not visible when it agrees by luck.
+  - What the two shapes differ in, at the forward that produces the answer, is
+    nothing but timing. `Append(37)` runs 16, 16, 5 rows; `Append(16)` then
+    `Append(21)` runs 16, 16, 5 rows too — same batches, same cache writes. The
+    only extra work is the logits row the first append computes at its first
+    chunk (`logit_rows = {15}`), which writes `logit_x_` and `logits_`, and
+    those are read only by the device-to-host copy. Arithmetic cannot depend on
+    them, so the difference has to come from when kernels run, not what is in
+    the arena.
+  - Poisoning says the same. Filling the whole scratch arena (4,638,976 B, from
+    a trace knob that prints the layout: `h=163840 attn=786432 shared=1441792
+    moe_gate=1605632 moe_act=1998848 moe_out=2195456 moe_groups=3181056
+    dense_groups=3577600 logit_x=3594496 logits=3604736 partials=4116736
+    act_q8=4516096`) with `0x3F` before every forward, and separately filling
+    the cache, left the rate where it was — one failure in four and two in four
+    against one in three unpoisoned. A read of memory the run did not write
+    would have stopped, because poisoned content is identical for both shapes.
+    It did not, so this is not stale scratch and not stale cache.
+  - `HIP_LAUNCH_BLOCKING=1` — every launch completing before the next is
+    enqueued — passed four of four in the same conditions that failed a run in
+    three without it. Everything in the engine launches on the executor's own
+    non-blocking stream, checked across every `.hip.cpp` of the model and the
+    shared quantised GEMM; there is no second stream to blame, so the overlap
+    that matters is subtler than a wrong stream argument.
+  - Ruled out beforehand on shape grounds: group truncation (`kMaxGroupSlots`
+    is 256, sixteen rows can fill at most sixteen slots of one expert) and
+    pass-width summation order (`gemv_test` drives a group to forty-eight slots
+    and demands bit equality at every pass width, and passes).
+  - Next, in order. (1) A positive control on a smaller budget: a temporary
+    `hipStreamSynchronize` after each stage of `Forward` — norm, QKV, attention,
+    MoE, projection — bisected to the pair of stages that must not overlap.
+    (2) `compute-sanitizer --tool racecheck` is not installed in the build
+    container, so either it goes in the image or the hunt stays manual; the
+    tiny fixture would make a racecheck run cheap but its shapes are not these
+    shapes, so a clean result there would prove little. (3) Whether the served
+    path is harmed: the winner never moved in thirteen samples, and a fixed
+    prompt scored at two different chunk offsets (`tools/kolibri/serve_check.py`)
+    is the cheap way to turn "the winner held" into a number.
+- **The scalar reference and the device disagree by 5.07 on a 37-token prompt
+  and agree to 0.003 on a 5-token one.** In a run where both device shapes were
+  bit-identical, each was 5.07351 (`max_abs`) from `Reference::Forward` at the
+  frontier row, and the deviation was the same to the last digit in every other
+  run that measured it — deterministic, not the flake above. Argmax agreed
+  (5513 in all of them). `Append(37)` on the device is three forwards of 16, 16
+  and 5 rows; the reference answers 37 rows in one pass, so the disagreement is
+  exactly about a multi-row batch versus a continuation, and the two candidates
+  — the device's continuation state, or the reference past the lengths it was
+  built for — are still both standing. Settling it needs a third opinion: the
+  frontier logits of the same 37-token prompt from the patched llama.cpp
+  (`tools/kolibri/llama_logits.cpp`, built for the earlier parity work) say
+  which of the two to believe. Until then these documents claim reference
+  parity at short prompts only.
+- Both measurements need the 45 GiB artifact on the device and cannot run while
+  the model is served, which is why they stopped at the numbers above. The
+  reproducer stayed in the test behind `GUFO_KOLIBRI_CHUNK_BOUNDARY_CHECK=1`,
+  with the reference comparison behind `GUFO_KOLIBRI_LONG_ORACLE=1` (it is
+  minutes of CPU); the poison and trace knobs that produced the layout were
+  diagnostic scaffolding and are gone.
