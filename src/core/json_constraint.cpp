@@ -141,11 +141,13 @@ public:
   // `gemma` compiles values in the Gemma 4 call-argument syntax instead of
   // JSON: the same schema semantics with the spelling its chat template uses.
   explicit JsonConstraintCompiler(const json::Value& schema, bool strict,
-                                  bool tool = false, bool gemma = false)
+                                  bool tool = false, bool gemma = false,
+                                  bool open_response_objects = false)
       : schema_(schema),
         strict_(strict),
         open_objects_(tool && !strict),
-        gemma_(gemma) {
+        gemma_(gemma),
+        open_response_objects_(open_response_objects) {
     // Literal bytes occupy the first 256 terminal classes.
     for (unsigned i = 0; i < 256; ++i) {
       std::bitset<256> bits;
@@ -1640,11 +1642,15 @@ private:
     if (!properties)
       properties = &empty_properties;
     const auto* additional = schema.find("additionalProperties");
-    const bool closed = ClosedProperties(schema, ignore_unknown_keys_);
+    // As in llama.cpp common/json-schema.cpp at 23b0202a1, a response object
+    // that declares properties without additionalProperties stays closed.
+    const bool closed = ClosedProperties(schema, ignore_unknown_keys_) ||
+                        (open_response_objects_ && !additional &&
+                         schema.contains("properties"));
     if (!properties->is_object() ||
         (additional && !additional->is_bool() && !additional->is_object()))
       Invalid("invalid object properties or additionalProperties");
-    if (!closed && !open_objects_)
+    if (!closed && !open_objects_ && !open_response_objects_)
       Invalid("objects require properties and additionalProperties: false");
     properties_ += properties->size();
     if (properties_ > 5000)
@@ -1762,6 +1768,10 @@ private:
   bool strict_;
   bool open_objects_;
   bool gemma_;
+  // Unlike open_objects_, this admits undeclared keys only when
+  // additionalProperties is true or a schema, or the object declares no
+  // properties. Untyped leaves and unsupported keywords remain errors.
+  bool open_response_objects_;
   bool ignore_unknown_keys_{false};
   std::shared_ptr<JsonConstraint> grammar_{new JsonConstraint};
   std::uint32_t ws_, string_, key_, integer_, number_, bool_, null_;
@@ -1775,8 +1785,9 @@ private:
 };
 
 std::shared_ptr<const JsonConstraint> JsonConstraint::Compile(
-    const json::Value& schema, bool strict) {
-  const auto key = std::string(strict ? "strict:" : "schema:") + schema.dump();
+    const json::Value& schema, bool strict, bool open_objects) {
+  const auto key = std::string(strict ? "strict:" : "schema:") +
+                   (open_objects ? "open:" : "") + schema.dump();
   if (key.size() > kMaxSchemaBytes)
     Invalid("maximum schema size is 2 MiB");
   // Bounded cache; compile outside the lock so unrelated HTTP requests proceed.
@@ -1787,7 +1798,13 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::Compile(
     if (const auto found = cache.find(key); found != cache.end())
       return found->second;
   }
-  auto grammar = JsonConstraintCompiler(schema, strict).Compile(false);
+  // The response-format flag is the compiler's last parameter, not its fourth:
+  // the fork's Gemma 4 spelling sits between them, and binding `open_objects`
+  // there would compile a response schema in call-argument syntax.
+  auto grammar =
+      JsonConstraintCompiler(schema, strict, /*tool=*/false, /*gemma=*/false,
+                             /*open_response_objects=*/open_objects)
+          .Compile(false);
   const std::lock_guard lock(mutex);
   if (cache.size() >= 16)
     cache.erase(cache.begin());
@@ -1871,7 +1888,8 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::ToolParameters(
     grammar = OpenToolParameters(format);
   } else if (grammar && format == ToolFormat::kGemma4) {
     try {
-      grammar = JsonConstraintCompiler(normalized, strict, true, true)
+      grammar = JsonConstraintCompiler(normalized, strict, /*tool=*/true,
+                                       /*gemma=*/true)
                     .Compile(false, best_effort);
     } catch (const std::invalid_argument&) {
       if (strict)
@@ -1923,7 +1941,9 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::OpenToolParameters(
   if (format == ToolFormat::kGemma4) {
     static const auto gemma = [] {
       const auto schema = json::Value::object();
-      return JsonConstraintCompiler(schema, false, true, true).Compile(true);
+      return JsonConstraintCompiler(schema, false, /*tool=*/true,
+                                    /*gemma=*/true)
+          .Compile(true);
     }();
     return gemma;
   }

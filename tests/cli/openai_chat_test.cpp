@@ -33,6 +33,17 @@ void Expect(bool condition, std::string_view message) {
   }
 }
 
+bool Accepts(const gufo::sampling::JsonConstraint& grammar,
+             std::string_view text) {
+  auto state = grammar.Start();
+  for (const unsigned char byte : text) {
+    state = grammar.Advance(state, byte);
+    if (state.empty())
+      return false;
+  }
+  return grammar.Complete(state);
+}
+
 /// Streaming splits deltas differently from the buffered path, so content that
 /// differs only in surrounding whitespace is the same response.
 std::string Trimmed(const std::string& value) {
@@ -101,7 +112,8 @@ public:
   Result complete(std::string_view, std::size_t,
                   const gufo::sampling::SamplingConfig&,
                   const CancellationCheck&, const TokenCallback&,
-                  std::string_view, const std::vector<std::string>&) override {
+                  std::string_view, const std::vector<std::string>&,
+                  bool) override {
     return {};
   }
 
@@ -404,15 +416,17 @@ void TestCachePromptOption() {
               (stream ? "true" : "false") + R"(,"cache_prompt":)" + value +
               "}"),
           backend);
+      // As in llama-server, null keeps the default.
       const bool valid = std::string_view(value) == "true" ||
-                         std::string_view(value) == "false";
+                         std::string_view(value) == "false" ||
+                         std::string_view(value) == "null";
       Expect(response.status == (valid ? 200 : 400),
-             "cache_prompt accepts only JSON booleans");
+             "cache_prompt accepts only JSON booleans or null");
       if (valid) {
         if (response.streaming_body)
           response.streaming_body([](std::string_view) { return true; });
         Expect(backend.last_request.cache_prompt ==
-                   (std::string_view(value) == "true"),
+                   (std::string_view(value) != "false"),
                "cache_prompt reaches both buffered and streaming backends");
       }
     }
@@ -544,6 +558,13 @@ void TestCachedPrefillMetrics() {
   cached.prefill_ms = 0;
   Expect(gufo::server::PrefillTokensPerSecond(cached) == 0,
          "Untimed work does not divide by zero");
+  cached.component_cache.emplace();
+  cached.component_cache->borrowed_capacity_bytes = 4096;
+  const auto component_timings = gufo::server::GenerationTimings(cached);
+  const auto* component = component_timings.find("component_cache");
+  Expect(component && component->member_str("schema") == "component-cache-v1" &&
+             component->member_size("borrowed_capacity_bytes") == 4096,
+         "Shared Chat/Responses/Messages timings retain component cache work");
 
   backend.cache_miss_reason = "prefix_changed";
   const auto miss = gufo::server::HandleOpenAiChat(
@@ -2525,6 +2546,56 @@ void TestStructuredResponseFormat() {
     }
     Expect(answer == literal && reasoning == "Consider <tool_call> as text.",
            "only the reasoning delimiter changes structured-output phase");
+  }
+  // #580: as in llama.cpp, response schemas that omit additionalProperties
+  // are admitted and keep declared objects closed; additionalProperties true
+  // or a schema admits extra keys. Strict tool parameters keep requiring
+  // explicitly closed objects.
+  {
+    auto open = gufo::json::parse(
+        R"({"model":"test-model","messages":[{"role":"user","content":"Who?"}],
+            "response_format":{"type":"json_schema","json_schema":{
+              "name":"person","strict":true,"schema":{"type":"object",
+              "properties":{"name":{"type":"string"},
+                "born":{"type":"integer","description":"birth year"}},
+              "required":["name","born"]}}}})");
+    for (const bool stream : {false, true}) {
+      open["stream"] = stream;
+      const auto response =
+          gufo::server::HandleOpenAiChat(Request(open.dump()), backend);
+      Expect(response.status == 200 && backend.last_request.response_format,
+             "response schemas without additionalProperties are admitted");
+      Expect(
+          Accepts(*backend.last_request.response_format,
+                  R"({"name":"Nostradamus","born":1503})") &&
+              !Accepts(*backend.last_request.response_format,
+                       R"({"name":"Nostradamus","born":1503,"note":"seer"})") &&
+              !Accepts(*backend.last_request.response_format,
+                       R"({"name":"Nostradamus"})"),
+          "omitted additionalProperties keeps declared objects closed");
+    }
+    open["stream"] = false;
+    open["tools"] = gufo::json::parse(
+        R"([{"type":"function","function":{"name":"f","strict":true,
+            "parameters":{"type":"object","properties":{"x":{"type":"string"}},
+            "required":["x"]}}}])");
+    const auto calls = backend.chat_calls.load();
+    const auto rejected =
+        gufo::server::HandleOpenAiChat(Request(open.dump()), backend);
+    Expect(rejected.status == 400 && backend.chat_calls == calls &&
+               rejected.body.find("invalid_tools") != std::string::npos,
+           "strict tools still require closed parameter objects");
+    gufo::server::ChatRequest responses;
+    Expect(!gufo::server::ParseOpenAiResponseControls(
+               gufo::json::parse(R"({"text":{"format":{"type":"json_schema",
+                 "name":"person","strict":true,"schema":{"type":"object",
+                 "properties":{"name":{"type":"string"}},"required":["name"],
+                 "additionalProperties":{"type":"integer"}}}}})"),
+               &responses) &&
+               responses.response_format &&
+               Accepts(*responses.response_format, R"({"name":"a","b":1})") &&
+               !Accepts(*responses.response_format, R"({"name":"a","b":"1"})"),
+           "Responses text.format admits typed additional properties");
   }
   body["stop"] = "END";
   Expect(gufo::server::HandleOpenAiChat(Request(body.dump()), backend).status ==
