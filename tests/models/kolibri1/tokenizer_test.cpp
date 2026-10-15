@@ -19,10 +19,10 @@
 #include "tests/models/kolibri1/gguf_builder.hpp"
 
 namespace k1 = gufo::models::kolibri1;
-using kolibri1_test::Require;
 using gufo::json::Value;
 using k1::TokenId;
 using k1::TokenType;
+using kolibri1_test::Require;
 
 #ifndef GUFO_KOLIBRI1_FIXTURES
 #error "GUFO_KOLIBRI1_FIXTURES must name the fixture directory"
@@ -41,8 +41,7 @@ namespace {
 
 [[nodiscard]] const Value& Member(const Value& object, std::string_view key) {
   const auto* value = object.find(std::string(key));
-  Require(value != nullptr,
-          "fixture member missing: " + std::string(key));
+  Require(value != nullptr, "fixture member missing: " + std::string(key));
   return *value;
 }
 
@@ -152,8 +151,8 @@ Fixture Load() {
                              Member(vocabulary, "eos_text").str());
   Require(eos != fixture.vocabulary.tokens.end(),
           "the fixture has no EOS token");
-  fixture.vocabulary.eos = static_cast<TokenId>(
-      eos - fixture.vocabulary.tokens.begin());
+  fixture.vocabulary.eos =
+      static_cast<TokenId>(eos - fixture.vocabulary.tokens.begin());
   fixture.vocabulary.add_bos = Member(vocabulary, "add_bos").as_bool();
 
   std::string error;
@@ -224,7 +223,12 @@ void CheckBytesRoundTrip(const Fixture& f) {
             "byte symbols are normal tokens");
   }
   const std::string invalid =
-      "\xff" "caf\xff\xe9" "\xc3" "\x80\x81" "na\xc3\xa4ve" "\xe0\x80\xaf"
+      "\xff"
+      "caf\xff\xe9"
+      "\xc3"
+      "\x80\x81"
+      "na\xc3\xa4ve"
+      "\xe0\x80\xaf"
       "end";
   const auto ids = f.tokenizer->Encode(invalid, false, false);
   Require(f.tokenizer->Decode(ids, false) == invalid,
@@ -284,12 +288,13 @@ void CheckTokenTextAndEog(const Fixture& f) {
               "]");
   Require(f.tokenizer->IsEndOfGeneration(f.tokenizer->EosToken()),
           "EOS is always end-of-generation");
-  Require(f.tokenizer->Type(-1) == TokenType::kUndefined &&
-              f.tokenizer->TokenText(-1, true).empty() &&
-              f.tokenizer->TokenText(
-                  static_cast<TokenId>(f.tokenizer->VocabSize()), false)
-                  .empty(),
-          "ids outside the vocabulary are undefined");
+  Require(
+      f.tokenizer->Type(-1) == TokenType::kUndefined &&
+          f.tokenizer->TokenText(-1, true).empty() &&
+          f.tokenizer
+              ->TokenText(static_cast<TokenId>(f.tokenizer->VocabSize()), false)
+              .empty(),
+      "ids outside the vocabulary are undefined");
 }
 
 /// The released file clears `add_bos_token` and names no BOS at all, so
@@ -373,8 +378,8 @@ void CheckGgufGate(const Fixture& f) {
   const auto accepted = build("gpt2", "kolibri1", true);
   Require(accepted.error().empty(), accepted.error());
   std::string error;
-  const auto tokenizer = k1::Tokenizer::CreateFromGguf(*accepted.reader(),
-                                                       &error);
+  const auto tokenizer =
+      k1::Tokenizer::CreateFromGguf(*accepted.reader(), &error);
   Require(tokenizer != nullptr, "gpt2 with kolibri1 rejected: " + error);
   Require(tokenizer->VocabSize() == f.tokenizer->VocabSize(),
           "the GGUF path must load the same vocabulary");
@@ -387,9 +392,9 @@ void CheckGgufGate(const Fixture& f) {
 
   const auto wrong_model = build("qwen2", "kolibri1", true);
   error.clear();
-  Require(k1::Tokenizer::CreateFromGguf(*wrong_model.reader(), &error) ==
-              nullptr,
-          "a non-gpt2 model must be rejected");
+  Require(
+      k1::Tokenizer::CreateFromGguf(*wrong_model.reader(), &error) == nullptr,
+      "a non-gpt2 model must be rejected");
   Require(error.find("gpt2") != std::string::npos,
           "the rejection must name the expected model: " + error);
 
@@ -402,9 +407,8 @@ void CheckGgufGate(const Fixture& f) {
 
   const auto no_types = build("gpt2", "kolibri1", false);
   error.clear();
-  Require(
-      k1::Tokenizer::CreateFromGguf(*no_types.reader(), &error) == nullptr,
-      "a vocabulary without token types must be rejected");
+  Require(k1::Tokenizer::CreateFromGguf(*no_types.reader(), &error) == nullptr,
+          "a vocabulary without token types must be rejected");
   Require(error.find("token_type") != std::string::npos,
           "the rejection must name the missing key: " + error);
 }

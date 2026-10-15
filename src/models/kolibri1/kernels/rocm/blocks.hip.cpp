@@ -1,7 +1,7 @@
-#include "src/models/kolibri1/kernels/rocm/moe.hpp"
-
 #include <cstdint>
 #include <stdexcept>
+
+#include "src/models/kolibri1/kernels/rocm/moe.hpp"
 
 namespace gufo::models::kolibri1::rocm {
 namespace {
@@ -25,7 +25,7 @@ constexpr int kMaxBlockWindow = 8;
 
 /// v from lane (lane ^ M) through DPP or a cross-row permute: this is a
 /// register-to-register move, where a shuffle is a round trip.
-template <int M>
+template<int M>
 __device__ __forceinline__ float XorLane(float v) {
   static_assert(M > 0 && M < kWave && (M & (M - 1)) == 0);
   const int x = __float_as_int(v);
@@ -48,9 +48,9 @@ __device__ __forceinline__ float WaveSum(float v) {
 }
 
 /// Sum over a row held by `kLanes` threads, in an order set by `kLanes` and by
-/// nothing else. The waves add in ascending index, so a row keeps its value when
-/// a batch boundary moves it into another block.
-template <int kLanes>
+/// nothing else. The waves add in ascending index, so a row keeps its value
+/// when a batch boundary moves it into another block.
+template<int kLanes>
 __device__ __forceinline__ float RowSum(float v, float* scratch) {
   v = WaveSum(v);
   if constexpr (kLanes > kWave) {
@@ -68,19 +68,22 @@ __device__ __forceinline__ float RowSum(float v, float* scratch) {
   return v;
 }
 
-__device__ __forceinline__ float4 Zero4() { return {0.0F, 0.0F, 0.0F, 0.0F}; }
+__device__ __forceinline__ float4 Zero4() {
+  return {0.0F, 0.0F, 0.0F, 0.0F};
+}
 
 /// y[r] = x[r] * rsqrt(mean(x[r]^2) + eps) * w, with w optional.
 ///
 /// One row per wave while the row is narrow and one per block beyond, each lane
-/// keeping its part of the row in registers so it crosses memory once. The scale
-/// is the correctly rounded reciprocal square root rather than the fast
+/// keeping its part of the row in registers so it crosses memory once. The
+/// scale is the correctly rounded reciprocal square root rather than the fast
 /// approximation: it costs one division per row, and it is what puts a
 /// normalized row within an ulp of the reference instead of within a few.
-template <int kLanes, int kWindow>
+template<int kLanes, int kWindow>
 __global__ void __launch_bounds__(kBlock) RmsNormKernel(NormRowsArgs a) {
   constexpr int kRowsPerBlock = kBlock / kLanes;
-  [[maybe_unused]] __shared__ float scratch[kLanes > kWave ? kLanes / kWave : 1];
+  [[maybe_unused]] __shared__ float
+      scratch[kLanes > kWave ? kLanes / kWave : 1];
   const std::uint32_t lane = threadIdx.x % kLanes;
   const std::size_t row = static_cast<std::size_t>(blockIdx.x) * kRowsPerBlock +
                           threadIdx.x / kLanes;
@@ -125,12 +128,12 @@ __global__ void __launch_bounds__(kBlock) RmsNormKernel(NormRowsArgs a) {
   }
 }
 
-/// x[i] += add[i] over whole vectors. The elements past the last whole vector of
-/// a count that is not a multiple of four are added scalar by the first threads
-/// of the first block rather than by padding the buffer.
-__global__ void __launch_bounds__(kBlock) AddKernel(float* x, const float* add,
-                                                    std::size_t groups,
-                                                    std::size_t count) {
+/// x[i] += add[i] over whole vectors. The elements past the last whole vector
+/// of a count that is not a multiple of four are added scalar by the first
+/// threads of the first block rather than by padding the buffer.
+__global__ void __launch_bounds__(kBlock)
+    AddKernel(float* x, const float* add, std::size_t groups,
+              std::size_t count) {
   const std::size_t first =
       static_cast<std::size_t>(blockIdx.x) * kBlock + threadIdx.x;
   float4* xv = reinterpret_cast<float4*>(x);
@@ -149,10 +152,10 @@ __global__ void __launch_bounds__(kBlock) AddKernel(float* x, const float* add,
 /// silu(gate) * up.
 ///
 /// The activation is the sigmoid-weighted one, v / (1 + exp(-v)). It is NOT the
-/// tanh-approximated gelu the other engine in the tree uses for its experts: the
-/// two agree for positive arguments and differ by a tenth around v = -3, which is
-/// exactly where expert gates sit, so trading one for the other is an accuracy
-/// loss that no shape check ever notices.
+/// tanh-approximated gelu the other engine in the tree uses for its experts:
+/// the two agree for positive arguments and differ by a tenth around v = -3,
+/// which is exactly where expert gates sit, so trading one for the other is an
+/// accuracy loss that no shape check ever notices.
 __global__ void __launch_bounds__(kBlock)
     GateUpKernel(const float* gate, const float* up, float* act,
                  std::size_t groups, std::size_t count) {
@@ -183,10 +186,11 @@ __global__ void __launch_bounds__(kBlock)
 /// The contributions add in ascending expert index and the shared one is folded
 /// in first, so a row cannot pick up a neighbour's rounding and a change of
 /// batch leaves its value alone.
-template <int kLanes, int kWindow>
+template<int kLanes, int kWindow>
 __global__ void __launch_bounds__(kBlock) MoeFinishKernel(MoeFinishArgs a) {
   constexpr int kRowsPerBlock = kBlock / kLanes;
-  [[maybe_unused]] __shared__ float scratch[kLanes > kWave ? kLanes / kWave : 1];
+  [[maybe_unused]] __shared__ float
+      scratch[kLanes > kWave ? kLanes / kWave : 1];
   const std::uint32_t lane = threadIdx.x % kLanes;
   const std::size_t row = static_cast<std::size_t>(blockIdx.x) * kRowsPerBlock +
                           threadIdx.x / kLanes;
@@ -243,7 +247,7 @@ __global__ void __launch_bounds__(kBlock) MoeFinishKernel(MoeFinishArgs a) {
 }
 
 /// Launches the norm over the grid with one row per `kLanes` threads.
-template <int kLanes, int kWindow>
+template<int kLanes, int kWindow>
 void LaunchNormAt(const NormRowsArgs& a, hipStream_t stream) {
   const std::uint32_t rows_per_block = kBlock / kLanes;
   const dim3 grid((a.rows + rows_per_block - 1) / rows_per_block);
@@ -253,7 +257,7 @@ void LaunchNormAt(const NormRowsArgs& a, hipStream_t stream) {
 /// The narrowest register window that still covers the row. `n` picks it and
 /// nothing else does, which is the whole reason a row sums the same way in a
 /// one-token decode as in a prefill.
-template <int kLanes, int kWindow>
+template<int kLanes, int kWindow>
 void LaunchNorm(const NormRowsArgs& a, hipStream_t stream) {
   if constexpr (kWindow <
                 (kLanes == kWave ? kMaxWaveWindow : kMaxBlockWindow)) {
@@ -267,14 +271,14 @@ void LaunchNorm(const NormRowsArgs& a, hipStream_t stream) {
   }
 }
 
-template <int kLanes, int kWindow>
+template<int kLanes, int kWindow>
 void LaunchFinishAt(const MoeFinishArgs& a, hipStream_t stream) {
   const std::uint32_t rows_per_block = kBlock / kLanes;
   const dim3 grid((a.rows + rows_per_block - 1) / rows_per_block);
   MoeFinishKernel<kLanes, kWindow><<<grid, kBlock, 0, stream>>>(a);
 }
 
-template <int kLanes, int kWindow>
+template<int kLanes, int kWindow>
 void LaunchFinish(const MoeFinishArgs& a, hipStream_t stream) {
   if constexpr (kWindow <
                 (kLanes == kWave ? kMaxWaveWindow : kMaxBlockWindow)) {
@@ -355,7 +359,8 @@ void MoeFinish(const MoeFinishArgs& args, hipStream_t stream) {
   if (args.rows == 0) {
     return;
   }
-  if (Groups(args.hidden) <= static_cast<std::uint32_t>(kWave) * kMaxWaveWindow) {
+  if (Groups(args.hidden) <=
+      static_cast<std::uint32_t>(kWave) * kMaxWaveWindow) {
     LaunchFinish<kWave, 1>(args, stream);
   } else {
     LaunchFinish<kBlock, 1>(args, stream);

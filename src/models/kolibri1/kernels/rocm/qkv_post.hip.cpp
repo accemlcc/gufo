@@ -62,18 +62,16 @@ __global__ void __launch_bounds__(kThreads) QkvPostKernel(QkvPostArgs a) {
   const bool active = head < total && row < a.rows;
   const bool query = active && head < a.heads;
   const bool key = active && !query && head < a.heads + a.kv_heads;
-  const std::uint32_t kv_head = active && !query
-                                    ? head - a.heads - (key ? 0U : a.kv_heads)
-                                    : 0U;
+  const std::uint32_t kv_head =
+      active && !query ? head - a.heads - (key ? 0U : a.kv_heads) : 0U;
   const std::uint32_t position = a.first_position + row;
 
   // One thread per rotation pair. The turn is formed in double and only the
   // result is shared, so the cost is sixty-four double sines per block instead
   // of one per head and dimension.
   if (a.apply_rope && active && threadIdx.x < kDim / 2) {
-    const double angle =
-        static_cast<double>(position) *
-        pow(a.theta_scale, static_cast<double>(threadIdx.x));
+    const double angle = static_cast<double>(position) *
+                         pow(a.theta_scale, static_cast<double>(threadIdx.x));
     double c = 0.0;
     double s = 0.0;
     sincos(angle, &s, &c);
@@ -88,8 +86,7 @@ __global__ void __launch_bounds__(kThreads) QkvPostKernel(QkvPostArgs a) {
       query ? static_cast<std::size_t>(row) * a.heads + head
             : static_cast<std::size_t>(row) * a.kv_heads + kv_head;
   const std::size_t dim0 = static_cast<std::size_t>(lane) * kPerLane;
-  const float* src =
-      (query ? a.q : key ? a.k : a.v) + head_row * kDim + dim0;
+  const float* src = (query ? a.q : key ? a.k : a.v) + head_row * kDim + dim0;
   float4 x = {0.0F, 0.0F, 0.0F, 0.0F};
   if (active) {
     x = *reinterpret_cast<const float4*>(src);
@@ -110,9 +107,10 @@ __global__ void __launch_bounds__(kThreads) QkvPostKernel(QkvPostArgs a) {
     return;
   }
 
-  const float r = rsqrtf(WaveSum(x.x * x.x + x.y * x.y + x.z * x.z + x.w * x.w) *
-                             (1.0F / static_cast<float>(kDim)) +
-                         a.eps);
+  const float r =
+      rsqrtf(WaveSum(x.x * x.x + x.y * x.y + x.z * x.z + x.w * x.w) *
+                 (1.0F / static_cast<float>(kDim)) +
+             a.eps);
   const float* w = query ? a.q_norm : a.k_norm;
   x.x *= r * w[dim0 + 0];
   x.y *= r * w[dim0 + 1];

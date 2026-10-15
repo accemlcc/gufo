@@ -8,14 +8,15 @@
 //     and two row groups of 16 queries, one wave each. Its 16x16 score tile is
 //     16 queries by 16 keys, and a row's causal bound differs per row.
 //   heads-as-rows (decode): with a single query row the twelve heads of one key
-//     head become the fragment rows, so one wave holds one tile and all its rows
-//     share a bound. The other seven waves of the block stage the next key tile,
-//     which is where decode actually spends its time.
+//     head become the fragment rows, so one wave holds one tile and all its
+//     rows share a bound. The other seven waves of the block stage the next key
+//     tile, which is where decode actually spends its time.
 //
 // Key ranges are long on purpose: the ten no-position layers read the whole
-// history, up to 131072 keys. Those ranges are cut into splits that each produce
-// a partial output plus its max and sum, and a merge kernel combines them, so a
-// long context gets parallelism instead of one serial walker per key head.
+// history, up to 131072 keys. Those ranges are cut into splits that each
+// produce a partial output plus its max and sum, and a merge kernel combines
+// them, so a long context gets parallelism instead of one serial walker per key
+// head.
 //
 // Per 16-key tile the block stages K row-major and V transposed in LDS once for
 // every wave. Scores come out of the matrix cores in FP32 and pass through LDS
@@ -26,8 +27,8 @@
 // Fragment layout of wave32 v_wmma_f32_16x16x16_f16: an A lane holds sixteen
 // contiguous reduction elements of row lane%16, a B lane holds sixteen
 // contiguous reduction elements of column lane%16, and a C lane holds element i
-// of row 2i + lane/16 at column lane%16. The reduction of Q times K transpose is
-// the head dimension, so its sixteen accumulators add into one C fragment.
+// of row 2i + lane/16 at column lane%16. The reduction of Q times K transpose
+// is the head dimension, so its sixteen accumulators add into one C fragment.
 #include "src/models/kolibri1/kernels/rocm/attention.hpp"
 
 #include <hip/hip_fp16.h>
@@ -125,8 +126,8 @@ __global__ void __launch_bounds__(kThreads)
 
   // Prefill gives each wave one head and one group of sixteen query rows, so a
   // block covers two heads by four row groups - sixty-four query rows - and
-  // grid.y runs over the head pairs of a key group. Decode has a single tile per
-  // key head: wave 0 computes it while the other seven stage the key tiles,
+  // grid.y runs over the head pairs of a key group. Decode has a single tile
+  // per key head: wave 0 computes it while the other seven stage the key tiles,
   // which is where decode time actually goes.
   constexpr std::uint32_t kHeadsPerBlock = kHeadsAsRows ? 1 : 2;
   constexpr std::uint32_t kRowGroups = kWaves / kHeadsPerBlock;
@@ -154,8 +155,8 @@ __global__ void __launch_bounds__(kThreads)
   for (std::uint32_t ks = 0; ks < kSteps; ++ks) {
     const std::uint32_t q_row = kHeadsAsRows ? query_start : row0 + sub;
     const std::uint32_t q_head = kHeadsAsRows ? head + sub : head;
-    const bool live = computes && sub < live_rows && q_row < a.rows &&
-                      q_head < a.heads;
+    const bool live =
+        computes && sub < live_rows && q_row < a.rows && q_head < a.heads;
     const float* src =
         a.q + (static_cast<std::size_t>(q_row) * a.heads + q_head) * kDim +
         ks * kKeys;
@@ -209,12 +210,13 @@ __global__ void __launch_bounds__(kThreads)
     uint4 k_chunk = make_uint4(0U, 0U, 0U, 0U);
     uint4 v_chunk = make_uint4(0U, 0U, 0U, 0U);
     if (position < keys.hi) {
-      const std::size_t offset =
-          slot_of(position) * kv_stride + static_cast<std::size_t>(kv_head) * kDim;
+      const std::size_t offset = slot_of(position) * kv_stride +
+                                 static_cast<std::size_t>(kv_head) * kDim;
       k_chunk = *reinterpret_cast<const uint4*>(k_cache + offset + chunk_d8);
       v_chunk = *reinterpret_cast<const uint4*>(v_cache + offset + chunk_d8);
     }
-    *reinterpret_cast<uint4*>(&k_lds[chunk_key * kKStride + chunk_d8]) = k_chunk;
+    *reinterpret_cast<uint4*>(&k_lds[chunk_key * kKStride + chunk_d8]) =
+        k_chunk;
     // V transposed: the eight dims of one key become eight rows of one column.
     const __half* vh = reinterpret_cast<const __half*>(&v_chunk);
 #pragma unroll
@@ -245,7 +247,8 @@ __global__ void __launch_bounds__(kThreads)
         const Bounds bounds = KeyBounds(a, a.first_position + query_row);
         const bool valid = frag_row < live_rows && query_row < a.rows &&
                            key >= bounds.lo && key < bounds.hi;
-        s_lds[wave * 16 + frag_row][sub] = valid ? score[i] * a.scale : -INFINITY;
+        s_lds[wave * 16 + frag_row][sub] =
+            valid ? score[i] * a.scale : -INFINITY;
       }
     }
     __syncthreads();
@@ -347,7 +350,8 @@ __global__ void __launch_bounds__(kThreads)
           continue;
         }
         const float total = row_sum[wave * 16 + frag_row];
-        a.out[(static_cast<std::size_t>(query_row) * a.heads + out_head) * kDim +
+        a.out[(static_cast<std::size_t>(query_row) * a.heads + out_head) *
+                  kDim +
               ks * kKeys + (lane & 15U)] =
             total > 0.0F ? o_acc[ks][i] / total : 0.0F;
       }
@@ -357,8 +361,7 @@ __global__ void __launch_bounds__(kThreads)
 
 /// Combine the partial outputs of a split run. Each partial carries its own max
 /// and sum, so the combination is the same rescaling the tile loop applies.
-__global__ void __launch_bounds__(256)
-    AttentionMergeKernel(AttentionArgs a) {
+__global__ void __launch_bounds__(256) AttentionMergeKernel(AttentionArgs a) {
   const std::size_t index =
       static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   const std::size_t slots =
@@ -368,7 +371,8 @@ __global__ void __launch_bounds__(256)
   }
   const std::size_t head_slot = index % (kDim + 2);
   const std::size_t row_head = index / (kDim + 2);
-  // One partial per split, each holding the head dimension plus its max and sum.
+  // One partial per split, each holding the head dimension plus its max and
+  // sum.
   const std::size_t split_stride = slots;
   float best = -INFINITY;
   for (std::uint32_t s = 0; s < a.splits; ++s) {
@@ -379,8 +383,8 @@ __global__ void __launch_bounds__(256)
     if (head_slot < kDim) {
       const std::uint32_t row = static_cast<std::uint32_t>(row_head / a.heads);
       const std::uint32_t head = static_cast<std::uint32_t>(row_head % a.heads);
-      a.out[(static_cast<std::size_t>(row) * a.heads + head) * kDim + head_slot] =
-          0.0F;
+      a.out[(static_cast<std::size_t>(row) * a.heads + head) * kDim +
+            head_slot] = 0.0F;
     }
     return;
   }
@@ -438,8 +442,8 @@ void Attention(const AttentionArgs& args, hipStream_t stream) {
     return;
   }
   if (args.rows == 1) {
-    // Decode: one key head per block row, its twelve heads as fragment rows, and
-    // as many slices along the keys as the visible range supports.
+    // Decode: one key head per block row, its twelve heads as fragment rows,
+    // and as many slices along the keys as the visible range supports.
     AttentionArgs split = args;
     const std::uint32_t limit =
         std::min(args.key_limit, args.first_position + args.rows);
@@ -449,8 +453,8 @@ void Attention(const AttentionArgs& args, hipStream_t stream) {
     const dim3 grid(1, args.kv_heads, split.splits);
     AttentionKernel<true><<<grid, kThreads, 0, stream>>>(split);
     if (split.splits > 1) {
-      // One thread per output element plus the max and sum of each row and head;
-      // each thread walks the splits itself.
+      // One thread per output element plus the max and sum of each row and
+      // head; each thread walks the splits itself.
       const std::size_t slots =
           static_cast<std::size_t>(args.rows) * args.heads * (kDim + 2);
       AttentionMergeKernel<<<static_cast<std::uint32_t>((slots + 255) / 256),

@@ -17,7 +17,6 @@ namespace {
 // DIAGNOSTIC ONLY: stage boundaries one run records into the snapshot ring.
 constexpr std::size_t kSnapshotBoundaries = 1024;
 
-
 /// Every scratch buffer starts on this boundary so a kernel may read a vector
 /// of floats or halves as one value.
 constexpr std::size_t kAlign = 256;
@@ -52,9 +51,9 @@ struct Arena {
     const std::size_t size = Pad(count * sizeof(T));
     if (plan != nullptr && index < plan->size() &&
         plan->at(index).first != size) {
-      std::fprintf(
-          stderr, "kolibri1 scratch %s is %zu bytes, the plan said %zu\n",
-          plan->at(index).second, size, plan->at(index).first);
+      std::fprintf(stderr,
+                   "kolibri1 scratch %s is %zu bytes, the plan said %zu\n",
+                   plan->at(index).second, size, plan->at(index).first);
       std::abort();
     }
     auto* p = reinterpret_cast<T*>(at);
@@ -227,20 +226,22 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
   shared_ = arena.Take<float>(static_cast<std::size_t>(max_rows_) * d);
   moe_gate_ =
       arena.Take<float>(static_cast<std::size_t>(max_rows_) * used * width);
-  moe_up_ = arena.Take<float>(static_cast<std::size_t>(max_rows_) * used * width);
-  moe_act_ = arena.Take<float>(static_cast<std::size_t>(max_rows_) * used * width);
+  moe_up_ =
+      arena.Take<float>(static_cast<std::size_t>(max_rows_) * used * width);
+  moe_act_ =
+      arena.Take<float>(static_cast<std::size_t>(max_rows_) * used * width);
   moe_out_ = arena.Take<float>(static_cast<std::size_t>(max_rows_) * used * d);
   moe_weights_ = arena.Take<float>(static_cast<std::size_t>(max_rows_) * used);
-  moe_ids_ = arena.Take<std::int32_t>(static_cast<std::size_t>(max_rows_) * used);
+  moe_ids_ =
+      arena.Take<std::int32_t>(static_cast<std::size_t>(max_rows_) * used);
   moe_counts_ = arena.Take<std::uint32_t>(experts);
   moe_groups_ = arena.Take<std::int32_t>(GroupTableInts(experts));
-  dense_groups_ =
-      arena.Take<std::int32_t>(kProjectRows * GroupTableInts(1));
+  dense_groups_ = arena.Take<std::int32_t>(kProjectRows * GroupTableInts(1));
   tokens_ = arena.Take<std::int32_t>(max_rows);
-  logits_ = arena.Take<float>(static_cast<std::size_t>(max_logit_rows_) * vocab);
-  partials_ =
-      arena.Take<float>(AttentionPartialFloats(1, c.num_heads, c.head_dim,
-                                               max_context));
+  logits_ =
+      arena.Take<float>(static_cast<std::size_t>(max_logit_rows_) * vocab);
+  partials_ = arena.Take<float>(
+      AttentionPartialFloats(1, c.num_heads, c.head_dim, max_context));
   act_q8_ = arena.Take<std::uint8_t>(act_bytes);
   act_q8_bytes_ = act_bytes;
   bands_ = std::move(arena.bands);
@@ -260,8 +261,8 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
       t[3 + s] = static_cast<std::int32_t>(s);
     }
   }
-  HIP_CHECK(hipMemcpy(dense_groups_, tables, sizeof(tables),
-                      hipMemcpyHostToDevice));
+  HIP_CHECK(
+      hipMemcpy(dense_groups_, tables, sizeof(tables), hipMemcpyHostToDevice));
   HIP_CHECK(hipStreamCreateWithFlags(&stream_, hipStreamNonBlocking));
 
   // Named like the deepseek runtime's GUFO_DEEPSEEK_ROCM_*_STAGE_PROFILE
@@ -341,16 +342,14 @@ void Executor::Project(const DeviceTensor& w, const float* x,
     // kProjectRows of them.
     hip::LaunchQuantizeActivationQ8_1FromFp32(x, act_q8_, rows, k, stream_);
     hip::LaunchBatchedQuantGEMMPreQuantized(w.type, w.data, act_q8_, y, rows, m,
-                                           k, stream_);
+                                            k, stream_);
     return;
   }
   for (std::uint32_t base = 0; base < rows; base += kProjectRows) {
     const std::uint32_t n = std::min(kProjectRows, rows - base);
     const std::int32_t* table = dense_groups_ + (n - 1) * GroupTableInts(1);
-    const GroupedGemvArgs args{w.quant(), w.data,    table,
-                               1,        x + base * k, y + base * m,
-                               n,        1,           m,
-                               k};
+    const GroupedGemvArgs args{w.quant(),    w.data, table, 1, x + base * k,
+                               y + base * m, n,      1,     m, k};
     if (!GroupedGemv(args, stream_)) {
       throw std::invalid_argument(
           "kolibri1 has no projection kernel for this shape");
@@ -412,8 +411,8 @@ void Executor::Experts(const DeviceLayer& l, const float* h,
                              stream_));
     Mark();
     MoeRoute({x, l.router.f32(), l.router_bias.f32(), nullptr,
-              moe_ids_ + static_cast<std::size_t>(base) * used, w,
-              moe_counts_, moe_groups_, n, d, experts, used},
+              moe_ids_ + static_cast<std::size_t>(base) * used, w, moe_counts_,
+              moe_groups_, n, d, experts, used},
              stream_);
     Mark();
     // The launch bound is the number of groups that can hold a slot at all,
@@ -505,9 +504,8 @@ void Executor::Forward(KvCache& cache, std::span<const std::int32_t> tokens,
     // see the case where the residual agrees and the logits do not.
     if (snapshot_ == nullptr) {
       snapshot_stride_ = static_cast<std::size_t>(max_rows_) * d;
-      HIP_CHECK(hipMalloc(&snapshot_,
-                          kSnapshotBoundaries * snapshot_stride_ *
-                              sizeof(float)));
+      HIP_CHECK(hipMalloc(
+          &snapshot_, kSnapshotBoundaries * snapshot_stride_ * sizeof(float)));
     }
     if (snapshot_count_ < kSnapshotBoundaries) {
       HIP_CHECK(hipMemcpyAsync(snapshot_ + snapshot_count_ * snapshot_stride_,
@@ -528,8 +526,7 @@ void Executor::Forward(KvCache& cache, std::span<const std::int32_t> tokens,
   Stage();
   routed_marks_ = 0;
 
-  const float scale =
-      1.0F / std::sqrt(static_cast<float>(c.head_dim));
+  const float scale = 1.0F / std::sqrt(static_cast<float>(c.head_dim));
   for (std::uint32_t l = 0; l < c.num_layers; ++l) {
     const DeviceLayer& w = model_.layers()[l];
     const bool sliding = c.IsSliding(l);
@@ -595,9 +592,8 @@ void Executor::Forward(KvCache& cache, std::span<const std::int32_t> tokens,
     // first would cost a buffer as wide as the vocabulary per row and a copy
     // on every append that asks for a row; `max_logit_rows` is one today, so
     // the batched form bought nothing.
-    Project(model_.output(),
-            h_ + static_cast<std::size_t>(logit_rows[i]) * d, 1,
-            logits_ + i * model_.vocab_size());
+    Project(model_.output(), h_ + static_cast<std::size_t>(logit_rows[i]) * d,
+            1, logits_ + i * model_.vocab_size());
   }
   Probe(64);
   Stage();
@@ -630,8 +626,8 @@ void Executor::Forward(KvCache& cache, std::span<const std::int32_t> tokens,
   HIP_CHECK(hipEventElapsedTime(&head, stage_events_[layer_end + 1],
                                 stage_events_[last]));
   const float per = static_cast<float>(n);
-  const float total = embed + out_norm + head + acc[0] + acc[1] + acc[2] +
-                      acc[3] + acc[4];
+  const float total =
+      embed + out_norm + head + acc[0] + acc[1] + acc[2] + acc[3] + acc[4];
   std::fprintf(stderr,
                "kolibri1 stage rows=%u embed=%.3f qkv=%.3f attn=%.3f "
                "oproj=%.3f shared=%.3f routed=%.3f out_norm=%.3f head=%.3f "

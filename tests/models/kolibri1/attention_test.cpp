@@ -7,6 +7,8 @@
 // path against a single pass, and the twelve-to-one grouped-query mapping.
 //
 // Needs a gfx1151 device; without one the check skips with 77.
+#include "src/models/kolibri1/kernels/rocm/attention.hpp"
+
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
@@ -21,7 +23,6 @@
 #include <vector>
 
 #include "src/core/hip/hip_utils.hpp"
-#include "src/models/kolibri1/kernels/rocm/attention.hpp"
 
 namespace k = gufo::models::kolibri1::rocm;
 
@@ -54,8 +55,8 @@ T* Device(const std::vector<T>& host) {
 struct Case {
   std::uint32_t rows;
   std::uint32_t first_position;
-  std::uint32_t window;   // 0 for a layer without positional encoding
-  std::uint32_t ring;     // cache capacity, 0 to index by position
+  std::uint32_t window;  // 0 for a layer without positional encoding
+  std::uint32_t ring;    // cache capacity, 0 to index by position
   std::uint32_t key_limit;
   std::uint32_t heads{48};
   std::uint32_t kv_heads{4};
@@ -85,15 +86,15 @@ Range Bounds(const Case& c, std::uint32_t position) {
 Result Run(const Case& c, const std::vector<float>& q,
            const std::vector<std::uint16_t>& kc,
            const std::vector<std::uint16_t>& vc) {
-  const std::size_t capacity = c.ring != 0 ? c.ring : kc.size() / (c.kv_heads * c.head_dim);
+  const std::size_t capacity =
+      c.ring != 0 ? c.ring : kc.size() / (c.kv_heads * c.head_dim);
   float* dq = Device(q);
   auto* dk = Device(kc);
   auto* dv = Device(vc);
   std::vector<float> out(std::size_t{c.rows} * c.heads * c.head_dim, NAN);
   float* dout = Device(out);
-  std::vector<float> partials =
-      std::vector<float>(k::AttentionPartialFloats(c.rows, c.heads, c.head_dim,
-                                                   static_cast<std::uint32_t>(capacity)));
+  std::vector<float> partials = std::vector<float>(k::AttentionPartialFloats(
+      c.rows, c.heads, c.head_dim, static_cast<std::uint32_t>(capacity)));
   float* dpart = Device(partials);
 
   k::AttentionArgs a{};
@@ -116,9 +117,9 @@ Result Run(const Case& c, const std::vector<float>& q,
   HIP_CHECK(hipDeviceSynchronize());
   HIP_CHECK(hipMemcpy(out.data(), dout, out.size() * sizeof(float),
                       hipMemcpyDeviceToHost));
-  for (void* p : {static_cast<void*>(dq), static_cast<void*>(dk),
-                  static_cast<void*>(dv), static_cast<void*>(dout),
-                  static_cast<void*>(dpart)}) {
+  for (void* p :
+       {static_cast<void*>(dq), static_cast<void*>(dk), static_cast<void*>(dv),
+        static_cast<void*>(dout), static_cast<void*>(dpart)}) {
     HIP_CHECK(hipFree(p));
   }
   return {std::move(out)};
@@ -141,8 +142,8 @@ std::vector<double> Reference(const Case& c, const std::vector<float>& q,
       // The kernel's A operand is the query narrowed to binary16.
       std::vector<double> qh(dim);
       for (std::size_t d = 0; d < dim; ++d) {
-        qh[d] = FromHalf(ToHalf(
-            q[(static_cast<std::size_t>(r) * c.heads + h) * dim + d]));
+        qh[d] = FromHalf(
+            ToHalf(q[(static_cast<std::size_t>(r) * c.heads + h) * dim + d]));
       }
       std::vector<double> scores(range.hi - range.lo, 0.0);
       double best = -INFINITY;
@@ -215,7 +216,8 @@ void Check(const Case& c, std::mt19937& rng) {
       ++counted;
     }
   }
-  const double mean_rel = counted != 0 ? sum_rel / static_cast<double>(counted) : 0.0;
+  const double mean_rel =
+      counted != 0 ? sum_rel / static_cast<double>(counted) : 0.0;
   // Binary16 carries about three decimal digits, and the softmax weights a few
   // hundred values whose sum the output divides by. Anything above this is a
   // structural error, not rounding.
@@ -223,13 +225,12 @@ void Check(const Case& c, std::mt19937& rng) {
   std::cout << (ok ? "PASS " : "FAIL ") << c.name << ": rows=" << c.rows
             << " window=" << c.window << " ring=" << c.ring
             << " limit=" << c.key_limit << " keys=" << visible
-            << " max_abs=" << max_abs << " mean_rel=" << mean_rel
-            << " (at " << worst_at << ")\n";
+            << " max_abs=" << max_abs << " mean_rel=" << mean_rel << " (at "
+            << worst_at << ")\n";
   if (!ok) {
     ++failures;
   }
 }
-
 
 /// Reports the time of one shape. Not a gate: the numbers steer the launcher,
 /// and the deep shapes are too large to keep in the checked set.
@@ -299,9 +300,9 @@ void Timed(const Case& c, std::mt19937& rng) {
             << bytes / us / 1e3 << " GB/s of K/V read\n";
   HIP_CHECK(hipEventDestroy(start));
   HIP_CHECK(hipEventDestroy(stop));
-  for (void* ptr : {static_cast<void*>(dq), static_cast<void*>(dk),
-                    static_cast<void*>(dv), static_cast<void*>(dout),
-                    static_cast<void*>(dpart)}) {
+  for (void* ptr :
+       {static_cast<void*>(dq), static_cast<void*>(dk), static_cast<void*>(dv),
+        static_cast<void*>(dout), static_cast<void*>(dpart)}) {
     HIP_CHECK(hipFree(ptr));
   }
 }
@@ -319,30 +320,73 @@ int main() {
   const Case cases[] = {
       // A first token has one key: a mapping bug is invisible only if every
       // case stops here, so the list keeps going.
-      {.rows = 1, .first_position = 0, .window = 513, .ring = 0,
-       .key_limit = 0xffffffffU, .name = "decode first token"},
-      {.rows = 1, .first_position = 40, .window = 513, .ring = 0,
-       .key_limit = 0xffffffffU, .name = "decode inside window"},
-      {.rows = 1, .first_position = 512, .window = 513, .ring = 0,
-       .key_limit = 0xffffffffU, .name = "decode at the window edge"},
+      {.rows = 1,
+       .first_position = 0,
+       .window = 513,
+       .ring = 0,
+       .key_limit = 0xffffffffU,
+       .name = "decode first token"},
+      {.rows = 1,
+       .first_position = 40,
+       .window = 513,
+       .ring = 0,
+       .key_limit = 0xffffffffU,
+       .name = "decode inside window"},
+      {.rows = 1,
+       .first_position = 512,
+       .window = 513,
+       .ring = 0,
+       .key_limit = 0xffffffffU,
+       .name = "decode at the window edge"},
       // The ring is smaller than the position, so these keys really wrap.
-      {.rows = 1, .first_position = 5000, .window = 513, .ring = 2048,
-       .key_limit = 0xffffffffU, .name = "decode sliding with ring wrap"},
-      {.rows = 1, .first_position = 4095, .window = 0, .ring = 0,
+      {.rows = 1,
+       .first_position = 5000,
+       .window = 513,
+       .ring = 2048,
+       .key_limit = 0xffffffffU,
+       .name = "decode sliding with ring wrap"},
+      {.rows = 1,
+       .first_position = 4095,
+       .window = 0,
+       .ring = 0,
        .key_limit = 0xffffffffU,
        .name = "decode no-position layer full history"},
-      {.rows = 1, .first_position = 4095, .window = 0, .ring = 0,
-       .key_limit = 2000, .name = "decode truncated continuation"},
-      {.rows = 7, .first_position = 0, .window = 513, .ring = 0,
-       .key_limit = 0xffffffffU, .name = "prefill partial batch"},
-      {.rows = 64, .first_position = 0, .window = 513, .ring = 0,
-       .key_limit = 0xffffffffU, .name = "prefill one block"},
-      {.rows = 64, .first_position = 500, .window = 513, .ring = 4096,
-       .key_limit = 0xffffffffU, .name = "prefill across the window edge"},
-      {.rows = 100, .first_position = 0, .window = 0, .ring = 0,
-       .key_limit = 0xffffffffU, .name = "prefill no-position layer"},
-      {.rows = 33, .first_position = 3000, .window = 513, .ring = 2048,
-       .key_limit = 0xffffffffU, .name = "prefill ring wrap"},
+      {.rows = 1,
+       .first_position = 4095,
+       .window = 0,
+       .ring = 0,
+       .key_limit = 2000,
+       .name = "decode truncated continuation"},
+      {.rows = 7,
+       .first_position = 0,
+       .window = 513,
+       .ring = 0,
+       .key_limit = 0xffffffffU,
+       .name = "prefill partial batch"},
+      {.rows = 64,
+       .first_position = 0,
+       .window = 513,
+       .ring = 0,
+       .key_limit = 0xffffffffU,
+       .name = "prefill one block"},
+      {.rows = 64,
+       .first_position = 500,
+       .window = 513,
+       .ring = 4096,
+       .key_limit = 0xffffffffU,
+       .name = "prefill across the window edge"},
+      {.rows = 100,
+       .first_position = 0,
+       .window = 0,
+       .ring = 0,
+       .key_limit = 0xffffffffU,
+       .name = "prefill no-position layer"},
+      {.rows = 33,
+       .first_position = 3000,
+       .window = 513,
+       .ring = 2048,
+       .key_limit = 0xffffffffU,
+       .name = "prefill ring wrap"},
   };
   for (const auto& c : cases) {
     Check(c, rng);
@@ -371,14 +415,26 @@ int main() {
   if (std::getenv("KOLIBRI_TIME") != nullptr) {
     // The shapes that decide decode speed: a no-position layer at full context,
     // a sliding layer, and a prefill of one chunk.
-    Timed({.rows = 1, .first_position = 131071, .window = 0, .ring = 131072,
-           .key_limit = 131072, .name = "decode 128k no-position"},
+    Timed({.rows = 1,
+           .first_position = 131071,
+           .window = 0,
+           .ring = 131072,
+           .key_limit = 131072,
+           .name = "decode 128k no-position"},
           rng);
-    Timed({.rows = 1, .first_position = 131071, .window = 513, .ring = 131072,
-           .key_limit = 131072, .name = "decode 128k sliding"},
+    Timed({.rows = 1,
+           .first_position = 131071,
+           .window = 513,
+           .ring = 131072,
+           .key_limit = 131072,
+           .name = "decode 128k sliding"},
           rng);
-    Timed({.rows = 2048, .first_position = 0, .window = 513, .ring = 8192,
-           .key_limit = 2048, .name = "prefill 2048 sliding"},
+    Timed({.rows = 2048,
+           .first_position = 0,
+           .window = 513,
+           .ring = 8192,
+           .key_limit = 2048,
+           .name = "prefill 2048 sliding"},
           rng);
   }
 

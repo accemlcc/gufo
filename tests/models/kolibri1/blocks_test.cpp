@@ -4,9 +4,9 @@
 // arithmetic.
 //
 // What the cases pin: eps inside the square root and after the mean rather than
-// beside it, a norm with no weight tensor, the head-width and hidden-width rows,
-// a row whose bits cannot change when a batch boundary moves it into another
-// block, the sigmoid activation over arguments from -30 to 30 where a
+// beside it, a norm with no weight tensor, the head-width and hidden-width
+// rows, a row whose bits cannot change when a batch boundary moves it into
+// another block, the sigmoid activation over arguments from -30 to 30 where a
 // tanh-approximated gelu differs by a tenth, the mixture's contributions adding
 // in expert order with the shared expert entering at weight 1 and nothing
 // renormalizing the six, a count that ends mid-vector, and a row length that is
@@ -32,7 +32,7 @@ namespace {
 
 int failures = 0;
 
-template <class T>
+template<class T>
 T* Device(const std::vector<T>& host) {
   T* ptr = nullptr;
   HIP_CHECK(hipMalloc(&ptr, host.size() * sizeof(T) + 16));
@@ -101,8 +101,8 @@ void CheckBits(const char* name, const char* what,
 }
 
 /// y = x * r * w over one row, with w absent for an unweighted norm. The eps is
-/// inside the square root and after the mean, which is the placement every other
-/// norm in this tree uses and the one a reshuffled kernel gets wrong.
+/// inside the square root and after the mean, which is the placement every
+/// other norm in this tree uses and the one a reshuffled kernel gets wrong.
 void RmsRow(const std::vector<float>& x, std::size_t base,
             const std::vector<float>* w, std::uint32_t n, double eps,
             std::vector<double>* out) {
@@ -184,9 +184,9 @@ void RunNorm(const NormCase& c, std::mt19937& rng) {
 
 /// The add is one IEEE operation per element, so the expected result is the
 /// correctly rounded one and the check asks for exactly that. The inputs are a
-/// large magnitude and a small one so that nearly every sum needs rounding; with
-/// values that add exactly, the case would pass on a kernel that dropped the
-/// carry into the high bits.
+/// large magnitude and a small one so that nearly every sum needs rounding;
+/// with values that add exactly, the case would pass on a kernel that dropped
+/// the carry into the high bits.
 void RunAdd(std::size_t count, std::mt19937& rng, const char* name) {
   std::uniform_real_distribution<float> big(-1.0e6F, 1.0e6F);
   std::uniform_real_distribution<float> small(-1.0e-3F, 1.0e-3F);
@@ -209,8 +209,8 @@ void RunAdd(std::size_t count, std::mt19937& rng, const char* name) {
   for (std::size_t i = 0; i < count; ++i) {
     // The double sum is exact for two floats, so rounding it once lands on the
     // single IEEE result.
-    want[i] = static_cast<double>(
-        static_cast<float>(static_cast<double>(x[i]) + static_cast<double>(add[i])));
+    want[i] = static_cast<double>(static_cast<float>(
+        static_cast<double>(x[i]) + static_cast<double>(add[i])));
   }
   Check(name, "residual add", want, got, 0.0, 0.0);
   HIP_CHECK(hipFree(dx));
@@ -225,9 +225,8 @@ void RunGateUp(std::size_t count, const char* name) {
   std::vector<float> gate(count);
   std::vector<float> up(count);
   for (std::size_t i = 0; i < count; ++i) {
-    gate[i] = static_cast<float>(-30.0 +
-                                 60.0 * static_cast<double>(i) /
-                                     static_cast<double>(count - 1));
+    gate[i] = static_cast<float>(-30.0 + 60.0 * static_cast<double>(i) /
+                                             static_cast<double>(count - 1));
     up[i] = (i % 2 == 0 ? 1.0F : -1.0F) *
             (0.25F + static_cast<float>(i % 7) / 4.0F);
   }
@@ -323,8 +322,8 @@ void RunFinish(const FinishCase& c, std::mt19937& rng) {
       }
       ss += m * m;
     }
-    const double n = 1.0 / std::sqrt(
-                              ss / static_cast<double>(c.hidden) + c.eps);
+    const double n =
+        1.0 / std::sqrt(ss / static_cast<double>(c.hidden) + c.eps);
     for (std::uint32_t d = 0; d < c.hidden; ++d) {
       double m = shared[static_cast<std::size_t>(r) * c.hidden + d];
       for (std::uint32_t j = 0; j < c.used; ++j) {
@@ -333,7 +332,8 @@ void RunFinish(const FinishCase& c, std::mt19937& rng) {
              static_cast<double>(routed[slot * c.hidden + d]);
       }
       const std::size_t i = static_cast<std::size_t>(r) * c.hidden + d;
-      want[i] = static_cast<double>(x[i]) + m * n * static_cast<double>(post_norm[d]);
+      want[i] =
+          static_cast<double>(x[i]) + m * n * static_cast<double>(post_norm[d]);
     }
   }
   Check(c.name, "mixture finish", want, got, 1e-5, 1e-6);
@@ -347,15 +347,15 @@ void RunFinish(const FinishCase& c, std::mt19937& rng) {
               c.hidden);
     HIP_CHECK(hipFree(dx_one));
   }
-  for (void* p : {static_cast<void*>(dr), static_cast<void*>(ds),
-                  static_cast<void*>(dw), static_cast<void*>(dn),
-                  static_cast<void*>(dx)}) {
+  for (void* p :
+       {static_cast<void*>(dr), static_cast<void*>(ds), static_cast<void*>(dw),
+        static_cast<void*>(dn), static_cast<void*>(dx)}) {
     HIP_CHECK(hipFree(p));
   }
 }
 
 /// True when the launcher refused the shape instead of launching it.
-template <class Args, class Fn>
+template<class Args, class Fn>
 bool Refuses(const Args& a, Fn fn) {
   try {
     fn(a);
@@ -439,13 +439,22 @@ int main() {
   RunGateUp(4096, "gate sweep from -30 to 30");
   RunGateUp(512 * 3 + 3, "expert intermediate plus a tail");
 
-  RunFinish({.rows = 3, .hidden = 2560, .used = 6, .eps = 1e-5,
+  RunFinish({.rows = 3,
+             .hidden = 2560,
+             .used = 6,
+             .eps = 1e-5,
              .name = "mixture at hidden"},
             rng);
-  RunFinish({.rows = 9, .hidden = 128, .used = 6, .eps = 1e-5,
+  RunFinish({.rows = 9,
+             .hidden = 128,
+             .used = 6,
+             .eps = 1e-5,
              .name = "mixture at a narrow width"},
             rng);
-  RunFinish({.rows = 2, .hidden = 2560, .used = 1, .eps = 1e-6,
+  RunFinish({.rows = 2,
+             .hidden = 2560,
+             .used = 1,
+             .eps = 1e-6,
              .name = "shared expert alone beside one routed expert"},
             rng);
 
@@ -457,19 +466,22 @@ int main() {
   n.y = reinterpret_cast<float*>(0x2000);
   n.n = 100;
   n.eps = 1e-5F;
-  ExpectRefused(Refuses(n, [](const k::NormRowsArgs& a) { k::RmsNormRows(a, nullptr); }),
-                "a row length that is not a multiple of 32 is refused");
+  ExpectRefused(
+      Refuses(n, [](const k::NormRowsArgs& a) { k::RmsNormRows(a, nullptr); }),
+      "a row length that is not a multiple of 32 is refused");
   n.n = 8320;
-  ExpectRefused(Refuses(n, [](const k::NormRowsArgs& a) { k::RmsNormRows(a, nullptr); }),
-                "a row wider than the kernel holds in registers is refused");
+  ExpectRefused(
+      Refuses(n, [](const k::NormRowsArgs& a) { k::RmsNormRows(a, nullptr); }),
+      "a row wider than the kernel holds in registers is refused");
 
   k::MoeFinishArgs f{};
   f.rows = 1;
   f.hidden = 33;
   f.used = 6;
   f.eps = 1e-5F;
-  ExpectRefused(Refuses(f, [](const k::MoeFinishArgs& a) { k::MoeFinish(a, nullptr); }),
-                "a hidden size that is not a multiple of 32 is refused");
+  ExpectRefused(
+      Refuses(f, [](const k::MoeFinishArgs& a) { k::MoeFinish(a, nullptr); }),
+      "a hidden size that is not a multiple of 32 is refused");
 
   float* base = nullptr;
   HIP_CHECK(hipMalloc(&base, 4096));
@@ -477,21 +489,24 @@ int main() {
   add.x = base + 1;
   add.add = base;
   add.count = 64;
-  ExpectRefused(Refuses(add, [](const k::AddRowsArgs& a) { k::AddRows(a, nullptr); }),
-                "an add whose base is not vector aligned is refused");
+  ExpectRefused(
+      Refuses(add, [](const k::AddRowsArgs& a) { k::AddRows(a, nullptr); }),
+      "an add whose base is not vector aligned is refused");
   k::GateUpArgs gu{};
   gu.gate = base;
   gu.up = base + 2;
   gu.act = base;
   gu.count = 64;
-  ExpectRefused(Refuses(gu, [](const k::GateUpArgs& a) { k::GateUpAct(a, nullptr); }),
-                "a gate or up base that is not vector aligned is refused");
+  ExpectRefused(
+      Refuses(gu, [](const k::GateUpArgs& a) { k::GateUpAct(a, nullptr); }),
+      "a gate or up base that is not vector aligned is refused");
   HIP_CHECK(hipFree(base));
 
   if (failures != 0) {
     std::cout << failures << " block checks failed\n";
     return 1;
   }
-  std::cout << "kolibri1 block arithmetic matches the reference over every case\n";
+  std::cout
+      << "kolibri1 block arithmetic matches the reference over every case\n";
   return 0;
 }

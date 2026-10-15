@@ -63,7 +63,7 @@ public:
     TokenId bos{-1};                  ///< -1 when the file names none.
     TokenId eos{-1};
     TokenId pad{-1};
-    TokenId unknown{-1};              ///< -1 when the file names none.
+    TokenId unknown{-1};  ///< -1 when the file names none.
     bool add_bos{false};
   };
 

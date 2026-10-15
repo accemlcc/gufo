@@ -19,14 +19,14 @@
 // all the way is exact and cost 261 us for a full sixteen rows against the 105
 // us this takes; the fp64 adders of this generation trail the memory that feeds
 // them, and the router is otherwise 384 * 2560 * 4 = 3.9 MB of weights a layer.
-#include "src/models/kolibri1/kernels/rocm/moe.hpp"
-
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+
 #include "src/core/hip/hip_utils.hpp"
+#include "src/models/kolibri1/kernels/rocm/moe.hpp"
 
 namespace gufo::models::kolibri1::rocm {
 namespace {
@@ -72,12 +72,12 @@ static_assert(kRouterChunkQuads % kWave == 0,
 /// per expert. Measured on this device over a fixed input, microseconds per
 /// launch: the narrow shape is 29.4 at one row, 33.6 at two, 41.9 at four and
 /// 61.9 at eight, the tiled shape 51.0, 45.5, 45.6 and 48.8 at the same widths.
-/// They cross between four and eight, and above it the tiled lead grows to 3.25×
-/// at 256 rows (`tools/kolibri/router_hash.cpp`, which hashes the logits of
-/// both shapes as well and finds them identical at every width — the choice is
-/// a timing question and not a numerics one). To re-measure the crossover on
-/// another device, build that tool against this file twice, once with this
-/// constant at one and once past the widest width it sweeps.
+/// They cross between four and eight, and above it the tiled lead grows
+/// to 3.25× at 256 rows (`tools/kolibri/router_hash.cpp`, which hashes the
+/// logits of both shapes as well and finds them identical at every width — the
+/// choice is a timing question and not a numerics one). To re-measure the
+/// crossover on another device, build that tool against this file twice, once
+/// with this constant at one and once past the widest width it sweeps.
 constexpr std::uint32_t kRouterTiledMinRows = 8;
 
 /// One wave per expert: lane l reads the float4s of router[e] at l + 32 i, so
@@ -96,10 +96,10 @@ constexpr std::uint32_t kRouterTiledMinRows = 8;
 /// below brings 192 waves, about five. At one row that difference is the whole
 /// cost: 29.4 µs here against 51.0 there.
 __global__ void __launch_bounds__(kRouterThreads)
-RouterKernelNarrow(const float* __restrict__ x,
-                   const float* __restrict__ router,
-                   float* __restrict__ logits, std::uint32_t rows,
-                   std::uint32_t hidden, std::uint32_t experts) {
+    RouterKernelNarrow(const float* __restrict__ x,
+                       const float* __restrict__ router,
+                       float* __restrict__ logits, std::uint32_t rows,
+                       std::uint32_t hidden, std::uint32_t experts) {
   const std::uint32_t lane = threadIdx.x % kWave;
   const std::uint32_t e = blockIdx.x * kRouterWaves + threadIdx.x / kWave;
   // A wave past the last expert leaves rather than waits: this kernel has no
@@ -108,13 +108,11 @@ RouterKernelNarrow(const float* __restrict__ x,
     return;
   }
   const std::uint32_t quads = hidden / 4;  // a multiple of the wave
-  const float4* const wr =
-      reinterpret_cast<const float4*>(router +
-                                      static_cast<std::size_t>(e) * hidden);
+  const float4* const wr = reinterpret_cast<const float4*>(
+      router + static_cast<std::size_t>(e) * hidden);
   for (std::uint32_t r = 0; r < rows; ++r) {
-    const float4* const xr =
-        reinterpret_cast<const float4*>(x +
-                                        static_cast<std::size_t>(r) * hidden);
+    const float4* const xr = reinterpret_cast<const float4*>(
+        x + static_cast<std::size_t>(r) * hidden);
     float4 part = {0.0F, 0.0F, 0.0F, 0.0F};
     for (std::uint32_t i = lane; i < quads; i += kWave) {
       const float4 w = wr[i];
@@ -124,9 +122,8 @@ RouterKernelNarrow(const float* __restrict__ x,
       part.z = __builtin_fmaf(w.z, v.z, part.z);
       part.w = __builtin_fmaf(w.w, v.w, part.w);
     }
-    double acc =
-        ((static_cast<double>(part.x) + static_cast<double>(part.y)) +
-         (static_cast<double>(part.z) + static_cast<double>(part.w)));
+    double acc = ((static_cast<double>(part.x) + static_cast<double>(part.y)) +
+                  (static_cast<double>(part.z) + static_cast<double>(part.w)));
     acc = WaveSum(acc);
     if (lane == 0) {
       logits[static_cast<std::size_t>(r) * experts + e] =
@@ -154,16 +151,16 @@ RouterKernelNarrow(const float* __restrict__ x,
 /// and `tools/kolibri/router_hash.cpp` hashes every width of it over a fixed
 /// input before this file changes.
 __global__ void __launch_bounds__(kRouterThreads)
-RouterKernelTiled(const float* __restrict__ x, const float* __restrict__ router,
-                  float* __restrict__ logits, std::uint32_t rows,
-                  std::uint32_t hidden, std::uint32_t experts) {
+    RouterKernelTiled(const float* __restrict__ x,
+                      const float* __restrict__ router,
+                      float* __restrict__ logits, std::uint32_t rows,
+                      std::uint32_t hidden, std::uint32_t experts) {
   __shared__ float4 w_tile[kRouterExpertsPerBlock][kRouterChunkQuads];
   const std::uint32_t lane = threadIdx.x % kWave;
   const std::uint32_t wave = threadIdx.x / kWave;
   const std::uint32_t quads = hidden / 4;
-  const std::uint32_t r0 =
-      blockIdx.x * (kRouterWaves * kRouterRowsPerWave) +
-      wave * kRouterRowsPerWave;
+  const std::uint32_t r0 = blockIdx.x * (kRouterWaves * kRouterRowsPerWave) +
+                           wave * kRouterRowsPerWave;
   const std::uint32_t e0 = blockIdx.y * kRouterExpertsPerBlock;
   const float4* const xr = reinterpret_cast<const float4*>(x);
   const float4* const wr = reinterpret_cast<const float4*>(router);
@@ -261,11 +258,12 @@ __device__ __forceinline__ bool Better(double a, std::int32_t ia, double b,
 /// row's whole answer -- and then `used` rounds of a wave reduction pop the
 /// experts in order. A row's numbers therefore depend on its own logits only.
 __global__ void __launch_bounds__(kSelectThreads)
-SelectKernel(const float* __restrict__ logits, const float* __restrict__ bias,
-             std::int32_t* __restrict__ ids, float* __restrict__ weights,
-             std::uint32_t* __restrict__ counts,
-             std::int32_t* __restrict__ groups, std::uint32_t rows,
-             std::uint32_t experts, std::uint32_t used) {
+    SelectKernel(const float* __restrict__ logits,
+                 const float* __restrict__ bias, std::int32_t* __restrict__ ids,
+                 float* __restrict__ weights,
+                 std::uint32_t* __restrict__ counts,
+                 std::int32_t* __restrict__ groups, std::uint32_t rows,
+                 std::uint32_t experts, std::uint32_t used) {
   const std::uint32_t lane = threadIdx.x % kWave;
   const std::uint32_t wave = threadIdx.x / kWave;
   // The row this wave selects out of the whole launch, so a grid of blocks
@@ -286,11 +284,10 @@ SelectKernel(const float* __restrict__ logits, const float* __restrict__ bias,
     for (std::uint32_t e = lane; e < experts; e += kWave) {
       // The sum is exact in double: two floats added there lose nothing, so a
       // tie here is a tie in the arithmetic and not an artefact of rounding.
-      const double score = static_cast<double>(row[e]) +
-                           static_cast<double>(bias[e]);
+      const double score =
+          static_cast<double>(row[e]) + static_cast<double>(bias[e]);
       const std::int32_t id = static_cast<std::int32_t>(e);
-      if (!Better(score, id, best_score[kMaxUsed - 1],
-                  best_id[kMaxUsed - 1])) {
+      if (!Better(score, id, best_score[kMaxUsed - 1], best_id[kMaxUsed - 1])) {
         continue;  // the common case: worse than this lane's sixteenth best
       }
       // Sink it through the list by successive exchange from the front down:
@@ -318,8 +315,10 @@ SelectKernel(const float* __restrict__ logits, const float* __restrict__ bias,
       std::int32_t id = best_id[0];
 #pragma unroll
       for (std::uint32_t m = kWave / 2; m > 0; m >>= 1) {
-        const double other_score = __shfl_xor(score, static_cast<int>(m), kWave);
-        const std::int32_t other_id = __shfl_xor(id, static_cast<int>(m), kWave);
+        const double other_score =
+            __shfl_xor(score, static_cast<int>(m), kWave);
+        const std::int32_t other_id =
+            __shfl_xor(id, static_cast<int>(m), kWave);
         if (Better(other_score, other_id, score, id)) {
           score = other_score;
           id = other_id;
@@ -367,8 +366,7 @@ SelectKernel(const float* __restrict__ logits, const float* __restrict__ bias,
   }
   __syncthreads();
 
-  const std::uint32_t chunk =
-      (experts + kSelectThreads - 1) / kSelectThreads;
+  const std::uint32_t chunk = (experts + kSelectThreads - 1) / kSelectThreads;
   const std::uint32_t lo = threadIdx.x * chunk;
   const std::uint32_t hi = lo + chunk < experts ? lo + chunk : experts;
   const auto count_of = [&](std::int32_t e) {
@@ -386,8 +384,7 @@ SelectKernel(const float* __restrict__ logits, const float* __restrict__ bias,
   s_scan[threadIdx.x] = mine;
   __syncthreads();
   for (std::uint32_t off = 1; off < kSelectThreads; off <<= 1) {
-    const int behind =
-        threadIdx.x >= off ? s_scan[threadIdx.x - off] : 0;
+    const int behind = threadIdx.x >= off ? s_scan[threadIdx.x - off] : 0;
     __syncthreads();
     s_scan[threadIdx.x] += behind;
     __syncthreads();
@@ -480,8 +477,8 @@ void MoeRoute(const MoeRouteArgs& args, hipStream_t stream) {
     return;
   }
   if (args.rows > kMaxGroupSlots) {
-    throw std::invalid_argument(
-        "MoeRoute covers at most " + std::to_string(kMaxGroupSlots) + " rows");
+    throw std::invalid_argument("MoeRoute covers at most " +
+                                std::to_string(kMaxGroupSlots) + " rows");
   }
   // A table over more rows than one block selects cannot be built from a
   // block's own ids: the gather reads the counts, which the caller then has to
@@ -496,7 +493,7 @@ void MoeRoute(const MoeRouteArgs& args, hipStream_t stream) {
       throw std::invalid_argument(
           "MoeRoute's gather gives one thread to each expert, so a wide table "
           "covers at most " +
-              std::to_string(kGatherExperts) + " experts");
+          std::to_string(kGatherExperts) + " experts");
     }
   }
   if (args.used > args.experts) {

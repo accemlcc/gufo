@@ -23,7 +23,7 @@ namespace gufo::models::kolibri1 {
 /// `top_k(logits + bias)` but weighted by the unbiased `sigmoid(logits)` with
 /// no renormalisation, and the one ungated shared expert added with weight 1.
 class Reference {
- public:
+public:
   /// K/V stays in double and activations are never rounded, so a difference
   /// against the device path is the operators and the cache format, not the
   /// arithmetic the kernels cannot avoid.
@@ -33,8 +33,7 @@ class Reference {
   /// `logits` receives [tokens.size()][vocab] rows and `hidden` the post-norm
   /// rows fed to the LM head; either may be null. Processing a prefix in
   /// several calls gives identical results.
-  void Forward(std::span<const std::int32_t> tokens,
-               std::vector<float>* logits,
+  void Forward(std::span<const std::int32_t> tokens, std::vector<float>* logits,
                std::vector<float>* hidden = nullptr);
 
   /// When enabled, Forward records the residual stream after every layer:
@@ -61,7 +60,7 @@ class Reference {
   [[nodiscard]] std::uint32_t Position() const noexcept { return position_; }
   void Reset();
 
- private:
+private:
   /// out[r][o] = sum_c W[o][c] * x[r][c] for `rows` input rows.
   void MatMul(const TensorRef& weight, const float* x, std::size_t rows,
               float* out) const;

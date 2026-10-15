@@ -30,15 +30,15 @@ double Elapsed(std::chrono::steady_clock::time_point since) {
 }
 
 [[nodiscard]] std::unique_ptr<k1::Model> LoadModel(
-    const PromptOptions& opt, std::chrono::steady_clock::time_point load_start) {
+    const PromptOptions& opt,
+    std::chrono::steady_clock::time_point load_start) {
   std::string error;
-  auto model = k1::Model::Load(
-      opt.model_path,
-      k1::ModelOptions{
-          .max_context = kKolibriContext,
-          .prefill_chunk = 16,
-      },
-      &error);
+  auto model = k1::Model::Load(opt.model_path,
+                               k1::ModelOptions{
+                                   .max_context = kKolibriContext,
+                                   .prefill_chunk = 16,
+                               },
+                               &error);
   if (!model) {
     std::cerr << "Kolibri 1 load failed: " << error << '\n';
     return nullptr;
@@ -59,7 +59,8 @@ double Elapsed(std::chrono::steady_clock::time_point since) {
 }
 
 /// Prefills `prompt` and generates until the model stops or `opt.max_tokens`
-/// are out. `reply` collects the text of the turn when the caller keeps history.
+/// are out. `reply` collects the text of the turn when the caller keeps
+/// history.
 int Generate(const PromptOptions& opt, const k1::Model& model,
              k1::Session& session, std::span<const k1::TokenId> prompt,
              std::string* reply) {
@@ -129,9 +130,9 @@ int Generate(const PromptOptions& opt, const k1::Model& model,
   return messages;
 }
 
-[[nodiscard]] std::vector<k1::TokenId> Render(const k1::Model& model,
-                                              std::span<const tokenization::ChatMessage> messages,
-                                              const PromptOptions& opt) {
+[[nodiscard]] std::vector<k1::TokenId> Render(
+    const k1::Model& model, std::span<const tokenization::ChatMessage> messages,
+    const PromptOptions& opt) {
   std::string error;
   const auto rendered = k1::ChatTemplate::Render(
       messages, {}, k1::ResolveChatOptions(PromptReasoningOptions(opt)),

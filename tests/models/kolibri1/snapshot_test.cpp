@@ -2,12 +2,12 @@
 //
 // The rows of a snapshot are copied, not recomputed, and a copy on this machine
 // is exact: the same bytes leave one device buffer and enter another. So the
-// logits of a session restored after `Reset()` have to be bit-for-bit the logits
-// of the session that was saved - not close, not the same winner. Anything else
-// means the payload did not carry what the session held: a section whose length
-// was worked out from the wrong geometry, a ring written back in another order
-// while the saved `position` still indexes it as `position % ring`, or a layer
-// that was skipped.
+// logits of a session restored after `Reset()` have to be bit-for-bit the
+// logits of the session that was saved - not close, not the same winner.
+// Anything else means the payload did not carry what the session held: a
+// section whose length was worked out from the wrong geometry, a ring written
+// back in another order while the saved `position` still indexes it as
+// `position % ring`, or a layer that was skipped.
 //
 // Bit equality of the frontier cannot show that the *next* token is right, so
 // the check goes on: a session restored from the object and a second one
@@ -16,9 +16,9 @@
 // untouched and shows up a few tokens later, and that is the failure this API
 // would otherwise ship with.
 //
-// A payload of another version or another ring has to be refused with the target
-// untouched, which is the other half of the contract: a store that half-reads a
-// foreign context answers from a cache it shuffled itself.
+// A payload of another version or another ring has to be refused with the
+// target untouched, which is the other half of the contract: a store that
+// half-reads a foreign context answers from a cache it shuffled itself.
 //
 // Without GUFO_KOLIBRI1_MODEL this skips with 77, and without a gfx1151 device
 // likewise. The artifact is loaded once - its 45 GiB upload is most of the
@@ -53,8 +53,8 @@ void Check(bool ok, const std::string& what) {
 }
 
 [[nodiscard]] std::size_t Argmax(std::span<const float> logits) {
-  return static_cast<std::size_t>(std::max_element(logits.begin(), logits.end()) -
-                                  logits.begin());
+  return static_cast<std::size_t>(
+      std::max_element(logits.begin(), logits.end()) - logits.begin());
 }
 
 /// Exact equality of two logit rows, which is what a copy of device memory
@@ -69,21 +69,20 @@ void Check(bool ok, const std::string& what) {
                             std::span<const float> b) {
   double worst = 0.0;
   for (std::size_t i = 0; i < std::min(a.size(), b.size()); ++i) {
-    worst = std::max(worst,
-                     static_cast<double>(std::abs(a[i] - b[i])));
+    worst = std::max(worst, static_cast<double>(std::abs(a[i] - b[i])));
   }
   return worst;
 }
 
 /// Rewrites one header field of a copy of a payload. The field is found by the
 /// value the engine that wrote the payload must have put there - both
-/// `kSnapshotPayloadVersion` and `Executor::ring` are public - and not by a byte
-/// position, because where the format keeps a field is none of this check's
-/// business: the first four bytes holding the value are rewritten, and the
-/// window is longer than any header the format can write, which is seven 4-byte
-/// fields and three 8-byte ones. A payload that does not carry the value at all
-/// fails on its own terms. The host is little-endian, the order a payload is
-/// written in and the only order this target builds for.
+/// `kSnapshotPayloadVersion` and `Executor::ring` are public - and not by a
+/// byte position, because where the format keeps a field is none of this
+/// check's business: the first four bytes holding the value are rewritten, and
+/// the window is longer than any header the format can write, which is seven
+/// 4-byte fields and three 8-byte ones. A payload that does not carry the value
+/// at all fails on its own terms. The host is little-endian, the order a
+/// payload is written in and the only order this target builds for.
 bool RewriteField(std::vector<std::uint8_t>* payload, std::uint32_t from,
                   std::uint32_t to) {
   const std::size_t limit = std::min<std::size_t>(payload->size(), 64);
@@ -107,11 +106,11 @@ struct Held {
 };
 
 [[nodiscard]] Held Hold(const k1::Session& session) {
-  return Held{std::vector<k1::TokenId>(session.tokens().begin(),
-                                       session.tokens().end()),
-              std::vector<float>(session.logits().begin(),
-                                 session.logits().end()),
-              session.position()};
+  return Held{
+      std::vector<k1::TokenId>(session.tokens().begin(),
+                               session.tokens().end()),
+      std::vector<float>(session.logits().begin(), session.logits().end()),
+      session.position()};
 }
 
 [[nodiscard]] bool Same(const Held& held, const k1::Session& session) {
@@ -140,8 +139,8 @@ int main() {
   // One load for every check. The ring the sliding layers keep follows the
   // chunk width the executor was built for, so a payload only fits a session
   // loaded the same way.
-  auto model = k1::Model::Load(path, k1::ModelOptions{.max_context = 8192,
-                                                      .prefill_chunk = 16});
+  auto model = k1::Model::Load(
+      path, k1::ModelOptions{.max_context = 8192, .prefill_chunk = 16});
   if (!model) {
     std::cout << "FAIL cannot load the model on the device\n";
     return 1;
@@ -184,8 +183,8 @@ int main() {
   const double save_ms = std::chrono::duration<double, std::milli>(
                              std::chrono::steady_clock::now() - saved_at)
                              .count();
-  Check(snapshot != nullptr,
-        "a session with a frontier saves" + (error.empty() ? "" : ": " + error));
+  Check(snapshot != nullptr, "a session with a frontier saves" +
+                                 (error.empty() ? "" : ": " + error));
   if (snapshot == nullptr) {
     return 1;
   }
@@ -195,8 +194,8 @@ int main() {
 
   std::vector<std::uint8_t> payload(snapshot->SizeBytes());
   Check(snapshot->CopyTo(payload), "CopyTo fills a buffer of SizeBytes");
-  Check(!snapshot->CopyTo(std::span<std::uint8_t>(payload).first(
-              payload.size() - 1)),
+  Check(!snapshot->CopyTo(
+            std::span<std::uint8_t>(payload).first(payload.size() - 1)),
         "CopyTo refuses a buffer that is not the payload");
 
   // The pieces have to add up to the same bytes: a writer that persists a
@@ -204,10 +203,11 @@ int main() {
   constexpr std::size_t kPieceBound = std::size_t{64} << 20;
   std::vector<std::uint8_t> streamed;
   std::size_t longest = 0;
-  const bool pieces = snapshot->Stream([&](std::span<const std::uint8_t> piece) {
-    longest = std::max(longest, piece.size());
-    streamed.insert(streamed.end(), piece.begin(), piece.end());
-  });
+  const bool pieces =
+      snapshot->Stream([&](std::span<const std::uint8_t> piece) {
+        longest = std::max(longest, piece.size());
+        streamed.insert(streamed.end(), piece.begin(), piece.end());
+      });
   Check(pieces && streamed == payload,
         "Stream hands out the same payload, in " +
             std::to_string(streamed.size()) + " bytes");
@@ -230,8 +230,7 @@ int main() {
         "the restored frontier is " + std::to_string(session->position()) +
             " positions");
   Check(session->tokens().size() == tokens.size() &&
-            std::equal(tokens.begin(), tokens.end(),
-                       session->tokens().begin()),
+            std::equal(tokens.begin(), tokens.end(), session->tokens().begin()),
         "the restored tokens are the saved ones");
   // Exact, because the rows were copied and not recomputed. A difference here
   // is a bug, and its size would only say which section went wrong.
@@ -327,38 +326,36 @@ int main() {
   error.clear();
   const auto deep_saved_at = std::chrono::steady_clock::now();
   auto deep_snapshot = session->SaveSnapshot(&error);
-  const double deep_save_ms = std::chrono::duration<double, std::milli>(
-                                  std::chrono::steady_clock::now() -
-                                  deep_saved_at)
-                                  .count();
-  Check(deep_snapshot != nullptr,
-        "a context filled to the bound saves" +
-            (error.empty() ? "" : ": " + error));
+  const double deep_save_ms =
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - deep_saved_at)
+          .count();
+  Check(deep_snapshot != nullptr, "a context filled to the bound saves" +
+                                      (error.empty() ? "" : ": " + error));
   if (deep_snapshot == nullptr) {
     return 1;
   }
-  Check(deep_snapshot->SizeBytes() == deep_promised,
-        "and is the size promised: " + std::to_string(deep_promised) +
-            " bytes");
+  Check(
+      deep_snapshot->SizeBytes() == deep_promised,
+      "and is the size promised: " + std::to_string(deep_promised) + " bytes");
   const auto deep_restored_at = std::chrono::steady_clock::now();
   error.clear();
   const bool deep_restored = peer->RestoreSnapshot(*deep_snapshot, &error);
-  const double deep_restore_ms = std::chrono::duration<double, std::milli>(
-                                     std::chrono::steady_clock::now() -
-                                     deep_restored_at)
-                                     .count();
-  Check(deep_restored,
-        "and restores into the other session" +
-            (error.empty() ? "" : ": " + error));
-  Check(peer->position() == deep.size(),
-        "the deep frontier is " + std::to_string(peer->position()) +
-            " positions");
+  const double deep_restore_ms =
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - deep_restored_at)
+          .count();
+  Check(deep_restored, "and restores into the other session" +
+                           (error.empty() ? "" : ": " + error));
+  Check(peer->position() == deep.size(), "the deep frontier is " +
+                                             std::to_string(peer->position()) +
+                                             " positions");
   Check(Identical(deep_frontier, peer->logits()),
         "and its logits are bit-equal at the bound");
 
   std::cout << "payload at " << deep.size() << " positions: "
             << static_cast<double>(deep_snapshot->SizeBytes()) /
-                       (1024.0 * 1024.0)
+                   (1024.0 * 1024.0)
             << " MiB, save " << deep_save_ms << " ms, restore "
             << deep_restore_ms << " ms\n";
 

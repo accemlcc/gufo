@@ -35,9 +35,8 @@ struct Format {
 /// `ffn_down_exps` and `ffn_down_shexp` tensors and the LM head keep Q6_K.
 /// F32 is bound for the scalar oracle; a kernel dispatches on `TensorRef::type`
 /// and rejects a format it cannot decode.
-constexpr std::initializer_list<GgmlType> kMatrix = {GgmlType::kQ4_K,
-                                                     GgmlType::kQ6_K,
-                                                     GgmlType::kF32};
+constexpr std::initializer_list<GgmlType> kMatrix = {
+    GgmlType::kQ4_K, GgmlType::kQ6_K, GgmlType::kF32};
 /// Norms, the router logits and the expert bias stay in F32 in every quant of
 /// the artifact: routing decisions must not depend on a quantized bias.
 constexpr std::initializer_list<GgmlType> kVector = {GgmlType::kF32};
@@ -136,8 +135,7 @@ struct Binder {
     w.ffn_norm = Get(p + "ffn_norm.weight", hidden, 1, kVector);
 
     w.router = Get(p + "ffn_gate_inp.weight", hidden, c.num_experts, kVector);
-    w.router_bias =
-        Get(p + "exp_probs_b.bias", c.num_experts, 1, kVector);
+    w.router_bias = Get(p + "exp_probs_b.bias", c.num_experts, 1, kVector);
     w.gate_exps = Get(p + "ffn_gate_exps.weight", hidden, c.expert_ffn_size,
                       kMatrix, true, c.num_experts);
     w.up_exps = Get(p + "ffn_up_exps.weight", hidden, c.expert_ffn_size,

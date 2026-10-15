@@ -110,16 +110,29 @@ void AppendJsonString(std::string& out, std::string_view text) {
       // sequence cannot be a codepoint, so it escapes as itself.
       std::uint32_t codepoint = 0;
       std::size_t extra = 0;
-      if ((byte & 0xE0U) == 0xC0U) { codepoint = byte & 0x1FU; extra = 1; }
-      else if ((byte & 0xF0U) == 0xE0U) { codepoint = byte & 0x0FU; extra = 2; }
-      else if ((byte & 0xF8U) == 0xF0U) { codepoint = byte & 0x07U; extra = 3; }
+      if ((byte & 0xE0U) == 0xC0U) {
+        codepoint = byte & 0x1FU;
+        extra = 1;
+      } else if ((byte & 0xF0U) == 0xE0U) {
+        codepoint = byte & 0x0FU;
+        extra = 2;
+      } else if ((byte & 0xF8U) == 0xF0U) {
+        codepoint = byte & 0x07U;
+        extra = 3;
+      }
       bool valid = extra > 0 && i + extra < text.size();
       for (std::size_t k = 1; valid && k <= extra; ++k) {
         const auto next = static_cast<unsigned char>(text[i + k]);
-        if ((next & 0xC0U) != 0x80U) { valid = false; break; }
+        if ((next & 0xC0U) != 0x80U) {
+          valid = false;
+          break;
+        }
         codepoint = (codepoint << 6) | (next & 0x3FU);
       }
-      if (!valid) { AppendEscape(out, byte); continue; }
+      if (!valid) {
+        AppendEscape(out, byte);
+        continue;
+      }
       i += extra;
       if (codepoint > 0xFFFFU) {
         const std::uint32_t lowered = codepoint - 0x10000U;
@@ -168,8 +181,9 @@ void AppendJson(std::string& out, const json::Value& value) {
       members.push_back(&member);
     }
     std::sort(members.begin(), members.end(),
-              [](const json::Value::Member* a,
-                 const json::Value::Member* b) { return a->first < b->first; });
+              [](const json::Value::Member* a, const json::Value::Member* b) {
+                return a->first < b->first;
+              });
     out += '{';
     for (std::size_t i = 0; i < members.size(); ++i) {
       if (i != 0) {
@@ -295,16 +309,13 @@ struct AssistantTurn {
     return {/*thought=*/{}, /*content=*/raw};
   }
   const std::size_t open = raw.rfind(kThinkOpen, close);
-  const std::size_t begin = open == std::string_view::npos
-                                ? 0
-                                : open + kThinkOpen.size();
-  return {/*thought=*/
-          StripLeadingNewlines(StripTrailingNewlines(raw.substr(begin,
-                                                                close > begin
-                                                                    ? close - begin
-                                                                    : 0))),
-          /*content=*/StripLeadingNewlines(raw.substr(close +
-                                                     kThinkClose.size()))};
+  const std::size_t begin =
+      open == std::string_view::npos ? 0 : open + kThinkOpen.size();
+  return {
+      /*thought=*/
+      StripLeadingNewlines(StripTrailingNewlines(
+          raw.substr(begin, close > begin ? close - begin : 0))),
+      /*content=*/StripLeadingNewlines(raw.substr(close + kThinkClose.size()))};
 }
 
 }  // namespace
@@ -373,9 +384,8 @@ std::optional<RenderedPrompt> ChatTemplate::Render(
   bool multi_step_tool = !messages.empty();
   for (std::size_t i = messages.size(); i-- > 0;) {
     const auto& message = messages[i];
-    const bool tool_response =
-        message.content.starts_with(kToolResponseOpen) &&
-        message.content.ends_with(kToolResponseClose);
+    const bool tool_response = message.content.starts_with(kToolResponseOpen) &&
+                               message.content.ends_with(kToolResponseClose);
     if (multi_step_tool && message.role == tokenization::ChatRole::kUser &&
         !tool_response) {
       multi_step_tool = false;
@@ -459,9 +469,8 @@ std::optional<RenderedPrompt> ChatTemplate::Render(
     } else if (message.role == tokenization::ChatRole::kTool) {
       const bool opens =
           first || messages[i - 1].role != tokenization::ChatRole::kTool;
-      const bool closes =
-          i + 1 == messages.size() ||
-          messages[i + 1].role != tokenization::ChatRole::kTool;
+      const bool closes = i + 1 == messages.size() ||
+                          messages[i + 1].role != tokenization::ChatRole::kTool;
       if (opens) {
         out += kImStart;
         out += "user";

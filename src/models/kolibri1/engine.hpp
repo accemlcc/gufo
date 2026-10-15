@@ -43,7 +43,9 @@ public:
       const std::string& path, const ModelOptions& options,
       std::string* error_msg = nullptr);
 
-  [[nodiscard]] const Config& config() const noexcept { return weights_->config; }
+  [[nodiscard]] const Config& config() const noexcept {
+    return weights_->config;
+  }
   [[nodiscard]] const Tokenizer& tokenizer() const noexcept {
     return *tokenizer_;
   }
@@ -64,7 +66,8 @@ public:
   /// The device driver every session of this model shares. Shared ownership
   /// rather than a bare reference, so a session may drive it through a const
   /// model: the executor is the model's machinery, not its state.
-  [[nodiscard]] const std::shared_ptr<rocm::Executor>& executor() const noexcept {
+  [[nodiscard]] const std::shared_ptr<rocm::Executor>& executor()
+      const noexcept {
     return executor_;
   }
 
@@ -145,7 +148,8 @@ public:
   /// every layer, logits. It does not depend on the cache's capacity, only on
   /// the rows a token has written.
   [[nodiscard]] std::uint64_t SnapshotBytes() const noexcept;
-  /// Freezes the context. Nullptr with `error_msg` set when a device copy fails.
+  /// Freezes the context. Nullptr with `error_msg` set when a device copy
+  /// fails.
   [[nodiscard]] std::unique_ptr<SessionSnapshot> SaveSnapshot(
       std::string* error_msg = nullptr) const;
   /// Writes a snapshot over this context, whose geometry must match the one it

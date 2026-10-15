@@ -11,6 +11,8 @@
 // end of the trained context still gets a turn a float angle could not hold.
 //
 // Needs a gfx1151 device; without one the check skips with 77.
+#include "src/models/kolibri1/kernels/rocm/qkv_post.hpp"
+
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
@@ -25,7 +27,6 @@
 #include <vector>
 
 #include "src/core/hip/hip_utils.hpp"
-#include "src/models/kolibri1/kernels/rocm/qkv_post.hpp"
 
 namespace k = gufo::models::kolibri1::rocm;
 
@@ -58,7 +59,8 @@ T* Device(const std::vector<T>& host) {
   return ptr;
 }
 
-std::vector<std::uint16_t> Read(const std::uint16_t* device, std::size_t count) {
+std::vector<std::uint16_t> Read(const std::uint16_t* device,
+                                std::size_t count) {
   std::vector<std::uint16_t> host(count);
   HIP_CHECK(hipMemcpy(host.data(), device, count * sizeof(std::uint16_t),
                       hipMemcpyDeviceToHost));
@@ -121,8 +123,7 @@ struct Score {
   double worst_at = 0.0;
 };
 
-Score Compare(const std::vector<double>& want,
-              const std::vector<double>& got) {
+Score Compare(const std::vector<double>& want, const std::vector<double>& got) {
   Score s;
   double total = 0.0;
   for (std::size_t i = 0; i < want.size(); ++i) {
@@ -137,9 +138,8 @@ Score Compare(const std::vector<double>& want,
   return s;
 }
 
-void Check(const Case& c, const char* what,
-           const std::vector<double>& want, const std::vector<double>& got,
-           double max_abs, double mean_rel) {
+void Check(const Case& c, const char* what, const std::vector<double>& want,
+           const std::vector<double>& got, double max_abs, double mean_rel) {
   const Score s = Compare(want, got);
   if (s.max_abs > max_abs || s.mean_rel > mean_rel) {
     ++failures;
@@ -220,7 +220,8 @@ void Run(const Case& c, std::mt19937& rng) {
   for (std::uint32_t r = 0; r < c.rows; ++r) {
     const std::uint32_t position = c.first_position + r;
     for (std::uint32_t h = 0; h < c.heads; ++h) {
-      const std::size_t base = (static_cast<std::size_t>(r) * c.heads + h) * dim;
+      const std::size_t base =
+          (static_cast<std::size_t>(r) * c.heads + h) * dim;
       NormTurn({q.begin() + base, q.begin() + base + dim}, q_norm, 1e-6,
                c.apply_rope, position, &head);
       for (std::uint32_t d = 0; d < dim; ++d) {
@@ -264,10 +265,10 @@ void Run(const Case& c, std::mt19937& rng) {
   }
   Check(c, "values", want_vc, got_vcd, 0.0, 0.0);
 
-  for (void* ptr : {static_cast<void*>(dq), static_cast<void*>(dk),
-                    static_cast<void*>(dv), static_cast<void*>(dqn),
-                    static_cast<void*>(dkn), static_cast<void*>(dkc),
-                    static_cast<void*>(dvc)}) {
+  for (void* ptr :
+       {static_cast<void*>(dq), static_cast<void*>(dk), static_cast<void*>(dv),
+        static_cast<void*>(dqn), static_cast<void*>(dkn),
+        static_cast<void*>(dkc), static_cast<void*>(dvc)}) {
     HIP_CHECK(hipFree(ptr));
   }
 }
@@ -313,7 +314,8 @@ int main() {
        .name = "position at the context limit"},
       rng);
 
-  // Shapes the released model does not have are refused rather than approximated.
+  // Shapes the released model does not have are refused rather than
+  // approximated.
   k::QkvPostArgs a{};
   a.rows = 1;
   a.heads = 48;
@@ -341,11 +343,13 @@ int main() {
   }
   if (!threw) {
     ++failures;
-    std::cout << "FAIL query heads that are not a multiple of the key heads are "
-                 "accepted\n";
+    std::cout
+        << "FAIL query heads that are not a multiple of the key heads are "
+           "accepted\n";
   } else {
-    std::cout << "PASS query heads that are not a multiple of the key heads are "
-                 "refused\n";
+    std::cout
+        << "PASS query heads that are not a multiple of the key heads are "
+           "refused\n";
   }
 
   if (failures != 0) {

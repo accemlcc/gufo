@@ -1,10 +1,11 @@
 #include "src/models/kolibri1/config.hpp"
-#include "src/models/kolibri1/weights.hpp"
 
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
+
+#include "src/models/kolibri1/weights.hpp"
 
 // The in-memory GGUF writer and the always-on assertion live in this directory.
 // They came out of the Gemma 4 host checks; copying them here is the cheaper
@@ -13,14 +14,14 @@
 #include "tests/models/kolibri1/gguf_builder.hpp"
 
 namespace k1 = gufo::models::kolibri1;
+using gufo::core::GgmlType;
 using kolibri1_test::BoolArray;
 using kolibri1_test::GgufImage;
 using kolibri1_test::I32Array;
 using kolibri1_test::Metadata;
 using kolibri1_test::Require;
-using kolibri1_test::TensorSpec;
 using kolibri1_test::Tensors;
-using gufo::core::GgmlType;
+using kolibri1_test::TensorSpec;
 
 namespace {
 
@@ -73,8 +74,7 @@ Metadata QuantMetadata() {
   return m;
 }
 
-std::optional<k1::Config> Parse(const Metadata& metadata,
-                                std::string* error) {
+std::optional<k1::Config> Parse(const Metadata& metadata, std::string* error) {
   GgufImage image(metadata);
   Require(image.reader() != nullptr,
           "in-memory GGUF rejected: " + image.error());
@@ -94,9 +94,9 @@ void CheckTarget() {
   std::string error;
   const auto c = Parse(Base(), &error);
   Require(c.has_value(), "valid kolibri1 metadata rejected: " + error);
-  Require(c->num_layers == 2 && c->hidden_size == 64 &&
-          c->context_length == 4096,
-          "dimensions");
+  Require(
+      c->num_layers == 2 && c->hidden_size == 64 && c->context_length == 4096,
+      "dimensions");
   Require(c->num_heads == 4 && c->kv_heads.size() == 2 && c->kv_heads[0] == 2,
           "the scalar KV head count must expand to every layer");
   Require(c->IsSliding(0) && !c->IsSliding(1), "sliding pattern");
@@ -109,9 +109,9 @@ void CheckTarget() {
           "window and rope base");
   Require(c->GlobalLayerCount() == 1 && c->SlidingLayerCount() == 1,
           "layer counts");
-  Require(c->num_experts == 8 && c->experts_used == 2 &&
-              c->expert_ffn_size == 32,
-          "routed expert geometry");
+  Require(
+      c->num_experts == 8 && c->experts_used == 2 && c->expert_ffn_size == 32,
+      "routed expert geometry");
   Require(c->shared_expert_count == 1 && c->shared_expert_ffn_size == 32,
           "shared expert geometry");
   Require(c->gating == k1::ExpertGating::kSigmoidLogitAdd &&
@@ -315,8 +315,8 @@ Tensors Layers(const k1::Config& c, bool quant) {
             : matrix(c.expert_ffn_size, c.hidden_size, c.num_experts);
     t[p + "ffn_gate_shexp.weight"] =
         matrix(c.hidden_size, c.shared_expert_ffn_size);
-    t[p + "ffn_up_shexp.weight"] = matrix(c.hidden_size,
-                                          c.shared_expert_ffn_size);
+    t[p + "ffn_up_shexp.weight"] =
+        matrix(c.hidden_size, c.shared_expert_ffn_size);
     t[p + "ffn_down_shexp.weight"] =
         matrix(c.shared_expert_ffn_size, c.hidden_size);
     t[p + "post_ffw_norm.weight"] = Vec(c.hidden_size);
@@ -361,8 +361,7 @@ void CheckWeights() {
               w->layers[0].down_exps.experts == c->num_experts,
           "the expert stack must carry every routed expert");
   Require(w->layers[0].gate_exps.ExpertBytes() ==
-              static_cast<std::size_t>(c->expert_ffn_size) * c->hidden_size *
-                  4,
+              static_cast<std::size_t>(c->expert_ffn_size) * c->hidden_size * 4,
           "distance between two experts");
   Require(w->layers[0].down_exps.SizeBytes() ==
               static_cast<std::size_t>(c->expert_ffn_size) * c->hidden_size *

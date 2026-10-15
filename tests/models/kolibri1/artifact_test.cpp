@@ -4,19 +4,18 @@
 //
 // Set GUFO_KOLIBRI1_MODEL to a Kolibri-1 GGUF; without it the check skips (77)
 // and the hosted suite never needs the file.
-#include "src/models/kolibri1/chat_template.hpp"
-#include "src/models/kolibri1/weights.hpp"
-
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <string>
 
+#include "src/models/kolibri1/chat_template.hpp"
+#include "src/models/kolibri1/weights.hpp"
 #include "tests/models/kolibri1/check.hpp"
 
 namespace k1 = gufo::models::kolibri1;
-using kolibri1_test::Require;
 using gufo::core::GgmlType;
+using kolibri1_test::Require;
 
 namespace {
 
@@ -26,7 +25,7 @@ constexpr std::uint32_t kHighQuantLayers = 25;
 
 [[nodiscard]] std::uint32_t Count(
     const k1::ModelWeights& w, GgmlType type,
-    const k1::TensorRef k1::LayerWeights::*role) {
+    const k1::TensorRef k1::LayerWeights::* role) {
   std::uint32_t count = 0;
   for (const auto& layer : w.layers) {
     count += (layer.*role).type == type ? 1U : 0U;
@@ -35,10 +34,10 @@ constexpr std::uint32_t kHighQuantLayers = 25;
 }
 
 void CheckConfig(const k1::Config& c) {
-  Require(c.num_layers == 50 && c.hidden_size == 2560 &&
-              c.context_length == 262144,
-          "the released artifact has 50 layers, is 2560 wide and trained to "
-          "262144 positions");
+  Require(
+      c.num_layers == 50 && c.hidden_size == 2560 && c.context_length == 262144,
+      "the released artifact has 50 layers, is 2560 wide and trained to "
+      "262144 positions");
   Require(c.num_heads == 48 && c.head_dim == 128, "48 query heads of 128");
   Require(c.sliding_window == 513, "the sliding window holds 513 keys");
   Require(c.SlidingLayerCount() == 40 && c.GlobalLayerCount() == 10,
@@ -65,9 +64,9 @@ void CheckConfig(const k1::Config& c) {
 void CheckLayout(const k1::ModelWeights& w) {
   Require(w.VocabSize() == 128000, "vocabulary");
   Require(!w.TiedOutput(), "the released head is untied");
-  Require(w.token_embd.type == GgmlType::kQ4_K &&
-              w.output.type == GgmlType::kQ6_K,
-          "the LM head outranks the embedding in the Q4_K_M recipe");
+  Require(
+      w.token_embd.type == GgmlType::kQ4_K && w.output.type == GgmlType::kQ6_K,
+      "the LM head outranks the embedding in the Q4_K_M recipe");
   Require(w.output_norm.type == GgmlType::kF32, "output norm");
   for (std::uint32_t l = 0; l < w.config.num_layers; ++l) {
     const auto& layer = w.layers[l];

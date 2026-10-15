@@ -1,9 +1,10 @@
 #ifndef GUFO_MODELS_KOLIBRI1_KERNELS_ROCM_MOE_HPP_
 #define GUFO_MODELS_KOLIBRI1_KERNELS_ROCM_MOE_HPP_
 
+#include <hip/hip_runtime.h>
+
 #include <cstddef>
 #include <cstdint>
-#include <hip/hip_runtime.h>
 
 namespace gufo::models::kolibri1::rocm {
 
@@ -24,8 +25,8 @@ enum class WeightFormat : std::uint32_t {
 /// One kernel covers the routed experts and the ordinary projections: a dense
 /// projection is the grouped one with a single group holding one expert and the
 /// rows as its slots. The arithmetic of a slot must not depend on which other
-/// slots share the launch with it, because a batch boundary changes the grouping
-/// and the same token has to come out the same either way.
+/// slots share the launch with it, because a batch boundary changes the
+/// grouping and the same token has to come out the same either way.
 /// ---------------------------------------------------------------------------
 
 /// Rows one grouped launch may carry, which is also the most slots one group
@@ -125,12 +126,12 @@ void EmbedRows(const EmbedArgs& args, hipStream_t stream);
 inline constexpr std::uint32_t kGatherExperts = 1024;
 
 struct MoeRouteArgs {
-  const float* x;      ///< [rows][hidden], the normalized layer input
-  const float* router; ///< F32 [experts][hidden]
-  const float* bias;   ///< F32 [experts], added for the selection only
-  float* logits;       ///< [rows][experts], the raw scores; may be null
-  std::int32_t* ids;   ///< [rows][used]
-  float* weights;      ///< [rows][used], sigmoid(logit) of the chosen expert
+  const float* x;       ///< [rows][hidden], the normalized layer input
+  const float* router;  ///< F32 [experts][hidden]
+  const float* bias;    ///< F32 [experts], added for the selection only
+  float* logits;        ///< [rows][experts], the raw scores; may be null
+  std::int32_t* ids;    ///< [rows][used]
+  float* weights;       ///< [rows][used], sigmoid(logit) of the chosen expert
   /// [experts] assignments, zeroed by the caller. Required whenever `groups`
   /// is asked for beyond `kSelectRows` rows: it is what the gather reads.
   std::uint32_t* counts;
@@ -188,8 +189,8 @@ void GateUpAct(const GateUpArgs& args, hipStream_t stream);
 /// sits on the branch, not on the residual.
 struct MoeFinishArgs {
   float* x;
-  const float* routed;  ///< [rows * used][hidden]
-  const float* shared;  ///< [rows][hidden]
+  const float* routed;   ///< [rows * used][hidden]
+  const float* shared;   ///< [rows][hidden]
   const float* weights;  ///< [rows][used]
   const float* post_norm;
   std::uint32_t rows;

@@ -15,8 +15,7 @@ namespace {
 /// 'K','L','S','1' in the byte order a payload is written in. A context of
 /// another architecture has to be refused, not read as this one.
 constexpr std::uint32_t kSnapshotMagic =
-    static_cast<std::uint32_t>('K') |
-    (static_cast<std::uint32_t>('L') << 8) |
+    static_cast<std::uint32_t>('K') | (static_cast<std::uint32_t>('L') << 8) |
     (static_cast<std::uint32_t>('S') << 16) |
     (static_cast<std::uint32_t>('1') << 24);
 
@@ -117,8 +116,8 @@ bool Fail(std::string* error_msg, std::string message) {
     return true;
   }
   return Fail(error_msg, "kolibri1 snapshot " + std::string(what) + " of " +
-                             std::to_string(bytes) + " bytes failed: " +
-                             hipGetErrorString(status));
+                             std::to_string(bytes) +
+                             " bytes failed: " + hipGetErrorString(status));
 }
 
 /// Queues one run of the payload. A zero-length run is skipped rather than
@@ -183,7 +182,7 @@ void CopyHost(void* destination, const void* source, std::uint64_t bytes) {
 /// stops at the first run that reports false. The save, the export and both
 /// restore paths move exactly these runs; only their direction differs, so
 /// this is the one place the kv section's layout is written down.
-template <class Run>
+template<class Run>
 [[nodiscard]] bool ForEachKvRun(const Config& config, std::uint32_t position,
                                 std::uint32_t ring, const Run& run) {
   for (std::uint32_t l = 0; l < config.num_layers; ++l) {
@@ -209,15 +208,17 @@ template <class Run>
                                std::string* error_msg) {
   if (header.magic != kSnapshotMagic) {
     return Fail(error_msg, "kolibri1 payload magic is " +
-                               std::to_string(header.magic) +
-                               ", not the " + std::to_string(kSnapshotMagic) +
+                               std::to_string(header.magic) + ", not the " +
+                               std::to_string(kSnapshotMagic) +
                                " of a kolibri1 context");
   }
   if (header.version != Session::kSnapshotPayloadVersion) {
-    return Fail(error_msg, "kolibri1 payload version is " +
-                               std::to_string(header.version) + ", this build "
-                               "reads version " +
-                               std::to_string(Session::kSnapshotPayloadVersion));
+    return Fail(error_msg,
+                "kolibri1 payload version is " +
+                    std::to_string(header.version) +
+                    ", this build "
+                    "reads version " +
+                    std::to_string(Session::kSnapshotPayloadVersion));
   }
   if (header.layers != config.num_layers) {
     return Fail(error_msg, "kolibri1 payload holds " +
@@ -231,10 +232,9 @@ template <class Run>
                                " entries, this model " + std::to_string(vocab));
   }
   if (header.ring != cache.ring) {
-    return Fail(error_msg, "kolibri1 payload ring is " +
-                               std::to_string(header.ring) +
-                               " slots, this cache " +
-                               std::to_string(cache.ring));
+    return Fail(error_msg,
+                "kolibri1 payload ring is " + std::to_string(header.ring) +
+                    " slots, this cache " + std::to_string(cache.ring));
   }
   if (header.max_context != cache.max_context) {
     return Fail(error_msg, "kolibri1 payload context is " +
@@ -243,10 +243,10 @@ template <class Run>
                                std::to_string(cache.max_context));
   }
   if (header.position > cache.max_context) {
-    return Fail(error_msg, "kolibri1 payload position " +
-                               std::to_string(header.position) + " is past the " +
-                               std::to_string(cache.max_context) +
-                               " positions of this cache");
+    return Fail(error_msg,
+                "kolibri1 payload position " + std::to_string(header.position) +
+                    " is past the " + std::to_string(cache.max_context) +
+                    " positions of this cache");
   }
   const std::uint64_t token_bytes =
       static_cast<std::uint64_t>(header.position) * sizeof(TokenId);
@@ -285,7 +285,8 @@ template <class Run>
 
 /// The size of a header plus its body, which is what `SizeBytes` reports and
 /// what the writer of a payload must reserve.
-[[nodiscard]] constexpr std::uint64_t PayloadBytes(std::uint64_t body_bytes) noexcept {
+[[nodiscard]] constexpr std::uint64_t PayloadBytes(
+    std::uint64_t body_bytes) noexcept {
   return SnapshotHeader::kBytes + body_bytes;
 }
 
@@ -321,8 +322,8 @@ struct SessionSnapshot::Impl {
   std::uint64_t body_bytes{0};
   /// The stream of the executor that froze it. Every forward of that model is
   /// queued on it, so these copies are ordered against them - and they have
-  /// to be on that stream and not on the legacy one, which `hipStreamNonBlocking`
-  /// shares no ordering with.
+  /// to be on that stream and not on the legacy one, which
+  /// `hipStreamNonBlocking` shares no ordering with.
   hipStream_t stream{nullptr};
   /// One piece of the body for `Stream`. A snapshot is exported by one writer
   /// at a time; the buffer is reused between pieces, not copied per call.
@@ -363,9 +364,9 @@ std::unique_ptr<Model> Model::Load(const std::string& path,
   // "that artifact is not for this engine".
   if (m->tokenizer_->VocabSize() != m->device_->vocab_size()) {
     Fail(error_msg, "kolibri1 vocabulary lists " +
-                       std::to_string(m->tokenizer_->VocabSize()) +
-                       " entries, the output layer scores " +
-                       std::to_string(m->device_->vocab_size()));
+                        std::to_string(m->tokenizer_->VocabSize()) +
+                        " entries, the output layer scores " +
+                        std::to_string(m->device_->vocab_size()));
     return nullptr;
   }
   // Positions past the trained length are nothing to try: the ten global layers
@@ -374,13 +375,12 @@ std::unique_ptr<Model> Model::Load(const std::string& path,
   // cache is allocated at a width the model was never shown.
   if (options.max_context > m->weights_->config.context_length) {
     Fail(error_msg, "kolibri1 context " + std::to_string(options.max_context) +
-                       " exceeds the trained " +
-                       std::to_string(m->weights_->config.context_length));
+                        " exceeds the trained " +
+                        std::to_string(m->weights_->config.context_length));
     return nullptr;
   }
-  m->executor_ = std::make_shared<rocm::Executor>(*m->device_,
-                                                   options.prefill_chunk, 1,
-                                                   options.max_context);
+  m->executor_ = std::make_shared<rocm::Executor>(
+      *m->device_, options.prefill_chunk, 1, options.max_context);
   return m;
 }
 
@@ -434,7 +434,7 @@ void Session::Append(std::span<const TokenId> tokens) {
         (last || each) ? std::span<const std::uint32_t>(&frontier, 1)
                        : std::span<const std::uint32_t>{};
     model_.executor()->Forward(*cache_, tokens.subspan(done, n), position(),
-                              rows);
+                               rows);
     tokens_.insert(tokens_.end(), tokens.begin() + done,
                    tokens.begin() + done + n);
     done += n;
@@ -475,12 +475,11 @@ bool SessionSnapshot::Stream(const Sink& sink) const {
   impl_->piece.resize(static_cast<std::size_t>(kPieceBytes));
   const auto* body = static_cast<const std::uint8_t*>(impl_->body);
   for (std::uint64_t done = 0; done < impl_->body_bytes;) {
-    const std::uint64_t bytes =
-        std::min(kPieceBytes, impl_->body_bytes - done);
+    const std::uint64_t bytes = std::min(kPieceBytes, impl_->body_bytes - done);
     if (!Queue(impl_->stream, impl_->piece.data(), body + done, bytes,
                hipMemcpyDeviceToHost, "export", nullptr) ||
         !DeviceOk(hipStreamSynchronize(impl_->stream), "export", bytes,
-                   nullptr)) {
+                  nullptr)) {
       return false;
     }
     sink({impl_->piece.data(), static_cast<std::size_t>(bytes)});
@@ -538,11 +537,10 @@ std::unique_ptr<SessionSnapshot> Session::SaveSnapshot(
   }
   at += impl->header.token_bytes;
   const bool rows = ForEachKvRun(
-      c, position, cache_->ring, [&](std::uint32_t l, bool key,
-                                     std::uint64_t bytes) {
-        const void* source =
-            key ? static_cast<const void*>(cache_->k[l])
-                : static_cast<const void*>(cache_->v[l]);
+      c, position, cache_->ring,
+      [&](std::uint32_t l, bool key, std::uint64_t bytes) {
+        const void* source = key ? static_cast<const void*>(cache_->k[l])
+                                 : static_cast<const void*>(cache_->v[l]);
         const bool ok = Queue(impl->stream, at, source, bytes,
                               hipMemcpyDeviceToDevice, "cache copy", error_msg);
         at += bytes;
@@ -552,7 +550,7 @@ std::unique_ptr<SessionSnapshot> Session::SaveSnapshot(
       !Queue(impl->stream, at, logits_.data(), impl->header.logit_bytes,
              hipMemcpyHostToDevice, "logit copy", error_msg) ||
       !DeviceOk(hipStreamSynchronize(impl->stream), "save", impl->body_bytes,
-                 error_msg)) {
+                error_msg)) {
     return nullptr;
   }
   auto snapshot = std::unique_ptr<SessionSnapshot>(new SessionSnapshot());
@@ -583,21 +581,22 @@ bool Session::RestoreSnapshot(const SessionSnapshot& snapshot,
     return false;
   }
   at += header.token_bytes;
-  const bool rows = ForEachKvRun(
-      c, header.position, cache_->ring, [&](std::uint32_t l, bool key,
-                                            std::uint64_t bytes) {
-        void* destination = key ? static_cast<void*>(cache_->k[l])
-                                : static_cast<void*>(cache_->v[l]);
-        const bool ok = Queue(stream, destination, at, bytes,
-                              hipMemcpyDeviceToDevice, "cache restore",
-                              error_msg);
-        at += bytes;
-        return ok;
-      });
-  if (!rows || !Queue(stream, logits.data(), at, header.logit_bytes,
-                      hipMemcpyDeviceToHost, "logit restore", error_msg) ||
+  const bool rows =
+      ForEachKvRun(c, header.position, cache_->ring,
+                   [&](std::uint32_t l, bool key, std::uint64_t bytes) {
+                     void* destination = key ? static_cast<void*>(cache_->k[l])
+                                             : static_cast<void*>(cache_->v[l]);
+                     const bool ok = Queue(stream, destination, at, bytes,
+                                           hipMemcpyDeviceToDevice,
+                                           "cache restore", error_msg);
+                     at += bytes;
+                     return ok;
+                   });
+  if (!rows ||
+      !Queue(stream, logits.data(), at, header.logit_bytes,
+             hipMemcpyDeviceToHost, "logit restore", error_msg) ||
       !DeviceOk(hipStreamSynchronize(stream), "restore", snapshot.SizeBytes(),
-                 error_msg)) {
+                error_msg)) {
     return false;
   }
   tokens_ = std::move(tokens);
@@ -610,7 +609,8 @@ bool Session::RestoreSnapshot(std::span<const std::uint8_t> payload,
   if (payload.size() < SnapshotHeader::kBytes) {
     Fail(error_msg, "kolibri1 payload is " + std::to_string(payload.size()) +
                         " bytes, shorter than its " +
-                        std::to_string(SnapshotHeader::kBytes) + " byte header");
+                        std::to_string(SnapshotHeader::kBytes) +
+                        " byte header");
     return false;
   }
   SnapshotHeader header{};
@@ -626,16 +626,17 @@ bool Session::RestoreSnapshot(std::span<const std::uint8_t> payload,
   std::vector<float> logits(vocab);
   CopyHost(tokens.data(), at, header.token_bytes);
   at += header.token_bytes;
-  const bool rows = ForEachKvRun(
-      c, header.position, cache_->ring, [&](std::uint32_t l, bool key,
-                                            std::uint64_t bytes) {
-        void* destination = key ? static_cast<void*>(cache_->k[l])
-                                : static_cast<void*>(cache_->v[l]);
-        const bool ok = Queue(stream, destination, at, bytes,
-                              hipMemcpyHostToDevice, "cache restore", error_msg);
-        at += bytes;
-        return ok;
-      });
+  const bool rows =
+      ForEachKvRun(c, header.position, cache_->ring,
+                   [&](std::uint32_t l, bool key, std::uint64_t bytes) {
+                     void* destination = key ? static_cast<void*>(cache_->k[l])
+                                             : static_cast<void*>(cache_->v[l]);
+                     const bool ok = Queue(stream, destination, at, bytes,
+                                           hipMemcpyHostToDevice,
+                                           "cache restore", error_msg);
+                     at += bytes;
+                     return ok;
+                   });
   if (!rows) {
     return false;
   }

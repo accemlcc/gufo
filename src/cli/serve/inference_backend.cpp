@@ -350,7 +350,8 @@ std::vector<std::uint8_t> KolibriCompatibilityIdentity(
            // produced it.
            << "sliding_ring_slots=" << ring << '\n'
            << "prefill_chunk_rows=" << prefill_chunk << '\n'
-           << "context_tokens=" << max_context << '\n'
+           << "context_tokens=" << max_context
+           << '\n'
            // Only the sliding layers are rotated; the ten patternless ones
            // attend the whole past with no positional encoding at all, so a
            // restored frontier means something else than under RoPE.
@@ -3847,7 +3848,6 @@ private:
 };
 #endif
 
-
 #if defined(ENGINE_ENABLE_HIP)
 // One Kolibri 1 session owns its attention state - the ten patternless layers
 // at the whole context, the forty sliding ones at a ring of 1,024 - and its
@@ -3863,10 +3863,10 @@ private:
 // --sessions 1`, two runs per cell inside one device window, the two binaries
 // md5-verified apart): pp 290.7 and 293.5 at 1,572 prompt tokens against 531.3
 // and 545.8, and pp 252.3 and 251.0 at 13,030 against 505.7 and 503.0. Two
-// times at both depths, so the first token of a 13 K prompt arrives after 25.8 s
-// instead of 51.6. Decode does not move (53.27 against 53.15 tok/s) and neither
-// does memory: the ring is `next_pow2(513 + rows)`, so anything up to 511 rows
-// keeps 1,024 slots and only the scratch grows.
+// times at both depths, so the first token of a 13 K prompt arrives after 25.8
+// s instead of 51.6. Decode does not move (53.27 against 53.15 tok/s) and
+// neither does memory: the ring is `next_pow2(513 + rows)`, so anything up to
+// 511 rows keeps 1,024 slots and only the scratch grows.
 //
 // Why 16 held for as long as it did, and why that argument is dead: the earlier
 // ladder was an engine-direct one (`tools/kolibri/throughput` at pp 512 and pp
@@ -3875,11 +3875,11 @@ private:
 // path of 17eada37, which costs 0.30 ms per token at width 128 where the GEMV
 // cost 1.35 (stage profile, `docs/models/kolibri-1/BENCHMARKS.md`), and the
 // served comparison itself, which measures a request rather than a forward and
-// had never been run across widths. The new width is numerically the same gate as
-// the old one: `kolibri1_device_forward_test` with `KOLIBRI_TEST_PREFILL_CHUNK`
-// at 32 and at 128 matches the scalar reference the way it does at 16 (prefill
-// max_abs 3.3e-3, mean 4.6e-4, argmax equal, and the chunked case across the
-// width boundary exact at 0).
+// had never been run across widths. The new width is numerically the same gate
+// as the old one: `kolibri1_device_forward_test` with
+// `KOLIBRI_TEST_PREFILL_CHUNK` at 32 and at 128 matches the scalar reference
+// the way it does at 16 (prefill max_abs 3.3e-3, mean 4.6e-4, argmax equal, and
+// the chunked case across the width boundary exact at 0).
 //
 // 256, measured served on m1 (2026-10-14, same command, cold legs 3.2 K to
 // 97.9 K, one window per binary and a control leg in the same window, the two
@@ -3994,10 +3994,9 @@ public:
             model_->tokenizer().VocabSize() * sizeof(float)) {
     if (!artifact_fingerprint.empty()) {
       persistence_ = TextRunnerPersistenceDescriptor{
-          .compatibility_identity =
-              KolibriCompatibilityIdentity(artifact_fingerprint, max_context_,
-                                           model_->executor()->ring(),
-                                           kKolibriPrefillChunk),
+          .compatibility_identity = KolibriCompatibilityIdentity(
+              artifact_fingerprint, max_context_, model_->executor()->ring(),
+              kKolibriPrefillChunk),
           .payload_version = KolibriSession::kSnapshotPayloadVersion,
       };
     }
@@ -4121,7 +4120,8 @@ public:
       TextRunnerState& state,
       std::span<const TextRunnerToken> prefix) const override {
     if (RequireKolibriState(state).session().position() != prefix.size()) {
-      throw std::logic_error("Kolibri 1 reused prefix does not match checkpoint");
+      throw std::logic_error(
+          "Kolibri 1 reused prefix does not match checkpoint");
     }
   }
 
@@ -4250,8 +4250,8 @@ public:
     std::string error;
     if (!restored.session().RestoreSnapshot(payload, &error)) {
       restored.Invalidate();
-      throw std::runtime_error("Kolibri 1 persistent snapshot restore failed: " +
-                               error);
+      throw std::runtime_error(
+          "Kolibri 1 persistent snapshot restore failed: " + error);
     }
   }
 
@@ -4582,20 +4582,19 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
     // are re-read per chunk, the executor's scratch is allocated for exactly
     // that many rows, and a sliding layer's ring is the 513-token window
     // rounded up past them. The width is the model constant above, and because
-    // `prefill_chunk_rows=` is part of the state identity, a `--cache-disk` tree
-    // written under another value is refused and re-prefilled rather than
+    // `prefill_chunk_rows=` is part of the state identity, a `--cache-disk`
+    // tree written under another value is refused and re-prefilled rather than
     // restored into geometry the snapshot never had — a re-prefill cost, not a
     // correctness risk.
     // The engine hands out a uniquely-owned model; the pool needs shared
     // ownership, because every session state and every snapshot keeps one.
     std::shared_ptr<models::kolibri1::Model> model(
-        models::kolibri1::Model::Load(
-            model_path,
-            models::kolibri1::ModelOptions{
-                .max_context = max_context,
-                .prefill_chunk = kKolibriPrefillChunk,
-            },
-            &load_error));
+        models::kolibri1::Model::Load(model_path,
+                                      models::kolibri1::ModelOptions{
+                                          .max_context = max_context,
+                                          .prefill_chunk = kKolibriPrefillChunk,
+                                      },
+                                      &load_error));
     if (model == nullptr) {
       SetError(error, "Failed to create Kolibri 1 model: " + load_error);
       return false;
@@ -5127,13 +5126,15 @@ bool InferenceBackend::load(
 #endif
 
 #if defined(ENGINE_ENABLE_HIP)
-bool InferenceBackend::load(
-    std::shared_ptr<models::kolibri1::Model> model, std::string* error,
-    std::uint32_t max_context, std::size_t session_count,
-    TextPrefillPolicy prefill_policy, TextSchedulerPolicy scheduler_policy,
-    TextSpeculativeConfig speculative_config,
-    TextDiskCacheConfig disk_cache_config,
-    TextRunnerRamCacheOptions ram_cache_config, std::string model_id) {
+bool InferenceBackend::load(std::shared_ptr<models::kolibri1::Model> model,
+                            std::string* error, std::uint32_t max_context,
+                            std::size_t session_count,
+                            TextPrefillPolicy prefill_policy,
+                            TextSchedulerPolicy scheduler_policy,
+                            TextSpeculativeConfig speculative_config,
+                            TextDiskCacheConfig disk_cache_config,
+                            TextRunnerRamCacheOptions ram_cache_config,
+                            std::string model_id) {
   if (model == nullptr) {
     SetError(error, "Kolibri 1 model must not be null");
     return false;

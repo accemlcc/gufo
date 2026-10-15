@@ -261,8 +261,9 @@ std::optional<Config> Config::FromGguf(const core::GgufReader& gguf,
     return std::nullopt;
   }
   if (gating != kGatingSigmoidLogitAdd) {
-    r.Fail("kolibri1 routing must use sigmoid_logit_add gating "
-           "(expert_gating_func 5)");
+    r.Fail(
+        "kolibri1 routing must use sigmoid_logit_add gating "
+        "(expert_gating_func 5)");
     return std::nullopt;
   }
   c.gating = ExpertGating::kSigmoidLogitAdd;

@@ -35,13 +35,13 @@ struct Config {
   std::uint32_t context_length{0};  ///< 262144
   float rms_eps{1e-6F};
 
-  std::uint32_t num_heads{0};  ///< 48 query heads, the same per layer.
+  std::uint32_t num_heads{0};           ///< 48 query heads, the same per layer.
   std::vector<std::uint32_t> kv_heads;  ///< 4 per layer.
   std::vector<std::uint8_t> sliding;    ///< Per layer: 1 sliding, 0 global.
 
-  std::uint32_t head_dim{0};       ///< 128 for both layer kinds.
-  float rope_theta{0.0F};          ///< 1e4; the sliding layers only.
-  std::uint32_t sliding_window{0}; ///< 513 keys, including the query.
+  std::uint32_t head_dim{0};        ///< 128 for both layer kinds.
+  float rope_theta{0.0F};           ///< 1e4; the sliding layers only.
+  std::uint32_t sliding_window{0};  ///< 513 keys, including the query.
 
   // Mixture of experts: `experts_used` routed experts plus
   // `shared_expert_count` ungated experts, in every layer.
@@ -51,7 +51,7 @@ struct Config {
   std::uint32_t shared_expert_count{0};     ///< 1
   std::uint32_t shared_expert_ffn_size{0};  ///< 512
   ExpertGating gating{ExpertGating::kSigmoidLogitAdd};
-  bool renormalize_expert_weights{false};   ///< Kolibri routes without renorm.
+  bool renormalize_expert_weights{false};  ///< Kolibri routes without renorm.
 
   [[nodiscard]] bool IsSliding(std::uint32_t layer) const noexcept {
     return sliding[layer] != 0;

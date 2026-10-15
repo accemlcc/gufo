@@ -134,8 +134,7 @@ ChatMessage Message(ChatRole role, std::string content) {
 std::string Render(const std::vector<ChatMessage>& messages,
                    const std::vector<ChatTool>& tools,
                    const ChatOptions& options) {
-  const auto rendered =
-      ChatTemplate::Render(messages, tools, options, nullptr);
+  const auto rendered = ChatTemplate::Render(messages, tools, options, nullptr);
   if (!rendered.has_value()) {
     ++failures;
     std::cout << "FAIL render returned no value\n";
@@ -147,14 +146,13 @@ std::string Render(const std::vector<ChatMessage>& messages,
 // A bare question still gets a system block: the template always writes the
 // reasoning instruction, and that instruction lives in the system turn.
 void TestAlwaysHasEffortSection() {
-  const std::string expected = kStart + "system\n" +
-                               "# Reasoning effort\n\n" + kHigh + kEnd + "\n" +
-                               kStart + "user\nWarum ist der Himmel blau?" +
-                               kEnd + "\n" + kStart + "assistant\n";
-  CheckEquals("bare question renders effort section and generation prompt",
-              expected,
-              Render({Message(ChatRole::kUser, "Warum ist der Himmel blau?")}, {},
-                     {}));
+  const std::string expected = kStart + "system\n" + "# Reasoning effort\n\n" +
+                               kHigh + kEnd + "\n" + kStart +
+                               "user\nWarum ist der Himmel blau?" + kEnd +
+                               "\n" + kStart + "assistant\n";
+  CheckEquals(
+      "bare question renders effort section and generation prompt", expected,
+      Render({Message(ChatRole::kUser, "Warum ist der Himmel blau?")}, {}, {}));
 }
 
 void TestSystemContentPrecedesSections() {
@@ -165,8 +163,8 @@ void TestSystemContentPrecedesSections() {
   std::vector<ChatMessage> messages;
   messages.push_back(Message(ChatRole::kSystem, "Antworte auf Deutsch."));
   messages.push_back(Message(ChatRole::kUser, "Hallo?"));
-  CheckEquals("caller system text is kept ahead of the effort section", expected,
-              Render(messages, {}, {}));
+  CheckEquals("caller system text is kept ahead of the effort section",
+              expected, Render(messages, {}, {}));
 }
 
 // Effort none swaps the instruction and empties the thinking block in the
@@ -174,10 +172,11 @@ void TestSystemContentPrecedesSections() {
 void TestDisabledEffort() {
   ChatOptions options;
   options.effort = ChatOptions::Effort::kDisabled;
-  const std::string text = Render({Message(ChatRole::kUser, "1+1?")}, {}, options);
+  const std::string text =
+      Render({Message(ChatRole::kUser, "1+1?")}, {}, options);
   CheckContains("disabled effort states reasoning is off", text, kDisabled);
-  const std::string tail = kStart + "assistant\n" + kThinkOpen + "\n\n" +
-                             kThinkClose + "\n\n";
+  const std::string tail =
+      kStart + "assistant\n" + kThinkOpen + "\n\n" + kThinkClose + "\n\n";
   CheckEquals("disabled effort closes an empty think block", tail,
               text.substr(text.size() - tail.size()));
 }
@@ -195,7 +194,8 @@ void TestEffortSentences() {
     ReasoningOptions reasoning;
     reasoning.effort = effort;
     const ChatOptions options = ResolveChatOptions(reasoning);
-    const std::string text = Render({Message(ChatRole::kUser, "x")}, {}, options);
+    const std::string text =
+        Render({Message(ChatRole::kUser, "x")}, {}, options);
     CheckContains(std::string("effort level maps to its sentence: ") + prefix,
                   text, prefix);
   }
@@ -221,12 +221,14 @@ void TestToolsRenderAsToJson() {
   tool.parameters_json =
       "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},"
       "\"required\":[\"query\"]}";
-  tool.definition_json = "{\"function\":{\"description\":\"Sucht \u00e4hnliche "
-                         "<schnelle> & 'beste' Ergebnisse\",\"name\":"
-                         "\"web_search\",\"parameters\":{\"properties\":"
-                         "{\"query\":{\"type\":\"string\"}},\"required\":"
-                         "[\"query\"],\"type\":\"object\"}},\"type\":\"function\"}";
-  const std::string text = Render({Message(ChatRole::kUser, "suche")}, {tool}, {});
+  tool.definition_json =
+      "{\"function\":{\"description\":\"Sucht \u00e4hnliche "
+      "<schnelle> & 'beste' Ergebnisse\",\"name\":"
+      "\"web_search\",\"parameters\":{\"properties\":"
+      "{\"query\":{\"type\":\"string\"}},\"required\":"
+      "[\"query\"],\"type\":\"object\"}},\"type\":\"function\"}";
+  const std::string text =
+      Render({Message(ChatRole::kUser, "suche")}, {tool}, {});
   // tojson sorts members, keeps Python's separators, and escapes the four
   // markup characters plus everything outside ASCII.
   CheckContains(
@@ -249,8 +251,9 @@ void TestToolCallReplay() {
   answer.thought = "ich suche";
   ChatMessage::ToolCall call;
   call.name = "web_search";
-  call.arguments = {{/*name=*/"query", /*value=*/"Strix Halo", /*is_string=*/true},
-                    {/*name=*/"limit", /*value=*/"3", /*is_string=*/false}};
+  call.arguments = {
+      {/*name=*/"query", /*value=*/"Strix Halo", /*is_string=*/true},
+      {/*name=*/"limit", /*value=*/"3", /*is_string=*/false}};
   answer.tool_calls.push_back(call);
   std::vector<ChatMessage> messages;
   messages.push_back(Message(ChatRole::kUser, "suche was"));
@@ -259,18 +262,19 @@ void TestToolCallReplay() {
   messages.push_back(Message(ChatRole::kUser, "danke"));
   const std::string text = Render(messages, {}, {});
   Dump("tool call replay", text);
-  const std::string call_text =
-      kCallOpen + "\n{\"name\": \"web_search\", \"arguments\": "
-                  "{\"limit\": 3, \"query\": \"Strix Halo\"}}\n" + kCallClose;
-  Check("call carries name and typed arguments", text.find(call_text) != std::string::npos, text,
-        call_text);
+  const std::string call_text = kCallOpen +
+                                "\n{\"name\": \"web_search\", \"arguments\": "
+                                "{\"limit\": 3, \"query\": \"Strix Halo\"}}\n" +
+                                kCallClose;
+  Check("call carries name and typed arguments",
+        text.find(call_text) != std::string::npos, text, call_text);
   // One tool message shares a user turn with its siblings; the closing tag only
   // appears once, when the run of responses ends.
   const std::string response_turn = kStart + "user\n" + kResponseOpen +
-                                    "\nErgebnis: 42\n" + kResponseClose +
-                                    kEnd + "\n";
-  Check("tool response opens a user turn", text.find(response_turn) != std::string::npos, text,
-        response_turn);
+                                    "\nErgebnis: 42\n" + kResponseClose + kEnd +
+                                    "\n";
+  Check("tool response opens a user turn",
+        text.find(response_turn) != std::string::npos, text, response_turn);
   const std::string thought_block =
       kThinkOpen + "\nich suche\n" + kThinkClose + "\n\n";
   Check("a call turn the question already moved past drops its thought",
@@ -323,9 +327,8 @@ void TestPreserveThinking() {
 // the template's own fallback does.
 void TestThoughtSplitOutOfContent() {
   ChatMessage replay =
-      Message(ChatRole::kAssistant,
-              kThinkOpen + "\n\nkurz \u00fcberlegt\n" + kThinkClose +
-                  "\n\nfertige Antwort");
+      Message(ChatRole::kAssistant, kThinkOpen + "\n\nkurz \u00fcberlegt\n" +
+                                        kThinkClose + "\n\nfertige Antwort");
   // The newest assistant turn is the one whose block is written, so this is the
   // shape where the fallback split is observable.
   std::vector<ChatMessage> messages;
@@ -335,8 +338,8 @@ void TestThoughtSplitOutOfContent() {
   Dump("inline thought", text);
   const std::string lifted = kThinkOpen + "\nkurz \u00fcberlegt\n" +
                              kThinkClose + "\n\nfertige Antwort";
-  Check("inline thought is lifted out of the content", text.find(lifted) != std::string::npos,
-        text, lifted);
+  Check("inline thought is lifted out of the content",
+        text.find(lifted) != std::string::npos, text, lifted);
 }
 
 // Cache boundaries: a trailing question is the part an agent rewrites, so the
@@ -352,12 +355,12 @@ void TestStablePrefixOffsets() {
 
   const auto with_prompt =
       ChatTemplate::Render(messages, {}, {}, nullptr)->text;
-  const auto rendered =
-      ChatTemplate::Render(messages, {}, {}, nullptr);
+  const auto rendered = ChatTemplate::Render(messages, {}, {}, nullptr);
   CheckEquals("generation prompt is the assistant header",
               kStart + "assistant\n",
               with_prompt.substr(rendered->generation_prompt_offset));
-  const std::string stable = with_prompt.substr(0, rendered->stable_prefix_offset);
+  const std::string stable =
+      with_prompt.substr(0, rendered->stable_prefix_offset);
   Check("stable prefix stops before the trailing question",
         stable.find("neue Frage") == std::string::npos &&
             stable.find("alte Antwort") != std::string::npos,

@@ -12,8 +12,8 @@
 // agrees until the first mixture layer shows as a second row that differs.
 //
 // The oracle decodes every weight it touches, so this stays at a handful of
-// tokens and is labelled slow. Without GUFO_KOLIBRI1_MODEL it skips with 77, and
-// without a gfx1151 device likewise.
+// tokens and is labelled slow. Without GUFO_KOLIBRI1_MODEL it skips with 77,
+// and without a gfx1151 device likewise.
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
@@ -49,7 +49,8 @@ struct Diff {
   std::int32_t oracle_best = -1;
 };
 
-Diff Compare(const std::vector<float>& device, const std::vector<float>& oracle) {
+Diff Compare(const std::vector<float>& device,
+             const std::vector<float>& oracle) {
   Diff d;
   double total = 0.0;
   float device_peak = -std::numeric_limits<float>::infinity();
@@ -130,9 +131,8 @@ int main() {
     }
     chunk = static_cast<std::uint32_t>(want);
   }
-  auto model =
-      k1::Model::Load(path, k1::ModelOptions{.max_context = 1024,
-                                             .prefill_chunk = chunk});
+  auto model = k1::Model::Load(
+      path, k1::ModelOptions{.max_context = 1024, .prefill_chunk = chunk});
   if (!model) {
     std::cout << "FAIL cannot load the model on the device\n";
     return 1;
@@ -170,8 +170,8 @@ int main() {
                 static_cast<const std::uint8_t*>(host_embd.data) +
                     static_cast<std::size_t>(tokens[0]) * row_bytes,
                 row_bytes);
-    const bool exact = std::equal(uploaded.begin(), uploaded.end(),
-                                  packed.begin());
+    const bool exact =
+        std::equal(uploaded.begin(), uploaded.end(), packed.begin());
     if (!exact) {
       ++failures;
     }
@@ -183,8 +183,7 @@ int main() {
     // this length never reaches: the whole table is addressed, not its start.
     const std::size_t d = weights->config.hidden_size;
     const std::vector<std::int32_t> probe{
-        0, 1, tokens[0],
-        static_cast<std::int32_t>(weights->VocabSize() - 1)};
+        0, 1, tokens[0], static_cast<std::int32_t>(weights->VocabSize() - 1)};
     std::int32_t* ids = nullptr;
     float* rows = nullptr;
     HIP_CHECK(hipMalloc(&ids, probe.size() * sizeof(std::int32_t)));
@@ -206,8 +205,8 @@ int main() {
               static_cast<std::size_t>(probe[r]) * row_bytes,
           want.data(), d);
       for (std::size_t i = 0; i < d; ++i) {
-        worst = std::max(worst,
-                         static_cast<double>(std::abs(got[i] - want[i])));
+        worst =
+            std::max(worst, static_cast<double>(std::abs(got[i] - want[i])));
       }
     }
     if (worst != 0.0) {
@@ -266,9 +265,8 @@ int main() {
     const std::size_t chunk = model->executor()->max_rows();
     std::vector<std::int32_t> longer = tokens;
     while (longer.size() <= chunk * 2) {
-      const auto more =
-          model->tokenizer().Encode(" Berlin ist eine Stadt an der Spree,",
-                                    false, true);
+      const auto more = model->tokenizer().Encode(
+          " Berlin ist eine Stadt an der Spree,", false, true);
       longer.insert(longer.end(), more.begin(), more.end());
     }
     session->Reset();
@@ -399,14 +397,22 @@ int main() {
       };
       const auto Stage = [](int bit) -> std::string {
         switch (bit) {
-          case 1: return "embedding";
-          case 2: return "qkv";
-          case 4: return "attention";
-          case 8: return "attention out";
-          case 16: return "shared expert";
-          case 32: return "routed experts";
-          case 64: return "head";
-          default: return "output norm";
+          case 1:
+            return "embedding";
+          case 2:
+            return "qkv";
+          case 4:
+            return "attention";
+          case 8:
+            return "attention out";
+          case 16:
+            return "shared expert";
+          case 32:
+            return "routed experts";
+          case 64:
+            return "head";
+          default:
+            return "output norm";
         }
       };
       // Both shapes run the same three forwards - the second append chunks its
@@ -437,8 +443,7 @@ int main() {
              ++i) {
           const std::size_t forward = per != 0 ? i / per : 0;
           const std::size_t within = per != 0 ? i % per : 0;
-          const std::size_t floats =
-              forward < 3 ? rows_of[forward] * d : 0;
+          const std::size_t floats = forward < 3 ? rows_of[forward] * d : 0;
           compared += floats;
           for (std::size_t j = 0; j < floats; ++j) {
             if (a.first[i * stride + j] != b.first[i * stride + j]) {
@@ -488,12 +493,15 @@ int main() {
       std::vector<float> oracle_long;
       reference.Forward(longer, &oracle_long);
       const std::vector<float> oracle_frontier(
-          oracle_long.end() - static_cast<std::ptrdiff_t>(vocab), oracle_long.end());
-      std::cout << "whole vs reference: max_abs=" << Compare(whole, oracle_frontier).max_abs
-                << " argmax " << Compare(whole, oracle_frontier).device_best << '/'
+          oracle_long.end() - static_cast<std::ptrdiff_t>(vocab),
+          oracle_long.end());
+      std::cout << "whole vs reference: max_abs="
+                << Compare(whole, oracle_frontier).max_abs << " argmax "
+                << Compare(whole, oracle_frontier).device_best << '/'
                 << Compare(whole, oracle_frontier).oracle_best << "\n"
-                << "split vs reference: max_abs=" << Compare(split, oracle_frontier).max_abs
-                << " argmax " << Compare(split, oracle_frontier).device_best << '/'
+                << "split vs reference: max_abs="
+                << Compare(split, oracle_frontier).max_abs << " argmax "
+                << Compare(split, oracle_frontier).device_best << '/'
                 << Compare(split, oracle_frontier).oracle_best << "\n";
       if (const char* dump = std::getenv("GUFO_KOLIBRI_CHUNK_DUMP");
           dump != nullptr) {
@@ -505,7 +513,6 @@ int main() {
       }
     }
   }
-
 
   if (failures != 0) {
     std::cout << failures << " device checks failed\n";

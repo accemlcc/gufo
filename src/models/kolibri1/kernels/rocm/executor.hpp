@@ -120,6 +120,7 @@ public:
   [[nodiscard]] const std::vector<int>& snapshot_bits() const noexcept {
     return snapshot_bits_;
   }
+
 private:
   /// y[rows][w.rows] = x[rows][w.cols] . W^T. Up to `kProjectRows` this is the
   /// batch-invariant GEMV with its prebuilt single-group table; a wider block
@@ -147,10 +148,10 @@ private:
   std::uint32_t max_context_;
   std::uint32_t ring_;
   hipStream_t stream_{nullptr};
-  float* snapshot_{nullptr};       // DIAGNOSTIC ONLY
-  std::size_t snapshot_count_{0};  // DIAGNOSTIC ONLY
-  std::size_t snapshot_stride_{0}; // DIAGNOSTIC ONLY
-  std::vector<int> snapshot_bits_;  // DIAGNOSTIC ONLY
+  float* snapshot_{nullptr};              // DIAGNOSTIC ONLY
+  std::size_t snapshot_count_{0};         // DIAGNOSTIC ONLY
+  std::size_t snapshot_stride_{0};        // DIAGNOSTIC ONLY
+  std::vector<int> snapshot_bits_;        // DIAGNOSTIC ONLY
   std::vector<Band> bands_;               // DIAGNOSTIC ONLY
   std::size_t arena_bytes_{0};            // DIAGNOSTIC ONLY
   mutable std::vector<char> seen_arena_;  // DIAGNOSTIC ONLY

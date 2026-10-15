@@ -46,10 +46,14 @@ void Rope(float* head, std::size_t dim, std::uint32_t position, float theta) {
   }
 }
 
-double Sigmoid(double x) { return 1.0 / (1.0 + std::exp(-x)); }
+double Sigmoid(double x) {
+  return 1.0 / (1.0 + std::exp(-x));
+}
 
 /// SwiGLU's inner activation: x * sigmoid(x).
-double Silu(double x) { return x * Sigmoid(x); }
+double Silu(double x) {
+  return x * Sigmoid(x);
+}
 
 /// One [cols, rows] matrix out of a stack along ne[2].
 [[nodiscard]] TensorRef Slice(const TensorRef& t, std::size_t expert) {
@@ -83,8 +87,8 @@ void Reference::MatMul(const TensorRef& weight, const float* x_in,
   for (std::size_t o = 0; o < outputs; ++o) {
     quant::Dequantize(
         weight.type,
-        static_cast<const std::uint8_t*>(weight.data) + o * row_bytes,
-        w.data(), cols);
+        static_cast<const std::uint8_t*>(weight.data) + o * row_bytes, w.data(),
+        cols);
     for (std::size_t r = 0; r < rows; ++r) {
       const float* xr = x + r * cols;
       double acc = 0.0;
@@ -122,8 +126,8 @@ void Reference::Attention(std::uint32_t layer, const float* q, std::size_t rows,
       std::vector<double> scores(hi - lo);
       double max_score = -INFINITY;
       for (std::uint32_t p = lo; p < hi; ++p) {
-        const float* k = keys.data() + static_cast<std::size_t>(p) * kv_stride +
-                         kvh * dim;
+        const float* k =
+            keys.data() + static_cast<std::size_t>(p) * kv_stride + kvh * dim;
         double s = 0.0;
         for (std::size_t d = 0; d < dim; ++d) {
           s += static_cast<double>(qh[d]) * k[d];
@@ -192,11 +196,11 @@ void Reference::Mixture(const LayerWeights& w, const float* x, std::size_t rows,
       order[e] = e;
     }
     // top-k over `logits + bias`; equal scores keep the lower expert index.
-    std::stable_sort(order.begin(), order.end(), [&](std::size_t a,
-                                                     std::size_t b) {
-      return static_cast<double>(l[a]) + bias[a] >
-             static_cast<double>(l[b]) + bias[b];
-    });
+    std::stable_sort(order.begin(), order.end(),
+                     [&](std::size_t a, std::size_t b) {
+                       return static_cast<double>(l[a]) + bias[a] >
+                              static_cast<double>(l[b]) + bias[b];
+                     });
     for (std::size_t j = 0; j < c.experts_used; ++j) {
       const std::size_t e = order[j];
       const double weight = Sigmoid(static_cast<double>(l[e]));
@@ -207,9 +211,8 @@ void Reference::Mixture(const LayerWeights& w, const float* x, std::size_t rows,
       }
       MatMul(Slice(w.down_exps, e), act.data(), 1, down.data());
       for (std::size_t i = 0; i < d; ++i) {
-        routed[r * d + i] =
-            static_cast<float>(static_cast<double>(routed[r * d + i]) +
-                               weight * down[i]);
+        routed[r * d + i] = static_cast<float>(
+            static_cast<double>(routed[r * d + i]) + weight * down[i]);
       }
     }
   }
@@ -332,7 +335,8 @@ void Reference::Forward(std::span<const std::int32_t> tokens,
     Stage("ffn_moe_out" + at, routed.data(), routed.size());
     Stage("ffn_shexp" + at, shared.data(), shared.size());
     for (std::size_t i = 0; i < n * d; ++i) {
-      branch[i] = static_cast<float>(static_cast<double>(routed[i]) + shared[i]);
+      branch[i] =
+          static_cast<float>(static_cast<double>(routed[i]) + shared[i]);
     }
     Stage("ffn_out" + at, branch.data(), branch.size());
     for (std::size_t r = 0; r < n; ++r) {

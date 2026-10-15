@@ -43,13 +43,13 @@ struct TensorRef {
 /// around attention and two around the mixture of experts. A pair normalises
 /// the residual going into its branch and the branch output coming back.
 struct LayerWeights {
-  TensorRef attn_norm;      ///< [hidden]
-  TensorRef attn_q;         ///< [hidden -> heads * head_dim]
-  TensorRef attn_k;         ///< [hidden -> kv_heads * head_dim]
-  TensorRef attn_v;         ///< [hidden -> kv_heads * head_dim], every layer
-  TensorRef attn_q_norm;    ///< [head_dim], shared by the query heads
-  TensorRef attn_k_norm;    ///< [head_dim], shared by the KV heads
-  TensorRef attn_output;    ///< [heads * head_dim -> hidden]
+  TensorRef attn_norm;       ///< [hidden]
+  TensorRef attn_q;          ///< [hidden -> heads * head_dim]
+  TensorRef attn_k;          ///< [hidden -> kv_heads * head_dim]
+  TensorRef attn_v;          ///< [hidden -> kv_heads * head_dim], every layer
+  TensorRef attn_q_norm;     ///< [head_dim], shared by the query heads
+  TensorRef attn_k_norm;     ///< [head_dim], shared by the KV heads
+  TensorRef attn_output;     ///< [heads * head_dim -> hidden]
   TensorRef post_attn_norm;  ///< [hidden]
   TensorRef ffn_norm;        ///< [hidden], the pre-MoE norm
 

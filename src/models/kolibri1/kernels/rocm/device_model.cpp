@@ -38,8 +38,8 @@ struct Uploader {
     }
     allocations.push_back(ptr);
     bytes += size + kTailMargin;
-    (void)hipMemsetAsync(static_cast<std::uint8_t*>(ptr) + size, 0,
-                         kTailMargin, nullptr);
+    (void)hipMemsetAsync(static_cast<std::uint8_t*>(ptr) + size, 0, kTailMargin,
+                         nullptr);
     return ptr;
   }
 
@@ -95,8 +95,9 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(const ModelWeights& weights,
   m->vocab_ = weights.VocabSize();
   // Every pair of a head turns: the released file carries no rope dimension
   // count, so the divisor is the head dimension and not a rotary subset.
-  m->theta_scale_ = std::pow(static_cast<double>(weights.config.rope_theta),
-                             -2.0 / static_cast<double>(weights.config.head_dim));
+  m->theta_scale_ =
+      std::pow(static_cast<double>(weights.config.rope_theta),
+               -2.0 / static_cast<double>(weights.config.head_dim));
 
   const auto regions = reader.GetMappedRegions();
   auto stager = gufo::hip::WeightUpload::Create(

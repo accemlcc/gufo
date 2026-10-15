@@ -1,8 +1,9 @@
 #ifndef GUFO_MODELS_KOLIBRI1_KERNELS_ROCM_QKV_POST_HPP_
 #define GUFO_MODELS_KOLIBRI1_KERNELS_ROCM_QKV_POST_HPP_
 
-#include <cstdint>
 #include <hip/hip_runtime.h>
+
+#include <cstdint>
 
 namespace gufo::models::kolibri1::rocm {
 
@@ -37,7 +38,8 @@ struct QkvPostArgs {
   std::uint32_t kv_heads;
   std::uint32_t head_dim;  ///< 128, the released geometry
   std::uint32_t first_position;
-  std::uint32_t ring;  ///< cache capacity in positions; zero indexes by position
+  std::uint32_t
+      ring;  ///< cache capacity in positions; zero indexes by position
   float eps;
   /// theta^(-2/head_dim): pair d turns by position * theta_scale^d. It is a
   /// double, and the angles are computed in double, because a float angle at a

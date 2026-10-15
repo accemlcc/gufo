@@ -2,8 +2,6 @@
 // vocabulary facts this tokenizer's semantics rest on: the byte-level layout,
 // the control ids the chat template needs, and lossless round-trips. Without
 // the file the check skips (77), so the hosted suite never reads 44 GiB.
-#include "src/models/kolibri1/tokenizer.hpp"
-
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
@@ -12,12 +10,13 @@
 #include <vector>
 
 #include "src/core/gguf_reader.hpp"
+#include "src/models/kolibri1/tokenizer.hpp"
 #include "tests/models/kolibri1/check.hpp"
 
 namespace k1 = gufo::models::kolibri1;
-using kolibri1_test::Require;
 using k1::TokenId;
 using k1::TokenType;
+using kolibri1_test::Require;
 
 namespace {
 
@@ -65,7 +64,8 @@ void CheckLayout(const k1::Tokenizer& t) {
     const auto ids = t.Encode(text, false, false);
     Require(ids.size() == 1 && ids[0] == byte,
             "byte " + std::to_string(byte) + " must be token " +
-                std::to_string(byte) + ", got [" + std::to_string(ids[0]) + "]");
+                std::to_string(byte) + ", got [" + std::to_string(ids[0]) +
+                "]");
     Require(t.Decode(ids, false) == text,
             "byte " + std::to_string(byte) + " must decode back to itself");
   }
@@ -88,8 +88,8 @@ void CheckSpecialTokens(const k1::Tokenizer& t) {
             "control token type at " + std::to_string(id));
     const auto found = t.FindToken(text);
     Require(found.has_value() && *found == id,
-            std::string("control token ") + std::string(text) +
-                " must be " + std::to_string(id));
+            std::string("control token ") + std::string(text) + " must be " +
+                std::to_string(id));
     Require(t.TokenText(id, true) == text,
             "control text must render with special at " + std::to_string(id));
     Require(t.TokenText(id, false).empty(),
@@ -107,8 +107,7 @@ void CheckSpecialTokens(const k1::Tokenizer& t) {
     // Tool and thinking tags match even when special text is not parsed.
     const auto ids = t.Encode(text, false, false);
     Require(ids.size() == 1 && ids[0] == id,
-            "user-defined text must encode to one token: " +
-                std::string(text));
+            "user-defined text must encode to one token: " + std::string(text));
     Require(t.TokenText(id, false) == text,
             "user-defined text renders without special");
   }
@@ -123,8 +122,8 @@ void CheckEndOfGeneration(const k1::Tokenizer& t) {
               reported.size() == expected.size(),
           "end-of-generation must be <|endoftext|>, <|/role|> and <|im_end|>");
   for (const TokenId id : expected) {
-    Require(t.IsEndOfGeneration(id), "end-of-generation must hold for " +
-                                         std::to_string(id));
+    Require(t.IsEndOfGeneration(id),
+            "end-of-generation must hold for " + std::to_string(id));
   }
   Require(!t.IsEndOfGeneration(127904),
           "<|im_start|> opens a turn, it never ends one");
@@ -143,9 +142,9 @@ void CheckRoundTrip(const k1::Tokenizer& t) {
           "Encode/Decode must be lossless: " + t.Decode(ids, false));
   // Nothing matched a control, so every id is a word token.
   for (const TokenId id : ids) {
-    Require(t.Type(id) == TokenType::kNormal,
-            "plain text must not produce a control token: " +
-                std::to_string(id));
+    Require(
+        t.Type(id) == TokenType::kNormal,
+        "plain text must not produce a control token: " + std::to_string(id));
   }
   // A run of letters and a run of whitespace stay inside their pieces; the
   // number of tokens is far below the number of bytes, so merging happened.
@@ -192,8 +191,7 @@ int main() {
     CheckSpecialTokens(*tokenizer);
     CheckEndOfGeneration(*tokenizer);
     CheckRoundTrip(*tokenizer);
-    std::cout << "tokenized the released vocabulary: "
-              << tokenizer->VocabSize() << " tokens, eos "
-              << tokenizer->EosToken() << "\n";
+    std::cout << "tokenized the released vocabulary: " << tokenizer->VocabSize()
+              << " tokens, eos " << tokenizer->EosToken() << "\n";
   });
 }

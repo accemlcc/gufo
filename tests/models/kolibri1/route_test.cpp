@@ -3,10 +3,10 @@
 // each logit to float because the contract publishes it as float and the weight
 // is formed from what a verifier can read back.
 //
-// What the cases pin: the selection reads `logit + bias` while the weight is the
-// sigmoid of the chosen expert's own unbiased logit, a tie in `logit + bias`
-// keeps the lower expert index, a sixth and seventh candidate that differ by
-// less than a float epsilon still order strictly instead of collapsing, the
+// What the cases pin: the selection reads `logit + bias` while the weight is
+// the sigmoid of the chosen expert's own unbiased logit, a tie in `logit +
+// bias` keeps the lower expert index, a sixth and seventh candidate that differ
+// by less than a float epsilon still order strictly instead of collapsing, the
 // group table names the experts that were used in increasing order with their
 // slots in increasing order behind a leading count and says nothing at all
 // about the experts nobody chose, counts add up to rows * used, and a row run
@@ -66,7 +66,7 @@ std::string Number(double v) {
   return s.str();
 }
 
-template <class T>
+template<class T>
 T* Device(const std::vector<T>& host) {
   T* ptr = nullptr;
   HIP_CHECK(hipMalloc(&ptr, host.size() * sizeof(T) + 16));
@@ -75,7 +75,7 @@ T* Device(const std::vector<T>& host) {
   return ptr;
 }
 
-template <class T>
+template<class T>
 std::vector<T> Read(T* device, std::vector<T> host) {
   HIP_CHECK(hipMemcpy(host.data(), device, host.size() * sizeof(T),
                       hipMemcpyDeviceToHost));
@@ -137,7 +137,8 @@ struct Craft {
 void CraftLogits(Fixture* f, const std::vector<Craft>& crafts) {
   std::uint32_t h = 0;
   for (const Craft& c : crafts) {
-    float* w = f->router.data() + static_cast<std::size_t>(c.expert) * f->hidden;
+    float* w =
+        f->router.data() + static_cast<std::size_t>(c.expert) * f->hidden;
     std::fill(w, w + f->hidden, 0.0F);
     w[h] = 1.0F;
     f->bias[c.expert] = c.bias;
@@ -335,8 +336,7 @@ double Error(const std::vector<float>& got, const std::vector<float>& want) {
 /// that cancel to a fraction of the terms, so its relative error reports where
 /// the sum happened to land rather than how the arithmetic was done; the
 /// absolute number is what a different accumulator moves.
-double AbsError(const std::vector<float>& got,
-                const std::vector<float>& want) {
+double AbsError(const std::vector<float>& got, const std::vector<float>& want) {
   double worst = 0.0;
   for (std::size_t i = 0; i < want.size(); ++i) {
     worst = std::max(worst, std::abs(static_cast<double>(got[i]) - want[i]));
@@ -371,8 +371,7 @@ std::string IdList(const std::vector<std::int32_t>& ids) {
 /// something other than the ordering failed.
 void RandomRows(std::mt19937& rng) {
   for (const std::uint32_t rows : {1U, 16U}) {
-    const Fixture f =
-        RandomFixture(rows, kHidden, kExperts, 0.02, 0.5, rng());
+    const Fixture f = RandomFixture(rows, kHidden, kExperts, 0.02, 0.5, rng());
     const Want w = Oracle(f);
     const Got g = Launch(f, Ask{});
     const char* tag =
@@ -405,8 +404,8 @@ void RandomRows(std::mt19937& rng) {
     std::cout << "     " << tag << ": narrowest sixth to seventh gap "
               << Number(narrowest) << ", weight range ["
               << Number(*std::min_element(g.weights.begin(), g.weights.end()))
-              << ", " << Number(*std::max_element(g.weights.begin(),
-                                                  g.weights.end()))
+              << ", "
+              << Number(*std::max_element(g.weights.begin(), g.weights.end()))
               << "], logits " << Number(logit_error) << " max absolute\n";
   }
 }
@@ -462,9 +461,9 @@ void BiasMovesSelectionOnly(std::mt19937& rng) {
     }
     const double l = static_cast<double>(
         with.logits[static_cast<std::size_t>(r) * f.experts + e]);
-    leak = std::max(
-        leak, std::abs(static_cast<double>(biased.weights[i]) -
-                       Sigmoid(l + static_cast<double>(f.bias[e]))));
+    leak =
+        std::max(leak, std::abs(static_cast<double>(biased.weights[i]) -
+                                Sigmoid(l + static_cast<double>(f.bias[e]))));
   }
   Report("the weight is the unbiased sigmoid, not the one the bias would give",
          leak > 1e-4 && weight_error < 1e-7,
@@ -492,10 +491,9 @@ void Ties(std::mt19937& rng) {
       Report("an exact tie keeps the lower expert index", false,
              "no unchosen expert below the sixth to clone onto");
     } else {
-      std::copy_n(
-          f.router.data() + static_cast<std::size_t>(sixth) * f.hidden,
-          f.hidden,
-          f.router.data() + static_cast<std::size_t>(lower) * f.hidden);
+      std::copy_n(f.router.data() + static_cast<std::size_t>(sixth) * f.hidden,
+                  f.hidden,
+                  f.router.data() + static_cast<std::size_t>(lower) * f.hidden);
       f.bias[lower] = f.bias[sixth];
       const Want w = Oracle(f);
       const Got g = Launch(f, Ask{});
@@ -527,7 +525,8 @@ void Ties(std::mt19937& rng) {
       expected &= std::equal(want_ids, want_ids + kUsed, got_ids);
       // The winner's weight is sigmoid(2.0). A bias that leaked into it, or the
       // score mistaken for the logit, would give sigmoid(2.25) instead.
-      const double sixth_weight = static_cast<double>(g.weights[r * kUsed + (kUsed - 1)]);
+      const double sixth_weight =
+          static_cast<double>(g.weights[r * kUsed + (kUsed - 1)]);
       expected &= std::abs(sixth_weight - Sigmoid(2.0)) < 1e-7;
       expected &= std::abs(sixth_weight - Sigmoid(2.25)) > 1e-3;
     }
@@ -563,11 +562,12 @@ void SubEpsilonBoundary(std::mt19937& rng) {
     const std::int32_t* row = g.ids.data() + r * kUsed;
     expected &= std::find(row, row + kUsed, 12) == row + kUsed;
   }
-  Report("a sixth and seventh candidate under a float epsilon apart still order",
-         expected && SameIds(g, w) && Error(g.weights, w.weights) < 1e-7,
-         "gap " + Number(gap) + " against an epsilon of " +
-             Number(std::numeric_limits<float>::epsilon()) +
-             ", sixth is 300 and 12 is out");
+  Report(
+      "a sixth and seventh candidate under a float epsilon apart still order",
+      expected && SameIds(g, w) && Error(g.weights, w.weights) < 1e-7,
+      "gap " + Number(gap) + " against an epsilon of " +
+          Number(std::numeric_limits<float>::epsilon()) +
+          ", sixth is 300 and 12 is out");
 }
 
 /// (d) The group table: a leading count, the experts that were used in
@@ -584,12 +584,10 @@ void SubEpsilonBoundary(std::mt19937& rng) {
 /// one a per-block table could never produce.
 void GroupTable(std::mt19937& rng, std::uint32_t rows) {
   Fixture f = RandomFixture(rows, kHidden, kExperts, 0.002, 0.0, rng());
-  std::vector<Craft> crafts = {{10, kAnyRow, 5.0F, 0.0F},
-                               {20, kAnyRow, 4.5F, 0.0F},
-                               {30, kAnyRow, 4.0F, 0.0F},
-                               {40, kAnyRow, 4.0F, 0.0F},
-                               {50, kAnyRow, 3.5F, 0.0F},
-                               {60, kAnyRow, 3.0F, 0.0F}};
+  std::vector<Craft> crafts = {
+      {10, kAnyRow, 5.0F, 0.0F}, {20, kAnyRow, 4.5F, 0.0F},
+      {30, kAnyRow, 4.0F, 0.0F}, {40, kAnyRow, 4.0F, 0.0F},
+      {50, kAnyRow, 3.5F, 0.0F}, {60, kAnyRow, 3.0F, 0.0F}};
   for (std::uint32_t r = 0; r < rows; ++r) {
     crafts.push_back(
         {70U + r, r, 4.25F + 0.001F * static_cast<float>(r), 0.0F});
@@ -669,11 +667,12 @@ void Counts(std::mt19937& rng) {
     total += g.counts[e];
     named += w.counts[e] != 0 ? 1 : 0;
   }
-  Report("counts hold one assignment per slot",
-         g.counts == w.counts && total == rows * static_cast<std::uint64_t>(kUsed),
-         "total " + std::to_string(total) + " over " + std::to_string(named) +
-             " experts, largest " +
-             std::to_string(*std::max_element(g.counts.begin(), g.counts.end())));
+  Report(
+      "counts hold one assignment per slot",
+      g.counts == w.counts && total == rows * static_cast<std::uint64_t>(kUsed),
+      "total " + std::to_string(total) + " over " + std::to_string(named) +
+          " experts, largest " +
+          std::to_string(*std::max_element(g.counts.begin(), g.counts.end())));
 }
 
 /// (f) The same row alone and inside a batch, for a random row and for a row
@@ -716,8 +715,9 @@ void BatchInvariance(std::mt19937& rng) {
       }
       bool logits_same = true;
       for (std::uint32_t e = 0; e < batch.experts; ++e) {
-        logits_same &= wide.logits[static_cast<std::size_t>(kShared) *
-                                   batch.experts + e] == single.logits[e];
+        logits_same &=
+            wide.logits[static_cast<std::size_t>(kShared) * batch.experts +
+                        e] == single.logits[e];
       }
       Report((std::string(which == 0
                               ? "a row alone gets the ids and weights of the "
@@ -783,12 +783,11 @@ void Refusals() {
        "a wide table over more experts than the gather has threads"},
       {4, kHidden, kExperts, kExperts + 1,
        "more experts used per row than the model has"},
-      {4, 2500, kExperts, kUsed,
-       "a hidden size that is not a multiple of 128"},
+      {4, 2500, kExperts, kUsed, "a hidden size that is not a multiple of 128"},
   };
   for (const Bad& b : bad) {
-    const Fixture f = RandomFixture(b.rows, b.hidden, b.experts, 0.02, 0.5,
-                                    991U, b.used);
+    const Fixture f =
+        RandomFixture(b.rows, b.hidden, b.experts, 0.02, 0.5, 991U, b.used);
     bool threw = false;
     const Got g = Launch(f, Ask{}, &threw);
     bool untouched = true;
@@ -802,8 +801,7 @@ void Refusals() {
       untouched &= v == kPoisonInt;
     }
     const std::string name = std::string(b.name) + " is refused";
-    Report(name.c_str(),
-           threw && untouched && hipGetLastError() == hipSuccess,
+    Report(name.c_str(), threw && untouched && hipGetLastError() == hipSuccess,
            untouched ? "no launch: ids, weights and table still poisoned"
                      : "a launch wrote into the buffers");
   }
@@ -841,8 +839,8 @@ void Timed(std::mt19937& rng) {
     // before every layer, so the timing carries the memset: leaving it out
     // would time a launch the model never makes.
     const auto route_once = [&] {
-      HIP_CHECK(hipMemsetAsync(dcounts, 0,
-                               f.experts * sizeof(std::uint32_t), nullptr));
+      HIP_CHECK(hipMemsetAsync(dcounts, 0, f.experts * sizeof(std::uint32_t),
+                               nullptr));
       k::MoeRoute(a, nullptr);
     };
     for (int i = 0; i < 20; ++i) {

@@ -61,7 +61,7 @@ bool SameBits(float a, float b) {
 // share this GPU, so they go back the way they came.
 std::vector<void*> g_live;
 
-template <class T>
+template<class T>
 T* Device(const std::vector<T>& host) {
   T* ptr = nullptr;
   HIP_CHECK(hipMalloc(&ptr, host.size() * sizeof(T) + 16));
@@ -90,9 +90,9 @@ void FreeAll() {
 /// Row bytes of a format, taken from the layout header rather than repeated
 /// here: the sizes are the ones the CPU decoder walks with.
 std::size_t RowBytes(k::WeightFormat format, std::uint32_t k) {
-  const std::size_t block =
-      format == k::WeightFormat::kQ4_K ? sizeof(q::block_q4_K)
-                                       : sizeof(q::block_q6_K);
+  const std::size_t block = format == k::WeightFormat::kQ4_K
+                                ? sizeof(q::block_q4_K)
+                                : sizeof(q::block_q6_K);
   return static_cast<std::size_t>(k) / 256 * block;
 }
 
@@ -108,9 +108,9 @@ struct Built {
 Built Build(k::WeightFormat format, std::uint32_t experts, std::uint32_t m,
             std::uint32_t kdim, std::mt19937& rng, bool decode = true) {
   const std::size_t row = RowBytes(format, kdim);
-  const std::size_t block_bytes =
-      format == k::WeightFormat::kQ4_K ? sizeof(q::block_q4_K)
-                                       : sizeof(q::block_q6_K);
+  const std::size_t block_bytes = format == k::WeightFormat::kQ4_K
+                                      ? sizeof(q::block_q4_K)
+                                      : sizeof(q::block_q6_K);
   Built w;
   w.bytes.assign(static_cast<std::size_t>(experts) * m * row, 0);
   std::uniform_int_distribution<int> raw(0, 255);
@@ -257,8 +257,8 @@ void Check(const GemvCase& c, std::mt19937& rng) {
   for (const Group& g : c.groups) {
     for (const std::int32_t s : g.slots) {
       claimed[s] = 1;
-      const float* wr = w.decoded.data() +
-                        static_cast<std::size_t>(g.expert) * c.m * c.kdim;
+      const float* wr =
+          w.decoded.data() + static_cast<std::size_t>(g.expert) * c.m * c.kdim;
       const float* xv =
           x.data() + static_cast<std::size_t>(s / c.slots_per_row) * c.kdim;
       for (std::uint32_t row = 0; row < c.m; ++row) {
@@ -310,8 +310,7 @@ void CheckInvariance(k::WeightFormat format, std::uint32_t m,
   for (auto& v : x) {
     v = unit(rng);
   }
-  const char* fmt =
-      format == k::WeightFormat::kQ4_K ? "Q4_K" : "Q6_K";
+  const char* fmt = format == k::WeightFormat::kQ4_K ? "Q4_K" : "Q6_K";
   char name[160];
 
   // Sixteen rows of dense activation, one expert: all in one group, in four
@@ -437,9 +436,8 @@ void CheckInvariance(k::WeightFormat format, std::uint32_t m,
       Launch(w, xdeep, deep, format, k::kMaxGroupSlots, kSpr, m, kdim, 2);
   const std::vector<float> narrow_group =
       Launch(w, xdeep, deep, format, 8, kSpr, m, kdim, 2);
-  const std::vector<float> apart =
-      Launch(w, xdeep, singletons, format, k::kMaxGroupSlots, kSpr, m, kdim,
-             kDeep);
+  const std::vector<float> apart = Launch(
+      w, xdeep, singletons, format, k::kMaxGroupSlots, kSpr, m, kdim, kDeep);
   std::size_t crossed = 0;
   for (std::int32_t s = 0; s < static_cast<std::int32_t>(kDeep); ++s) {
     for (std::uint32_t row = 0; row < m; ++row) {
@@ -514,7 +512,8 @@ void CheckEmbed(k::WeightFormat format, std::uint32_t vocab, std::uint32_t n,
       // Nothing is added here, only the fused products of the decode, so the
       // gap is a rounding of the value and not of a sum.
       if (!(err <= 8.0 * std::numeric_limits<float>::epsilon() *
-                        (std::fabs(ref) + scale) + 1.0e-12)) {
+                           (std::fabs(ref) + scale) +
+                       1.0e-12)) {
         ++wrong;
       }
     }
@@ -613,8 +612,8 @@ void Timed(const char* name, k::WeightFormat format, std::uint32_t experts,
   const auto report = [&](const char* tail, float ms) {
     const double us = ms * 1000.0 / kRounds;
     std::cout << "TIME " << name << "  " << us << " us  "
-              << read / (us * 1.0e-6) / 1.0e9
-              << " GB/s of claimed experts, " << tail << "\n";
+              << read / (us * 1.0e-6) / 1.0e9 << " GB/s of claimed experts, "
+              << tail << "\n";
   };
   report("one table", Clock(launch_all));
 
@@ -632,10 +631,9 @@ void Timed(const char* name, k::WeightFormat format, std::uint32_t experts,
   constexpr std::size_t kRotatingBytes = 256ULL << 20;
   const std::size_t per_round =
       std::max<std::size_t>(1, static_cast<std::size_t>(read));
-  const std::uint32_t rotations =
-      std::max(1U, std::min(
-                       room,
-                       static_cast<std::uint32_t>(kRotatingBytes / per_round)));
+  const std::uint32_t rotations = std::max(
+      1U,
+      std::min(room, static_cast<std::uint32_t>(kRotatingBytes / per_round)));
   if (rotations <= 1U) {
     FreeAll();
     return;
@@ -655,8 +653,7 @@ void Timed(const char* name, k::WeightFormat format, std::uint32_t experts,
   // that expert was last touched, which is the access a decode step makes.
   const auto launch_rotating = [&](int rounds) -> bool {
     for (int i = 0; i < rounds; ++i) {
-      args.groups =
-          rotating + static_cast<std::size_t>(i % rotations) * stride;
+      args.groups = rotating + static_cast<std::size_t>(i % rotations) * stride;
       if (!k::GroupedGemv(args, nullptr)) {
         return false;
       }
@@ -853,8 +850,8 @@ int main() {
     // Decode width: one row over six experts, the launch bound once to the six
     // groups a row can hold and once to every expert of the model. The pair
     // says what the blocks that find no group of theirs are worth.
-    const std::vector<Group> six{
-        {0, {0}}, {37, {1}}, {91, {2}}, {140, {3}}, {255, {4}}, {383, {5}}};
+    const std::vector<Group> six{{0, {0}},   {37, {1}},  {91, {2}},
+                                 {140, {3}}, {255, {4}}, {383, {5}}};
     for (const k::WeightFormat f : formats) {
       const char* fmt = f == k::WeightFormat::kQ4_K ? "Q4_K" : "Q6_K";
       char name[96];

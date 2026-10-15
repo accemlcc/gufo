@@ -40,13 +40,13 @@
 // with the byte-alignment instruction, and the launcher only accepts a width
 // whose row size is a multiple of four so that the round-down never leaves the
 // block.
-#include "src/models/kolibri1/kernels/rocm/moe.hpp"
-
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
 #include <cstdint>
 #include <stdexcept>
+
+#include "src/models/kolibri1/kernels/rocm/moe.hpp"
 
 namespace gufo::models::kolibri1::rocm {
 namespace {
@@ -130,7 +130,7 @@ __device__ __forceinline__ void Dequant16Six(const std::uint8_t* q, int shift,
 
 /// acc += sum_i w[i] * x[i] as one FMA chain over n values, four per load. The
 /// order is the chain itself: no reassociation, no vector reduction.
-template <int N>
+template<int N>
 __device__ __forceinline__ float Accumulate(float acc, const float* w,
                                             const float* x) {
 #pragma unroll
@@ -146,24 +146,24 @@ __device__ __forceinline__ float Accumulate(float acc, const float* w,
 
 /// Storage of each format: bytes per 256-value super-block, the lanes a row is
 /// cut into and the values a lane decodes.
-template <WeightFormat F>
+template<WeightFormat F>
 struct Traits;
 
-template <>
+template<>
 struct Traits<WeightFormat::kQ4_K> {
   static constexpr int kBytes = 144;
   static constexpr int kTasks = 4;
   static constexpr int kValues = 64;
 };
 
-template <>
+template<>
 struct Traits<WeightFormat::kQ6_K> {
   static constexpr int kBytes = 210;
   static constexpr int kTasks = 4;
   static constexpr int kValues = 64;
 };
 
-template <WeightFormat F>
+template<WeightFormat F>
 __host__ __device__ constexpr std::size_t RowBytes(std::uint32_t k) {
   return static_cast<std::size_t>(k) / 256 * Traits<F>::kBytes;
 }
@@ -221,7 +221,7 @@ __device__ __forceinline__ void DecodeQ6K(const std::uint8_t* block, int t,
 
 /// Lane `t`'s decoded weights of super-block `unit` of a row and the activation
 /// index of w[0]. The launcher refused every k the blocks do not divide.
-template <WeightFormat F>
+template<WeightFormat F>
 __device__ __forceinline__ void Decode(const std::uint8_t* row,
                                        std::uint32_t unit, int t,
                                        float (&w)[Traits<F>::kValues],
@@ -240,7 +240,7 @@ __device__ __forceinline__ void Decode(const std::uint8_t* row,
 
 /// acc += w . x for one decoded lane: runs of 16 values, 32 apart for Q6_K
 /// because that is the order its super-block stores them in.
-template <WeightFormat F>
+template<WeightFormat F>
 __device__ __forceinline__ float Contract(float acc,
                                           const float (&w)[Traits<F>::kValues],
                                           const float* x) {
@@ -255,7 +255,7 @@ __device__ __forceinline__ float Contract(float acc,
 
 /// The same addresses as Contract, storing instead: one dequantized lane of the
 /// table written where its values belong in a row.
-template <WeightFormat F>
+template<WeightFormat F>
 __device__ __forceinline__ void Scatter(float* row,
                                         const float (&w)[Traits<F>::kValues],
                                         std::uint32_t offset) {
@@ -264,10 +264,10 @@ __device__ __forceinline__ void Scatter(float* row,
 #pragma unroll
   for (int r = 0; r < kRuns; ++r) {
     auto* out = reinterpret_cast<float4*>(row + offset + kStride * r);
-    out[0] = make_float4(w[16 * r], w[16 * r + 1], w[16 * r + 2],
-                         w[16 * r + 3]);
-    out[1] = make_float4(w[16 * r + 4], w[16 * r + 5], w[16 * r + 6],
-                         w[16 * r + 7]);
+    out[0] =
+        make_float4(w[16 * r], w[16 * r + 1], w[16 * r + 2], w[16 * r + 3]);
+    out[1] =
+        make_float4(w[16 * r + 4], w[16 * r + 5], w[16 * r + 6], w[16 * r + 7]);
     out[2] = make_float4(w[16 * r + 8], w[16 * r + 9], w[16 * r + 10],
                          w[16 * r + 11]);
     out[3] = make_float4(w[16 * r + 12], w[16 * r + 13], w[16 * r + 14],
@@ -278,7 +278,7 @@ __device__ __forceinline__ void Scatter(float* row,
 /// Sum of the lanes one output row is cut into. The butterfly stays inside that
 /// group of lanes, and IEEE addition being commutative, every one of them ends
 /// with the same bits: which lane stores the row does not change the value.
-template <int kTasks>
+template<int kTasks>
 __device__ __forceinline__ float LaneSum(float acc) {
 #pragma unroll
   for (int offset = kTasks / 2; offset > 0; offset >>= 1) {
@@ -295,11 +295,13 @@ __device__ __forceinline__ float LaneSum(float acc) {
 /// waves of a row group taking interleaved super-blocks. blockIdx.y is the
 /// group of the table, and a group listing no slots writes nothing at all,
 /// which is how an expert no row of this batch chose leaves the launch.
-template <WeightFormat F, int kSplit, int kSlots>
-__global__ void __launch_bounds__(kThreads) GroupedGemvKernel(
-    const std::uint8_t* __restrict__ w, const std::int32_t* __restrict__ groups,
-    const float* __restrict__ x, float* __restrict__ y,
-    std::uint32_t slots_per_row, std::uint32_t m, std::uint32_t k) {
+template<WeightFormat F, int kSplit, int kSlots>
+__global__ void __launch_bounds__(kThreads)
+    GroupedGemvKernel(const std::uint8_t* __restrict__ w,
+                      const std::int32_t* __restrict__ groups,
+                      const float* __restrict__ x, float* __restrict__ y,
+                      std::uint32_t slots_per_row, std::uint32_t m,
+                      std::uint32_t k) {
   using T = Traits<F>;
   constexpr int kRowsPerWave = kWave / T::kTasks;
   constexpr int kRowGroups = kWaves / kSplit;
@@ -319,8 +321,8 @@ __global__ void __launch_bounds__(kThreads) GroupedGemvKernel(
   const int slice = wave % kSplit;
   const int row_group = wave / kSplit;
   const int t = lane % T::kTasks;
-  const std::uint32_t row = blockIdx.x * kRowsPerBlock +
-                            row_group * kRowsPerWave + lane / T::kTasks;
+  const std::uint32_t row =
+      blockIdx.x * kRowsPerBlock + row_group * kRowsPerWave + lane / T::kTasks;
   const std::uint32_t units = k / 256;
   const std::uint8_t* base =
       w + (static_cast<std::size_t>(expert) * m + row) * RowBytes<F>(k);
@@ -388,7 +390,7 @@ __global__ void __launch_bounds__(kThreads) GroupedGemvKernel(
   }
 }
 
-template <WeightFormat F>
+template<WeightFormat F>
 void LaunchGrouped(const GroupedGemvArgs& args, hipStream_t stream) {
   constexpr int kRowsPerWave = kWave / Traits<F>::kTasks;
   const auto* weights = static_cast<const std::uint8_t*>(args.w);
@@ -438,11 +440,11 @@ void LaunchGrouped(const GroupedGemvArgs& args, hipStream_t stream) {
 /// One row of the table per blockIdx.y, cut into the same lanes the projection
 /// uses: a thread decodes 64 values and stores them where they belong, so the
 /// gather needs no decoder of its own.
-template <WeightFormat F>
-__global__ void __launch_bounds__(kThreads) EmbedKernel(
-    const std::uint8_t* __restrict__ table,
-    const std::int32_t* __restrict__ tokens, float* __restrict__ y,
-    std::uint32_t n, std::uint32_t lanes) {
+template<WeightFormat F>
+__global__ void __launch_bounds__(kThreads)
+    EmbedKernel(const std::uint8_t* __restrict__ table,
+                const std::int32_t* __restrict__ tokens, float* __restrict__ y,
+                std::uint32_t n, std::uint32_t lanes) {
   const std::uint32_t lane = blockIdx.x * kThreads + threadIdx.x;
   if (lane >= lanes) {
     return;
@@ -462,11 +464,10 @@ __global__ void __launch_bounds__(kThreads) EmbedKernel(
 /// Whether a format's rows stay word aligned at width k, which is what the
 /// block loads round down to. Q4_K's row size is a multiple of 16 for any k the
 /// blocks divide; Q6_K's is 210 bytes per block and needs an even block count.
-template <WeightFormat F>
+template<WeightFormat F>
 bool RowAligned(std::uint32_t k) noexcept {
   return F == WeightFormat::kQ4_K || (k / 256) % 2 == 0;
 }
-
 
 }  // namespace
 

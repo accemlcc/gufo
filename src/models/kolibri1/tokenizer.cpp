@@ -69,8 +69,8 @@ std::uint32_t SymbolCodePoint(std::uint8_t byte) noexcept {
   }
   int rank = 0;
   for (int i = 0; i < b; ++i) {
-    const bool printable = (i >= '!' && i <= '~') || (i >= 0xA1 && i <= 0xAC) ||
-                           i >= 0xAE;
+    const bool printable =
+        (i >= '!' && i <= '~') || (i >= 0xA1 && i <= 0xAC) || i >= 0xAE;
     if (!printable) {
       ++rank;
     }
@@ -102,8 +102,8 @@ std::int32_t SymbolByte(std::uint32_t cpt) noexcept {
   }
   std::uint32_t rank = cpt - 0x100;
   for (int b = 0; b < 256; ++b) {
-    const bool printable = (b >= '!' && b <= '~') || (b >= 0xA1 && b <= 0xAC) ||
-                           b >= 0xAE;
+    const bool printable =
+        (b >= '!' && b <= '~') || (b >= 0xA1 && b <= 0xAC) || b >= 0xAE;
     if (!printable) {
       if (rank == 0) {
         return b;
@@ -144,9 +144,13 @@ bool IsNumber(UChar32 cpt) noexcept {
          category == U_OTHER_NUMBER;
 }
 
-bool IsWhitespace(UChar32 cpt) noexcept { return u_isUWhiteSpace(cpt) != 0; }
+bool IsWhitespace(UChar32 cpt) noexcept {
+  return u_isUWhiteSpace(cpt) != 0;
+}
 
-bool IsNewline(UChar32 cpt) noexcept { return cpt == '\r' || cpt == '\n'; }
+bool IsNewline(UChar32 cpt) noexcept {
+  return cpt == '\r' || cpt == '\n';
+}
 
 struct CodePoint {
   UChar32 value{0xFFFD};
@@ -161,8 +165,8 @@ CodePoint Next(std::string_view text, std::size_t offset) {
   const std::int32_t length = static_cast<std::int32_t>(text.size());
   UChar32 cpt = 0xFFFD;
   U8_NEXT(data, index, length, cpt);
-  return {cpt, static_cast<std::size_t>(index - static_cast<std::int32_t>(
-                                                 offset))};
+  return {cpt,
+          static_cast<std::size_t>(index - static_cast<std::int32_t>(offset))};
 }
 
 /// `'s`, `'t`, `'re`, `'ve`, `'m`, `'ll`, `'d` regardless of case.

@@ -1,3 +1,5 @@
+#include "src/models/kolibri1/reference.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -9,7 +11,6 @@
 #include <vector>
 
 #include "src/core/gguf_reader.hpp"
-#include "src/models/kolibri1/reference.hpp"
 #include "src/models/kolibri1/weights.hpp"
 
 #ifndef GUFO_KOLIBRI1_FIXTURES
@@ -33,9 +34,10 @@ struct Goldens {
 Goldens LoadGoldens() {
   FILE* file = std::fopen(Fixture("kolibri1_logits.bin").c_str(), "rb");
   if (file == nullptr) {
-    throw std::runtime_error("cannot read kolibri1_logits.bin; regenerate it "
-                             "with "
-                             "tests/models/kolibri1/make_reference_fixture.py");
+    throw std::runtime_error(
+        "cannot read kolibri1_logits.bin; regenerate it "
+        "with "
+        "tests/models/kolibri1/make_reference_fixture.py");
   }
   const auto Read = [&](void* data, std::size_t count) {
     if (std::fread(data, 1, count, file) != count) {
@@ -153,7 +155,8 @@ int main() {
     chunk_logits.insert(chunk_logits.end(), tail_logits.begin(),
                         tail_logits.end());
     if (chunk_logits.size() != goldens.logits.size()) {
-      std::fprintf(stderr, "FAIL: chunked forward wrote %zu values, expected %zu\n",
+      std::fprintf(stderr,
+                   "FAIL: chunked forward wrote %zu values, expected %zu\n",
                    chunk_logits.size(), goldens.logits.size());
       return 1;
     }
@@ -200,17 +203,18 @@ int main() {
       std::fprintf(stderr, "FAIL: global layer ignored the earlier tokens\n");
       return 1;
     }
-    std::printf("reference: sliding layer blind behind the window, global "
-                "layer still uses those keys (delta %.3e)\n",
-                global_delta);
+    std::printf(
+        "reference: sliding layer blind behind the window, global "
+        "layer still uses those keys (delta %.3e)\n",
+        global_delta);
 
     // The comparison above only means something if the sliding layer does
     // react to keys inside its window.
     std::vector<std::int32_t> changed_suffix = suffix;
     changed_suffix.back() = 3;
     const std::vector<float> c = Trace(prefix_a, changed_suffix);
-    if (!(MaxAbsDiff(LastRow(a, 0, rows, hidden),
-                     LastRow(c, 0, rows, hidden)) > 1e-6F)) {
+    if (!(MaxAbsDiff(LastRow(a, 0, rows, hidden), LastRow(c, 0, rows, hidden)) >
+          1e-6F)) {
       std::fprintf(stderr, "FAIL: sliding layer ignored a key in its window\n");
       return 1;
     }

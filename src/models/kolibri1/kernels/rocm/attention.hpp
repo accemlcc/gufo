@@ -1,9 +1,10 @@
 #ifndef GUFO_MODELS_KOLIBRI1_KERNELS_ROCM_ATTENTION_HPP_
 #define GUFO_MODELS_KOLIBRI1_KERNELS_ROCM_ATTENTION_HPP_
 
+#include <hip/hip_runtime.h>
+
 #include <cstddef>
 #include <cstdint>
-#include <hip/hip_runtime.h>
 
 namespace gufo::models::kolibri1::rocm {
 
@@ -19,11 +20,11 @@ namespace gufo::models::kolibri1::rocm {
 /// precision the products run in; the accumulator, the softmax and the output
 /// are FP32.
 struct AttentionArgs {
-  const float* q;             ///< [rows][heads][head_dim]
-  const std::uint16_t* k;     ///< binary16 [capacity][kv_heads][head_dim]
-  const std::uint16_t* v;     ///< binary16 [capacity][kv_heads][head_dim]
-  float* out;                 ///< [rows][heads][head_dim]
-  float* partials;            ///< split-K scratch, or null when splits is 1
+  const float* q;          ///< [rows][heads][head_dim]
+  const std::uint16_t* k;  ///< binary16 [capacity][kv_heads][head_dim]
+  const std::uint16_t* v;  ///< binary16 [capacity][kv_heads][head_dim]
+  float* out;              ///< [rows][heads][head_dim]
+  float* partials;         ///< split-K scratch, or null when splits is 1
 
   std::uint32_t rows;
   std::uint32_t heads;     ///< query heads, a multiple of the key heads
@@ -71,10 +72,9 @@ void Attention(const AttentionArgs& args, hipStream_t stream);
 
 /// FP32 words the split-K scratch needs: one partial output plus its max and
 /// sum per row, head and split.
-[[nodiscard]] std::size_t AttentionPartialFloats(std::uint32_t rows,
-                                                 std::uint32_t heads,
-                                                 std::uint32_t head_dim,
-                                                 std::uint32_t capacity) noexcept;
+[[nodiscard]] std::size_t AttentionPartialFloats(
+    std::uint32_t rows, std::uint32_t heads, std::uint32_t head_dim,
+    std::uint32_t capacity) noexcept;
 
 }  // namespace gufo::models::kolibri1::rocm
 
