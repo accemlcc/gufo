@@ -414,6 +414,30 @@ at one say something about the defect.
     three processes gave 0, 3 of 4 and 0 trials drifting, worst 3.5952 — the same
     signature, and the one-piece column clean as ever. A chunk of 32 gave 0 of 8.
     Width moves the rate, not the exposure.
+  - **The rocBLAS atomics knob cannot reach this.** ROCm documents rocBLAS
+    atomics as not necessarily deterministic and added
+    `ROCBLAS_DEFAULT_ATOMICS_MODE` in 6.2 to choose otherwise, and the same
+    shape - version changes numerics, `temp=0` does not repeat - is reported
+    for ROCm backends elsewhere (llama.cpp #14727, PyTorch #192862, aiter
+    #3261). None of it is in this engine's path: `nm -D --undefined-only` on
+    `kolibri1_device_forward_test` finds no `rocblas_*` and no `hipblas*`
+    symbol, where the server binary finds 36, and the tree has no `dlopen`.
+    The BLAS users are `qwen`, `qwen38_flash_next`, `deepseek_v4_flash`,
+    `minimax_h3` and the audio and image engines; `kolibri1` is not among them.
+    Measured anyway, host userspace, amplified check with sweep 8: two
+    processes with the variable set came out 0 of 176 comparisons drifting,
+    every column `worst 0`; the two control processes gave 2 of 176, both in
+    the one-piece column (`max_abs` 0.258627 and 0.170838). No effect, and no
+    way for one.
+  - **A serve no longer picks its own runtime.** `scripts/kolibri-gufo.sh`
+    runs the server against `KOLIBRI_ROCM_LIB` (`~/rocm-sdk/lib`, the release
+    the build container compiles with), refuses to start when that directory
+    holds no `libamdhip64` rather than falling back to the host's, records the
+    version in the log, and reports in `status` what the process really
+    mapped. The instance that was up when this was written had come up on the
+    host's `7.2.70201` with nothing in its environment - the arm the drift was
+    seen on; after the restart it maps `7.15.26333` at `--context 262144` and
+    answers as before.
 - **The scalar reference and the device disagree by 5.07 on a 37-token prompt
   and agree to 0.003 on a 5-token one.** In a run where both device shapes were
   bit-identical, each was 5.07351 (`max_abs`) from `Reference::Forward` at the

@@ -218,8 +218,15 @@ headroom.
   drifting comparisons on one and 4 of 12 on the other, and again, after the
   diagnostic instruments came out and the binary was rebuilt, 0 of 5 against the
   SDK and 1 of 3 against the host. Host-side checks now run against the SDK
-  (`KOLIBRI_ROCM_LIB` in `tools/kolibri/m1.sh`). The served `gufo-runtime` image
-  ships a third build, CLR 7.2.3, untested here — a 7.2 line, which is the line
+  (`KOLIBRI_ROCM_LIB` in `tools/kolibri/m1.sh`), and so does the served model
+  (`scripts/kolibri-gufo.sh` names the release and refuses to start without
+  it), so a run cannot land on another userspace by accident. One candidate is
+  out: this is not rocBLAS atomics. The engine loads no BLAS - the test binary
+  carries no `rocblas_*` or `hipblas*` symbol where the server carries 36 -
+  and `ROCBLAS_DEFAULT_ATOMICS_MODE=deterministic` on the host arm gave 0 of
+  176 comparisons drifting against a control's 2 of 176. What separates the
+  arms is the HIP runtime itself. The served `gufo-runtime` image ships a
+  third build, CLR 7.2.3, untested here — a 7.2 line, which is the line
   the drift was seen on. Until that is pinned down, continuations of long prompts
   are not bit-reproducible on this engine; see the chunk-split entry of
   [EXPERIMENTS](EXPERIMENTS.md).

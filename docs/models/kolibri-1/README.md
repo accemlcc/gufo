@@ -104,6 +104,11 @@ the same binary under the host's own 7.2 changes what the device schedule does
 ([EXPERIMENTS](EXPERIMENTS.md), entry 2026-10-15). `KOLIBRI_ROCM_LIB` overrides
 it, which is how a run against the host runtime is still made.
 
+The served model names that release too: `scripts/kolibri-gufo.sh` puts
+`KOLIBRI_ROCM_LIB` (`~/rocm-sdk/lib`) first on `LD_LIBRARY_PATH`, refuses to
+start when the directory holds no `libamdhip64`, writes the version it chose
+into the log, and `status` reports the version the process really mapped.
+
 ```sh
 # scalar oracle logits (CPU, no ROCm needed). The prompts file holds token ids,
 # one prompt per line; with no file they come from the command line.

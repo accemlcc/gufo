@@ -18,6 +18,8 @@
 #   KOLIBRI_LOG   log file        (default ~/kolibri-gufo-server.log)
 #   KOLIBRI_PEER  optional container to stop first (default: none)
 #   KOLIBRI_MIN_AVAILABLE  memory floor in GiB (default 16)
+#   KOLIBRI_ROCM_LIB  ROCm userspace to run against
+#                     (default ~/rocm-sdk/lib, the release the build used)
 set -euo pipefail
 
 BIN="${KOLIBRI_BIN:-$HOME/gufo-kolibri-src/build/gpu-test/gufo}"
@@ -32,6 +34,39 @@ PIDFILE="${KOLIBRI_PIDFILE:-$HOME/kolibri-gufo-server.pid}"
 # it, and a wedged ROCm context needs a reboot. The floor is an environment
 # knob so the gate itself can be tested without emptying the machine first.
 MIN_AVAILABLE_GiB="${KOLIBRI_MIN_AVAILABLE:-16}"
+
+# The ROCm userspace the binary is run against, named instead of inherited.
+# Kolibri loads no BLAS at all, so this is only ever libamdhip64: the same
+# binary under the host's own 7.2 line schedules the device differently, and a
+# long prompt stops repeating bit for bit (docs/models/kolibri-1/EXPERIMENTS.md,
+# entry 2026-10-15). Serving on the build release is what makes the number in
+# the log the number the engine was measured with, so a missing runtime stops
+# the start rather than falling back to the host's.
+ROCM_LIB="${KOLIBRI_ROCM_LIB:-$HOME/rocm-sdk/lib}"
+
+# The version of the libamdhip64 in a directory. The SDK keeps its own file
+# under the bare soname and points the versioned name at it, so `readlink -f`
+# would answer "libamdhip64.so.7" for both arms; the versioned sibling is what
+# says which release a directory holds.
+runtime_version() {
+  local candidate
+  for candidate in "$1"/libamdhip64.so.7.*; do
+    [[ -e "$candidate" ]] || continue
+    printf '%s\n' "${candidate##*/libamdhip64.so.}"
+    return
+  done
+  printf -- '-\n'
+}
+
+# The libamdhip64 a running process really mapped, as version and directory.
+loaded_runtime() {
+  local mapped dir
+  mapped="$(sed -n 's#.* \(/[^ ]*libamdhip64\.so\.[0-9].*\)#\1#p' \
+    "/proc/$1/maps" 2>/dev/null | head -1)"
+  [[ -n "$mapped" ]] || { printf -- '-\n'; return; }
+  dir="$(dirname "$mapped")"
+  printf '%s %s\n' "$(runtime_version "$dir")" "$dir"
+}
 
 available_gib() {
   awk '/MemAvailable/ {print int($2 / 1048576)}' /proc/meminfo
@@ -91,6 +126,14 @@ case "${1:-status}" in
     fi
     [[ -x "$BIN" ]] || { echo "keine Binary: $BIN" >&2; exit 1; }
     [[ -f "$MODEL" ]] || { echo "kein Modell: $MODEL" >&2; exit 1; }
+    if [[ ! -e "$ROCM_LIB/libamdhip64.so.7" ]]; then
+      echo "Abbruch: kein libamdhip64 in $ROCM_LIB." >&2
+      echo "Der Server laeuft gegen die ROCm, gegen die die Binary gebaut wurde;" >&2
+      echo "die Userspace des Hosts ist eine andere Zahl und ein anderes" >&2
+      echo "Ergebnis (docs/models/kolibri-1/EXPERIMENTS.md, 2026-10-15)." >&2
+      echo "Andere Userspace: KOLIBRI_ROCM_LIB=... oder neu bauen." >&2
+      exit 1
+    fi
     avail="$(available_gib)"
     if (( avail < MIN_AVAILABLE_GiB )); then
       echo "Abbruch: ${avail} GiB verfuegbar, unter ${MIN_AVAILABLE_GiB} GiB startet" \
@@ -112,8 +155,11 @@ case "${1:-status}" in
       echo "stoppe ${PEER} (derselbe UMA-Speicher)"
       podman stop -t 20 "$PEER" >/dev/null
     fi
-    echo "starte Kolibri-1 (Kontext ${CTX}, ${avail} GiB verfuegbar)"
+    echo "starte Kolibri-1 (Kontext ${CTX}, ${avail} GiB verfuegbar, runtime" \
+         "$(runtime_version "$ROCM_LIB"))"
     : > "$LOG"
+    echo "runtime: $ROCM_LIB -> $(runtime_version "$ROCM_LIB")" >> "$LOG"
+    LD_LIBRARY_PATH="$ROCM_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
     setsid nohup "$BIN" serve llm \
       --model "$MODEL" \
       --served-model-name Kolibri-1 \
@@ -141,6 +187,7 @@ case "${1:-status}" in
     if pid="$(running_pid)"; then
       printf 'pid %s, health: ' "$pid"
       health && echo ok || echo "antwortet nicht"
+      printf 'runtime: %s\n' "$(loaded_runtime "$pid")"
       device_holders
     else
       echo "laeuft nicht"
