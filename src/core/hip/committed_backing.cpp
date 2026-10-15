@@ -291,14 +291,19 @@ std::optional<BackingBlock> CommittedBackingPool::TryAcquire(
       return std::nullopt;
   }
 }
-void CommittedBackingPool::GrowAhead() {
+void CommittedBackingPool::GrowAhead(std::size_t segments) {
   const auto committed = state_->committed.load(std::memory_order_acquire);
-  if (committed == state_->capacity)
+  if (!segments || committed == state_->capacity)
     return;
   const auto free_bytes =
       state_->ledger->Snapshot().bytes[static_cast<std::size_t>(
           cache::ResourceCategory::kBackingFree)];
-  if (free_bytes >= state_->segment_blocks * state_->block_bytes)
+  const auto target_blocks =
+      segments >= 1 + (state_->capacity - 1) / state_->segment_blocks
+          ? state_->capacity
+          : segments * state_->segment_blocks;
+  const auto target_bytes = target_blocks * state_->block_bytes;
+  if (free_bytes >= target_bytes)
     return;
   const std::lock_guard lock(ahead_mutex_);
   if (state_->growing_ahead.exchange(true))
@@ -306,9 +311,15 @@ void CommittedBackingPool::GrowAhead() {
   if (ahead_.joinable())
     ahead_.join();
   try {
-    ahead_ = std::jthread([state = state_, committed] {
+    ahead_ = std::jthread([state = state_, committed, target_bytes] {
       try {
-        (void)state->Grow(committed);
+        auto seen = committed;
+        while (state->ledger->Snapshot().bytes[static_cast<std::size_t>(
+                   cache::ResourceCategory::kBackingFree)] < target_bytes) {
+          if (!state->Grow(seen))
+            break;
+          seen = state->committed.load(std::memory_order_acquire);
+        }
       } catch (...) {
       }
       state->growing_ahead.store(false);
@@ -316,6 +327,11 @@ void CommittedBackingPool::GrowAhead() {
   } catch (...) {
     state_->growing_ahead.store(false);
   }
+}
+void CommittedBackingPool::WaitForGrowth() {
+  const std::lock_guard lock(ahead_mutex_);
+  if (ahead_.joinable())
+    ahead_.join();
 }
 std::size_t CommittedBackingPool::BlockCount() const noexcept {
   return state_->committed.load(std::memory_order_acquire);

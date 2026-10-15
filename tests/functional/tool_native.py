@@ -211,6 +211,23 @@ def check_native_tool_schemas(client, model, checks, chat_result, sampling_prese
             first = record(label, chat_result(client, request, stream))
             assert_bash(first, label)
 
+            # The call the model generated is the call history renders, so the
+            # immediate next turn reuses it from cache instead of re-prefilling
+            # it. Run the unrelated schema control afterwards: it may replace
+            # the live generated frontier while retaining only prompt snapshots.
+            call = first["tools"][0]
+            continued = {**request, "tool_choice": "auto", "messages": [
+                *request["messages"],
+                {"role": "assistant", "content": first["text"] or None, "tool_calls": [call]},
+                {"role": "tool", "tool_call_id": call["id"], "content": "native-schemas\n"},
+                {"role": "user", "content": "Reply with the single word DONE."}]}
+            done = record(label + "_continued", chat_result(client, continued, not stream))
+            assert done["finish"] == "stop" and not done["tools"], (label, done)
+            assert cached(done["usage"]) > first["usage"]["prompt_tokens"], (
+                label, "the generated call was not reused on the next turn",
+                first["usage"], done["usage"])
+            assert_native(done, label + "_continued")
+
             # No instruction is added: the prompt matches the control within
             # the spelling of the renamed keyword. The JSON instruction alone
             # was about 45 tokens.
@@ -228,20 +245,6 @@ def check_native_tool_schemas(client, model, checks, chat_result, sampling_prese
                 label, "prompt changed beyond the schema text", delta, tolerance,
                 first["usage"], baseline["usage"])
 
-            # The call the model generated is the call history renders, so the
-            # next turn reuses it from cache instead of re-prefilling it.
-            call = first["tools"][0]
-            continued = {**request, "tool_choice": "auto", "messages": [
-                *request["messages"],
-                {"role": "assistant", "content": first["text"] or None, "tool_calls": [call]},
-                {"role": "tool", "tool_call_id": call["id"], "content": "native-schemas\n"},
-                {"role": "user", "content": "Reply with the single word DONE."}]}
-            done = record(label + "_continued", chat_result(client, continued, not stream))
-            assert done["finish"] == "stop" and not done["tools"], (label, done)
-            assert cached(done["usage"]) >= reuse_floor(first), (
-                label, "the generated call was not reused on the next turn",
-                first["usage"], done["usage"])
-            assert_native(done, label + "_continued")
 
     # Calls to the neighbor itself keep their declared JSON types.
     typed = (
@@ -469,38 +472,13 @@ def check_literal_history(client, model, checks, chat_result, image=None,
                 done = response_result(client, request, True)
             checks[label + "_continued"] = done
             assert done["text"].strip() == "DONE" and not done["tools"], done
-
-            def reused(result):
-                usage = result["usage"]
-                return usage.get("input_tokens_details",
-                                 usage.get("prompt_tokens_details"))["cached_tokens"]
-
-            if sampling_preset in THINKING_OFF_OPENING_TOKENS:
-                # History drops the call's thinking-off opening (templates.py),
-                # so reuse stops at a stable boundary. The literal must reuse
-                # exactly what the same continuation without it reuses.
-                plain = deepcopy(request)
-                if endpoint == "chat":
-                    plain["messages"][-1]["content"] = "File data: example."
-                    control = chat_result(client, plain, True)
-                else:
-                    plain["input"][-1]["output"] = "File data: example."
-                    control = response_result(client, plain, True)
-                checks[label + "_plain"] = control
-
-                def complete(result):
-                    usage = result["usage"]
-                    return reused(result) == usage.get("prompt_tokens",
-                                                       usage.get("input_tokens"))
-
-                # Both may reuse everything when an earlier endpoint served
-                # the same prompts.
-                assert reused(done) == reused(control) or (
-                    complete(done) and complete(control)), (
-                    label, "literal tool data invalidated unchanged history", done, control)
-            else:
-                assert reused(done) == first["usage"]["total_tokens"], (
-                    label, "literal tool data invalidated unchanged history", first, done)
+            details = done["usage"].get("input_tokens_details",
+                                       done["usage"].get("prompt_tokens_details"))
+            # A repeated suite can retain a deeper checkpoint containing the
+            # tool result too. Require the entire generated call to survive;
+            # additional reuse of this identical history is valid.
+            assert details["cached_tokens"] >= first["usage"]["total_tokens"], (
+                label, "literal tool data invalidated unchanged history", first, done)
             print(f"CHECK {label}", file=sys.stderr, flush=True)
 
 

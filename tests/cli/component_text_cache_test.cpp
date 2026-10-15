@@ -1,6 +1,7 @@
 #include "src/cli/serve/component_text_cache.hpp"
 
 #include <cassert>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -65,6 +66,10 @@ public:
   std::unique_ptr<TextRunnerState> CreateState() const override {
     throw std::logic_error("legacy state must never be constructed");
   }
+  // Image prompts carry their cache identity in the context.
+  void SetPromptContext(
+      TextRunnerState&,
+      std::shared_ptr<const TextPromptContext>) const override {}
   std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
       cache::ResourceLedger& ledger, std::size_t) const override {
     struct Block {
@@ -346,6 +351,87 @@ void ColdAssignmentPrefersPreservedSlot() {
   assert(metrics.ledger.reserved_bytes[static_cast<unsigned>(
              cache::ResourceCategory::kBackingAssigned)] == 320);
 }
+void ImageAfterCachedTextPrefixCaptures() {
+  // #584: a request that appends the first image after a cached text-only
+  // prefix restores that prefix, whose input identity is empty, and must
+  // still capture past the image.
+  auto runner = std::make_shared<Runner>();
+  ComponentTextCache cache(runner, 2, 1 << 22, {});
+  std::vector<TextRunnerToken> text(40);
+  std::iota(text.begin(), text.end(), 10);
+  {
+    auto root = cache.Acquire(text, {}, {}, true, 0, true);
+    auto& state = dynamic_cast<State&>(root->state());
+    runner->adapter->Append(state.slot, text, text);
+    assert(root->TryReserveSnapshot(root->CaptureBytes(), text.size(), false,
+                                    SnapshotPurpose::kContinuation, {}));
+    std::shared_ptr<const TextRunnerSnapshot> snapshot = root->Capture();
+    assert(root->PublishSnapshot(text, snapshot, false));
+  }
+  auto image = text;
+  image.insert(image.end(), {50, 51, 52, 53});
+  image.insert(image.end(), 16, 7);
+  image.insert(image.end(), {60, 61});
+  auto context = std::make_shared<TextPromptContext>();
+  context->cache_identity = {1, 2, 3};
+  context->cache_prefixes.push_back({44, {}});
+  auto cold_runner = std::make_shared<Runner>();
+  ComponentTextCache cold_cache(cold_runner, 1, 1 << 22, {});
+  std::size_t inherited = text.size();
+  for (const bool second_image : {false, true}) {
+    if (second_image) {
+      // A second image must preserve the first image's prefix identity too.
+      image.insert(image.end(), {62, 63, 64, 65});
+      context = std::make_shared<TextPromptContext>(*context);
+      context->cache_prefixes.push_back({image.size(), {1, 2, 3}});
+      context->cache_identity = {4, 5, 6};
+      image.insert(image.end(), 16, 8);
+      image.insert(image.end(), {70, 71});
+    }
+    auto lease = cache.Acquire(image, {}, context, true, 0, true);
+    assert(lease->cached_tokens() == inherited);
+    auto& state = dynamic_cast<State&>(lease->state());
+    const auto suffix = std::span(image).subspan(inherited);
+    runner->adapter->Append(state.slot, suffix, suffix);
+    const auto hash = runner->adapter->RecurrentHash(state.slot);
+    assert(lease->TryReserveSnapshot(lease->CaptureBytes(), image.size(), false,
+                                     SnapshotPurpose::kContinuation, {}));
+    std::shared_ptr<const TextRunnerSnapshot> snapshot = lease->Capture();
+    assert(lease->PublishSnapshot(image, snapshot, false));
+
+    // Model the retry after discarding a cancelled assistant: the image prompt
+    // is unchanged and only a short text suffix is appended. Keep the source
+    // lease active so the retry must restore a checkpoint in the other slot.
+    auto retry_prompt = image;
+    retry_prompt.push_back(99);
+    auto retry = cache.Acquire(retry_prompt, {}, context, true, 0, true);
+    assert(retry->cached_tokens() == image.size());
+    assert(retry->restored_snapshot_bytes() > 0);
+    auto& restored = dynamic_cast<State&>(retry->state());
+    assert(runner->adapter->RecurrentHash(restored.slot) == hash);
+    // Executing the suffix reads target/draft rows too; private state alone
+    // cannot establish that those payloads were restored correctly.
+    const auto tail = std::span(retry_prompt).last(1);
+    runner->adapter->Append(state.slot, tail, tail);
+    runner->adapter->Append(restored.slot, tail, tail);
+    auto cold = cold_cache.Acquire(retry_prompt, {}, context, true, 0, true);
+    assert(cold->cached_tokens() == 0);
+    auto& cold_state = dynamic_cast<State&>(cold->state());
+    cold_runner->adapter->Append(cold_state.slot, retry_prompt, retry_prompt);
+    const auto expected = cold_runner->adapter->RecurrentHash(cold_state.slot);
+    assert(runner->adapter->RecurrentHash(state.slot) == expected);
+    assert(runner->adapter->RecurrentHash(restored.slot) == expected);
+    inherited = image.size();
+  }
+
+  // Image placeholders alone cannot establish a reusable multimodal prefix.
+  // Changing the first image permits only the original text checkpoint.
+  auto changed = std::make_shared<TextPromptContext>();
+  changed->cache_identity = {9, 9, 9};
+  changed->cache_prefixes.push_back({44, {}});
+  auto replacement = cache.Acquire(image, {}, changed, true, 0, true);
+  assert(replacement->cached_tokens() == text.size());
+}
 void CancelledPrefillKeepsCompletedSteps() {
   // A prefill cancelled between steps keeps the frontier it reached as a live
   // prefix (#486, #491), including on the component path Flash-Next uses.
@@ -364,6 +450,75 @@ void CancelledPrefillKeepsCompletedSteps() {
     resend.Invalidate();
   }
 }
+void BackingPreparationAvoidsCachedDecodeAndShortTails() {
+  class PrepareRunner final : public Runner {
+  public:
+    mutable std::size_t preparations{};
+    std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
+        cache::ResourceLedger& ledger, std::size_t ram) const override {
+      auto resources = Runner::CreateComponentCacheResources(ledger, ram);
+      resources->prepare_prefill = [this] { ++preparations; };
+      return resources;
+    }
+    TextPrefillStep Prefill(TextRunnerState& state,
+                            std::span<const TextRunnerToken> prompt,
+                            std::size_t offset,
+                            std::size_t budget) const override {
+      if (prompt.size() == 600 && offset == 0)
+        assert(preparations == 1);
+      return Runner::Prefill(state, prompt, offset, budget);
+    }
+  };
+  auto runner = std::make_shared<PrepareRunner>();
+  TextRunnerPool pool(runner, 1);
+  auto short_request = pool.Acquire(std::vector<TextRunnerToken>(256, 7));
+  (void)short_request.Prefill(512);
+  (void)short_request.Commit();
+  assert(runner->preparations == 0);
+  const std::vector<TextRunnerToken> prompt(600, 8);
+  auto request = pool.Acquire(prompt);
+  assert(!request.Prefill(512).decode_ready);
+  assert(runner->preparations == 1);
+  assert(request.Prefill(512).decode_ready);
+  assert(runner->preparations == 1);
+  (void)request.Commit();
+  auto cached = pool.Acquire(prompt);
+  assert(cached.cached_prompt_tokens() == prompt.size());
+  assert(cached.Prefill(512).consumed_tokens == 0);
+  assert(runner->preparations == 1);
+  cached.Invalidate();
+}
+
+void CompletedCancelledPromptGetsARetrySnapshot() {
+  auto runner = std::make_shared<Runner>();
+  runner->partial = true;
+  runner->in_pass = true;
+  TextRunnerPool pool(runner, 1);
+  std::vector<TextRunnerToken> prompt(40);
+  std::iota(prompt.begin(), prompt.end(), 10);
+  {
+    auto cancelled = pool.Acquire(prompt, {}, {}, {}, true, 35);
+    assert(cancelled.Prefill(64).decode_ready);
+    // Cancellation keeps the live prompt at 40 and an immutable fallback at
+    // 35, without starting a complete-prompt capture.
+    (void)cancelled.Cancel();
+  }
+  auto resumed = pool.Acquire(prompt, {}, {}, {}, true, 35);
+  assert(resumed.cached_prompt_tokens() == prompt.size());
+  const auto expected = Generate(resumed);
+  assert(resumed.Commit().snapshot_bytes > 0);
+  // Replace the execution slot so only immutable checkpoints can serve retry.
+  auto unrelated = prompt;
+  unrelated.front() = 999;
+  auto replacement = pool.Acquire(unrelated, {}, {}, {}, true, 35);
+  Prefill(replacement);
+  (void)replacement.Commit();
+  auto replay = pool.Acquire(prompt, {}, {}, {}, true, 35);
+  assert(replay.cached_prompt_tokens() == prompt.size());
+  assert(Generate(replay) == expected);
+  replay.Invalidate();
+}
+
 void ColdAssignmentKeepsLiveFrontiers() {
   // No checkpoints are borrowed, so every slot has completed preservation.
   // Requests that cannot continue a frontier take the empty slot, then the
@@ -839,6 +994,50 @@ void GridDoesNotSuppressFirstDiskPrompt() {
   }
   std::filesystem::remove_all(directory);
 }
+void PublishedResidentCheckpointKeepsDiskStep() {
+  // A published checkpoint that is still resident restores from RAM, so its
+  // lookup candidate carries no disk description. The next capture within
+  // the step must still be refused.
+  char pattern[] = "/tmp/gufo-component-step-test-XXXXXX";
+  const std::filesystem::path directory = mkdtemp(pattern);
+  const TextRunnerDiskCacheOptions disk{.directory = directory.string(),
+                                        .capacity_bytes = 1 << 20,
+                                        .staging_capacity_bytes = 7,
+                                        .min_checkpoint_step_tokens = 16};
+  std::vector<TextRunnerToken> prompt(48);
+  std::iota(prompt.begin(), prompt.end(), 10);
+  const std::vector<TextRunnerToken> first(prompt.begin(), prompt.begin() + 40);
+  auto runner = std::make_shared<Runner>();
+  ComponentTextCache cache(runner, 1, 1 << 22, disk);
+  {
+    auto lease = cache.Acquire(first, {}, {}, true, 0, true);
+    auto& state = dynamic_cast<State&>(lease->state());
+    runner->adapter->Append(state.slot, first, first);
+    assert(lease->TryReserveSnapshot(lease->CaptureBytes(), first.size(), false,
+                                     SnapshotPurpose::kContinuation, {}));
+    assert(lease->PublishSnapshot(first, lease->Capture(), false));
+    assert(lease->Metrics().disk_queued_bytes > 0);
+    lease->Invalidate();
+    // Invalidation releases the execution slot so the idle queue can publish.
+    // Wait for completion rather than guessing when a created file is attached.
+    for (int i = 0; i < 500 && lease->Metrics().persistence->completed == 0;
+         ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    assert(lease->Metrics().persistence->completed == 1);
+  }
+  auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+  assert(lease->cached_tokens() == first.size() &&
+         !lease->restored_from_disk());
+  auto& state = dynamic_cast<State&>(lease->state());
+  const auto tail = std::span(prompt).subspan(first.size());
+  runner->adapter->Append(state.slot, tail, tail);
+  assert(lease->TryReserveSnapshot(lease->CaptureBytes(), prompt.size(), false,
+                                   SnapshotPurpose::kContinuation, {}));
+  assert(lease->PublishSnapshot(prompt, lease->Capture(), false));
+  assert(lease->Metrics().disk_queued_bytes == 0);
+  lease->Invalidate();
+  std::filesystem::remove_all(directory);
+}
 void NearTailDiskBranchSurvivesRestart() {
   char pattern[] = "/tmp/gufo-component-branch-test-XXXXXX";
   const std::filesystem::path directory = mkdtemp(pattern);
@@ -966,10 +1165,14 @@ void UnbackedDeepRowsSurviveDiskRestart() {
 }
 }  // namespace
 int main() {
+  PublishedResidentCheckpointKeepsDiskStep();
   CancelledPrefillKeepsCompletedSteps();
+  BackingPreparationAvoidsCachedDecodeAndShortTails();
+  CompletedCancelledPromptGetsARetrySnapshot();
   BudgetUsesAllocatedSlotsInsteadOfLazyStateClaim();
   InPassCapturePreservesBoundaryAndLiveTail();
   RestoreFromBusyBorrowedSource();
+  ImageAfterCachedTextPrefixCaptures();
   ColdAssignmentPrefersPreservedSlot();
   ColdAssignmentKeepsLiveFrontiers();
   ReuseAndBranches();

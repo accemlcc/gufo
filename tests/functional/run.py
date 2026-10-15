@@ -506,7 +506,8 @@ def main():
                 grown_log = log.read()
             report["disk_spacing"] = check_disk_spacing(
                 grown_log, (output / "server-restarted.log").read_text(),
-                json.loads((output / "disk-spacing.json").read_text())[0])
+                json.loads((output / "disk-spacing.json").read_text())[0],
+                json.loads((output / "disk-spacing-disk.json").read_text())[0])
     except Exception as error:
         report["error"] = str(error)
         report["traceback"] = traceback.format_exc()

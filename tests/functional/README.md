@@ -3,6 +3,22 @@
 The runner starts an isolated local server and checks real responses with the
 OpenAI SDK. Use production binaries and local weights; no models are downloaded.
 
+Flash-Next startup identity checks use a separate runner with an initially empty
+artifact-hash cache, as on a fresh container. RAM-only serving must skip full-file
+fingerprints and still reuse its prompt. Disk serving must fingerprint the model
+and restore the same reply after a restart:
+
+```sh
+nix develop -c python3 tests/functional/cache_startup.py \
+  --output /tmp/cache-startup-mtp -- \
+  /path/to/production/gufo serve llm --model /path/to/model.gguf \
+  --speculative mtp --mtp-model /path/to/mtp.gguf --context 8192
+```
+
+Run again with `--speculative off` for AR. `--case ram` or `--case disk` selects
+only that lifecycle. Commands, startup times, request timings, responses and logs
+remain in the output directory. This check stays outside hosted model CI.
+
 The cluster workflow uses [impact.json](impact.json) to select suites from changed
 paths. Inspect a plan locally without running Gufo:
 
@@ -322,10 +338,16 @@ Cache checks use real assistant replies and run cold controls after the warm
 history, so the controls cannot hide a missed checkpoint. `cache-edits` checks
 latest-message edits, shortened tool results and rewinds. `cache-growth` checks
 omitted, preserved and explicitly discarded reasoning, plus thinking off.
-Unchanged retries in `cache-growth` and `cache-depth` must prefill nothing,
+Unchanged retries in `cache-growth`, `cache-depth`, reasoning-separator,
+tool-history, schema edges, state edges, progress and metrics must prefill nothing,
 unless the runner's server log shows that memory pressure refused the retry
 copy; the retry may then prefill only the assistant opening after the stable
-boundary.
+boundary. In agent histories the mutable suffix includes the final user turn;
+`tool-history` bounds it with an independent count-tokens request rather than
+extra slack. Generic capture failures do not qualify for this exception.
+Component disk-spacing checks correlate drained publication logs with the
+checkpoint IDs captured by their own requests, excluding delayed writes from
+earlier suites even when their token counts match.
 `cache-rotation` visits four conversations and eight small side requests; use
 `--sessions 1` to verify retention is independent of execution slots. It also
 checks the startup RAM cap; byte/record pressure is covered by CPU tests.
