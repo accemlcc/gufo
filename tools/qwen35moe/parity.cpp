@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <utility>
 #include <vector>
@@ -58,6 +60,13 @@ int main(int argc, char** argv) {
     }
     std::printf("\n");
     std::fflush(stdout);
+    if (const char* dump = std::getenv("QWEN35MOE_DUMP_LOGITS")) {
+      std::string path =
+          std::string(dump) + "/k" + std::to_string(k + 1) + ".f32";
+      FILE* f = std::fopen(path.c_str(), "wb");
+      std::fwrite(logits.data(), sizeof(float), logits.size(), f);
+      std::fclose(f);
+    }
   }
   return 0;
 }
