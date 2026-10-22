@@ -13,10 +13,12 @@
 namespace gufo::models::qwen35moe {
 namespace {
 
-/// y = rms(x) * (1 + w): the zero-centered RMSNorm of this architecture,
-/// whose weights initialise at 0 rather than 1.
-void RmsNormZero(const float* x, const float* w, std::size_t n, float eps,
-                 float* y) {
+/// y = rms(x) * w: the file stores standard RMSNorm weights (mean near 1,
+/// all positive). The transformers checkpoint centres them at 0 and the graph
+/// reads (1 + w); the GGUF converter bakes that shift in, so the runtime -
+/// and this oracle - must not add it again.
+void RmsNorm(const float* x, const float* w, std::size_t n, float eps,
+             float* y) {
   double sum = 0.0;
   for (std::size_t i = 0; i < n; ++i) {
     sum += static_cast<double>(x[i]) * x[i];
@@ -24,7 +26,7 @@ void RmsNormZero(const float* x, const float* w, std::size_t n, float eps,
   const double scale = 1.0 / std::sqrt(sum / static_cast<double>(n) + eps);
   for (std::size_t i = 0; i < n; ++i) {
     y[i] = static_cast<float>(static_cast<double>(x[i]) * scale *
-                              (1.0 + static_cast<double>(w[i])));
+                              static_cast<double>(w[i]));
   }
 }
 
@@ -287,8 +289,7 @@ void Reference::LinearLayer(std::uint32_t layer, const float* x,
       const double scale = 1.0 / std::sqrt(sum / head_v + c.rms_eps);
       for (std::size_t j = 0; j < head_v; ++j) {
         normed[h * head_v + j] = static_cast<float>(
-            core[h * head_v + j] * scale * (1.0 + w_norm[j]) *
-            Silu(z[h * head_v + j]));
+            core[h * head_v + j] * scale * w_norm[j] * Silu(z[h * head_v + j]));
       }
     }
   }
@@ -333,7 +334,7 @@ void Reference::FullLayer(std::uint32_t layer, const float* x,
       for (std::size_t i = 0; i < dim; ++i) {
         kh[i] = kvr[h * dim + i];
       }
-      RmsNormZero(kh.data(), kn, dim, c.rms_eps, kh.data());
+      RmsNorm(kh.data(), kn, dim, c.rms_eps, kh.data());
       Rope(kh.data(), c.rotary_dim, pos, c.rope_theta);
       for (std::size_t i = 0; i < dim; ++i) {
         krow[h * dim + i] = kh[i];
@@ -351,7 +352,7 @@ void Reference::FullLayer(std::uint32_t layer, const float* x,
       for (std::size_t i = 0; i < dim; ++i) {
         qh[i] = qgr[h * dim + i];
       }
-      RmsNormZero(qh.data(), qn, dim, c.rms_eps, qh.data());
+      RmsNorm(qh.data(), qn, dim, c.rms_eps, qh.data());
       Rope(qh.data(), c.rotary_dim, pos, c.rope_theta);
       const std::size_t kvh = h / group;
       std::vector<double> scores(hi);
@@ -514,7 +515,7 @@ void Reference::Forward(std::span<const std::int32_t> tokens,
     const LayerWeights& w = weights_.layers[l];
     const float* wn = static_cast<const float*>(w.attn_norm.data);
     for (std::size_t r = 0; r < n; ++r) {
-      RmsNormZero(&h[r * d], wn, d, c.rms_eps, &normed[r * d]);
+      RmsNorm(&h[r * d], wn, d, c.rms_eps, &normed[r * d]);
     }
     if (c.IsLinear(l)) {
       // Reference processes rows sequentially to keep the recurrent state
@@ -530,7 +531,7 @@ void Reference::Forward(std::span<const std::int32_t> tokens,
     }
     const float* wp = static_cast<const float*>(w.post_attention_norm.data);
     for (std::size_t r = 0; r < n; ++r) {
-      RmsNormZero(&h[r * d], wp, d, c.rms_eps, &normed[r * d]);
+      RmsNorm(&h[r * d], wp, d, c.rms_eps, &normed[r * d]);
     }
     Mixture(w, normed.data(), n, tmp.data());
     for (std::size_t i = 0; i < n * d; ++i) {
@@ -539,7 +540,7 @@ void Reference::Forward(std::span<const std::int32_t> tokens,
   }
   const float* wo = static_cast<const float*>(weights_.output_norm.data);
   for (std::size_t r = 0; r < n; ++r) {
-    RmsNormZero(&h[r * d], wo, d, c.rms_eps, &normed[r * d]);
+    RmsNorm(&h[r * d], wo, d, c.rms_eps, &normed[r * d]);
   }
   out_logits->assign(n * vocab, 0.0F);
   MatMulRef(weights_.output, vocab, d, normed.data(), n, out_logits->data());

@@ -52,8 +52,10 @@ QKV_DIM = 2 * KEY_DIM + VALUE_DIM
 Q_DIM = HEADS * HEAD_DIM
 KV_DIM = KV_HEADS * HEAD_DIM
 
-def rms_norm_zero(x, w):
-    return x / np.sqrt((x * x).mean(-1, keepdims=True) + EPS) * (1.0 + w)
+def rms_norm(x, w):
+    # Standard RMSNorm on file weights: the converter bakes the checkpoint's
+    # (1 + w) shift in, so the stored weights sit near 1, not 0.
+    return x / np.sqrt((x * x).mean(-1, keepdims=True) + EPS) * w
 
 def silu(x):
     return x / (1.0 + np.exp(-x))
@@ -79,19 +81,19 @@ def main():
         return rng.standard_normal(shape).astype(np.float32) * 0.5
     T["token_embd.weight"] = rand(VOCAB, HIDDEN)
     T["output.weight"] = rand(VOCAB, HIDDEN)
-    T["output_norm.weight"] = rand(HIDDEN) * 0.1
+    T["output_norm.weight"] = 1.0 + rand(HIDDEN) * 0.1
     for l in range(LAYERS):
         p = f"blk.{l}."
         full = (l + 1) % 4 == 0
-        T[p + "attn_norm.weight"] = rand(HIDDEN) * 0.1
-        T[p + "post_attention_norm.weight"] = rand(HIDDEN) * 0.1
+        T[p + "attn_norm.weight"] = 1.0 + rand(HIDDEN) * 0.1
+        T[p + "post_attention_norm.weight"] = 1.0 + rand(HIDDEN) * 0.1
         if full:
             T[p + "attn_q.weight"] = rand(2 * Q_DIM, HIDDEN)
             T[p + "attn_k.weight"] = rand(KV_DIM, HIDDEN)
             T[p + "attn_v.weight"] = rand(KV_DIM, HIDDEN)
             T[p + "attn_output.weight"] = rand(HIDDEN, Q_DIM)
-            T[p + "attn_q_norm.weight"] = rand(HEAD_DIM) * 0.1
-            T[p + "attn_k_norm.weight"] = rand(HEAD_DIM) * 0.1
+            T[p + "attn_q_norm.weight"] = 1.0 + rand(HEAD_DIM) * 0.1
+            T[p + "attn_k_norm.weight"] = 1.0 + rand(HEAD_DIM) * 0.1
         else:
             T[p + "attn_qkv.weight"] = rand(QKV_DIM, HIDDEN)
             T[p + "attn_gate.weight"] = rand(VALUE_DIM, HIDDEN)
@@ -100,7 +102,7 @@ def main():
             T[p + "ssm_dt.bias"] = rand(SSM_RANK) * 0.1
             T[p + "ssm_alpha.weight"] = rand(SSM_RANK, HIDDEN)
             T[p + "ssm_beta.weight"] = rand(SSM_RANK, HIDDEN)
-            T[p + "ssm_norm.weight"] = rand(SSM_INNER // SSM_RANK) * 0.1
+            T[p + "ssm_norm.weight"] = 1.0 + rand(SSM_INNER // SSM_RANK) * 0.1
             T[p + "ssm_out.weight"] = rand(HIDDEN, VALUE_DIM)
         T[p + "ffn_gate_inp.weight"] = rand(EXPERTS, HIDDEN)
         T[p + "ffn_gate_inp_shexp.weight"] = rand(HIDDEN) * 0.1
@@ -112,14 +114,14 @@ def main():
         T[p + "ffn_down_exps.weight"] = rand(EXPERTS, HIDDEN, EXPERT_FFN)
     l = LAYERS
     p = f"blk.{l}."
-    T[p + "attn_norm.weight"] = rand(HIDDEN) * 0.1
-    T[p + "post_attention_norm.weight"] = rand(HIDDEN) * 0.1
+    T[p + "attn_norm.weight"] = 1.0 + rand(HIDDEN) * 0.1
+    T[p + "post_attention_norm.weight"] = 1.0 + rand(HIDDEN) * 0.1
     T[p + "attn_q.weight"] = rand(2 * Q_DIM, HIDDEN)
     T[p + "attn_k.weight"] = rand(KV_DIM, HIDDEN)
     T[p + "attn_v.weight"] = rand(KV_DIM, HIDDEN)
     T[p + "attn_output.weight"] = rand(HIDDEN, Q_DIM)
-    T[p + "attn_q_norm.weight"] = rand(HEAD_DIM) * 0.1
-    T[p + "attn_k_norm.weight"] = rand(HEAD_DIM) * 0.1
+    T[p + "attn_q_norm.weight"] = 1.0 + rand(HEAD_DIM) * 0.1
+    T[p + "attn_k_norm.weight"] = 1.0 + rand(HEAD_DIM) * 0.1
     T[p + "ffn_gate_inp.weight"] = rand(EXPERTS, HIDDEN)
     T[p + "ffn_gate_inp_shexp.weight"] = rand(HIDDEN) * 0.1
     T[p + "ffn_gate_shexp.weight"] = rand(SHARED_FFN, HIDDEN)
@@ -129,9 +131,9 @@ def main():
     T[p + "ffn_up_exps.weight"] = rand(EXPERTS, EXPERT_FFN, HIDDEN)
     T[p + "ffn_down_exps.weight"] = rand(EXPERTS, HIDDEN, EXPERT_FFN)
     T[p + "nextn.eh_proj.weight"] = rand(HIDDEN, 2 * HIDDEN)
-    T[p + "nextn.enorm.weight"] = rand(HIDDEN) * 0.1
-    T[p + "nextn.hnorm.weight"] = rand(HIDDEN) * 0.1
-    T[p + "nextn.shared_head_norm.weight"] = rand(HIDDEN) * 0.1
+    T[p + "nextn.enorm.weight"] = 1.0 + rand(HIDDEN) * 0.1
+    T[p + "nextn.hnorm.weight"] = 1.0 + rand(HIDDEN) * 0.1
+    T[p + "nextn.shared_head_norm.weight"] = 1.0 + rand(HIDDEN) * 0.1
 
     # --- forward ---
     h = T["token_embd.weight"][TOKENS].astype(np.float32)
@@ -145,17 +147,17 @@ def main():
     for l in range(LAYERS):
         p = f"blk.{l}."
         full = (l + 1) % 4 == 0
-        x = rms_norm_zero(h, T[p + "attn_norm.weight"])
+        x = rms_norm(h, T[p + "attn_norm.weight"])
         if full:
             qg = x @ T[p + "attn_q.weight"].T
             q, gate = qg[:, :Q_DIM], qg[:, Q_DIM:]
             q = q.reshape(n, HEADS, HEAD_DIM)
-            q = rms_norm_zero(q, T[p + "attn_q_norm.weight"])
+            q = rms_norm(q, T[p + "attn_q_norm.weight"])
             q = rope(q.reshape(n * HEADS, HEAD_DIM),
                      np.repeat(np.arange(n), HEADS)).reshape(
                      n, HEADS, HEAD_DIM)
             k = (x @ T[p + "attn_k.weight"].T).reshape(n, KV_HEADS, HEAD_DIM)
-            k = rms_norm_zero(k, T[p + "attn_k_norm.weight"])
+            k = rms_norm(k, T[p + "attn_k_norm.weight"])
             k = rope(k.reshape(n * KV_HEADS, HEAD_DIM),
                      np.repeat(np.arange(n), KV_HEADS)).reshape(
                      n, KV_HEADS, HEAD_DIM)
@@ -212,12 +214,12 @@ def main():
                     v[t] - kv)[:, None, :] * b[t][:, None, None]
                 outs.append((S * qr[t][:, :, None]).sum(1))
             o = np.stack(outs)
-            o = rms_norm_zero(o, np.tile(
+            o = rms_norm(o, np.tile(
                 T[p + "ssm_norm.weight"], SSM_RANK).reshape(
                 1, SSM_RANK, SSM_INNER // SSM_RANK)) * silu(z)
             mix = o.reshape(n, VALUE_DIM) @ T[p + "ssm_out.weight"].T
         h = h + mix
-        x = rms_norm_zero(h, T[p + "post_attention_norm.weight"])
+        x = rms_norm(h, T[p + "post_attention_norm.weight"])
         rl = x @ T[p + "ffn_gate_inp.weight"].T
         rl = rl - rl.max(-1, keepdims=True)
         pr = np.exp(rl)
@@ -239,7 +241,7 @@ def main():
             x @ T[p + "ffn_up_shexp.weight"].T)
         moe = moe + gs * (sh @ T[p + "ffn_down_shexp.weight"].T)
         h = h + moe
-    h = rms_norm_zero(h, T["output_norm.weight"])
+    h = rms_norm(h, T["output_norm.weight"])
     logits = (h @ T["output.weight"].T).astype(np.float32)
 
     # --- write gguf ---
