@@ -97,7 +97,7 @@ def main():
         else:
             T[p + "attn_qkv.weight"] = rand(QKV_DIM, HIDDEN)
             T[p + "attn_gate.weight"] = rand(VALUE_DIM, HIDDEN)
-            T[p + "ssm_a"] = (rng.random(SSM_RANK).astype(np.float32) + 0.1)
+            T[p + "ssm_a"] = -(rng.random(SSM_RANK).astype(np.float32) + 0.1)
             T[p + "ssm_conv1d.weight"] = rand(QKV_DIM, SSM_CONV)
             T[p + "ssm_dt.bias"] = rand(SSM_RANK) * 0.1
             T[p + "ssm_alpha.weight"] = rand(SSM_RANK, HIDDEN)
@@ -194,15 +194,18 @@ def main():
             q = q.reshape(n, SSM_GROUP, SSM_STATE)
             k = k.reshape(n, SSM_GROUP, SSM_STATE)
             v = v.reshape(n, SSM_RANK, VALUE_DIM // SSM_RANK)
-            q = q / np.sqrt((q * q).mean(-1, keepdims=True) + 1e-6)
-            k = k / np.sqrt((k * k).mean(-1, keepdims=True) + 1e-6)
+            # L2 norm with the epsilon inside the sum, then the 1/sqrt(head)
+            # query scale — matches transformers l2norm plus scaling.
+            q = q / np.sqrt((q * q).sum(-1, keepdims=True) + 1e-6)
             q = q / np.sqrt(SSM_STATE)
+            k = k / np.sqrt((k * k).sum(-1, keepdims=True) + 1e-6)
             qr = np.repeat(q, SSM_RANK // SSM_GROUP, 1)
             kr = np.repeat(k, SSM_RANK // SSM_GROUP, 1)
             b = 1.0 / (1.0 + np.exp(-(x @ T[p + "ssm_beta.weight"].T)))
             a = x @ T[p + "ssm_alpha.weight"].T
             dt = T[p + "ssm_dt.bias"]
-            g = -np.exp(T[p + "ssm_a"]) * np.log1p(np.exp(a + dt))
+            # The file stores the negative decay rates (-A) directly.
+            g = T[p + "ssm_a"] * np.log1p(np.exp(a + dt))
             z = (x @ T[p + "attn_gate.weight"].T).reshape(
                 n, SSM_RANK, VALUE_DIM // SSM_RANK)
             S = ssm_s[l]
@@ -273,7 +276,7 @@ def main():
     # rope sections (i32 array) and recurrent pattern (bool array)
     out = bytearray()
     out += b"GGUF" + struct.pack("<I", 3)
-    out += struct.pack("<Q", len(T)) + struct.pack("<Q", len(meta) + 2)
+    out += struct.pack("<Q", len(T)) + struct.pack("<Q", len(meta) + 2 + 10)
 
     def wstr(s):
         nonlocal out
@@ -296,6 +299,37 @@ def main():
     out += struct.pack("<I", 9) + struct.pack("<I", 7)
     out += struct.pack("<Q", LAYERS + 1)
     out += bytes([1, 1, 1, 0, 0])
+
+    # Minimal tokenizer metadata so llama.cpp loads the fixture as a second
+    # opinion. The tokens are synthetic; only the layout matters.
+    out += struct.pack("<Q", len("tokenizer.ggml.model")) + b"tokenizer.ggml.model"
+    out += struct.pack("<I", 8)
+    wstr("gpt2")
+    out += struct.pack("<Q", len("tokenizer.ggml.pre")) + b"tokenizer.ggml.pre"
+    out += struct.pack("<I", 8)
+    wstr("qwen35")
+    for key, vals in (("tokenizer.ggml.tokens",
+                       [f"tok{i}".encode() for i in range(VOCAB)]),
+                      ("tokenizer.ggml.merges", [])):
+        wstr(key)
+        out += struct.pack("<I", 9) + struct.pack("<I", 8)
+        out += struct.pack("<Q", len(vals))
+        for v in vals:
+            wstr(v.decode() if isinstance(v, bytes) else v)
+    wstr("tokenizer.ggml.token_type")
+    out += struct.pack("<I", 9) + struct.pack("<I", 5)
+    out += struct.pack("<Q", VOCAB) + struct.pack(f"<{VOCAB}i", *([1] * VOCAB))
+    wstr("tokenizer.ggml.scores")
+    out += struct.pack("<I", 9) + struct.pack("<I", 6)
+    out += struct.pack("<Q", VOCAB) + struct.pack(f"<{VOCAB}f", *([0.0] * VOCAB))
+    for key, val in (("tokenizer.ggml.eos_token_id", VOCAB - 1),
+                     ("tokenizer.ggml.bos_token_id", 0)):
+        wstr(key)
+        out += struct.pack("<I", 4) + struct.pack("<I", val)
+    for key in ("tokenizer.ggml.add_bos_token",
+                "tokenizer.ggml.add_eos_token"):
+        wstr(key)
+        out += struct.pack("<I", 7) + struct.pack("B", 0)
 
     names = sorted(T)
     off = 0

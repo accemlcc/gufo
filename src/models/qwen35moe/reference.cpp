@@ -225,11 +225,12 @@ void Reference::LinearLayer(std::uint32_t layer, const float* x,
         nk += static_cast<double>(mk[h * head_k + i]) *
               mk[h * head_k + i];
       }
-      const double sq = 1.0 / std::sqrt(nq / head_k + 1e-6);
-      const double sk = 1.0 / std::sqrt(nk / head_k + 1e-6);
+      // L2 norm with the epsilon inside the sum, then the 1/sqrt(head_dim)
+      // query scale: x / sqrt(sum(x^2) + eps) / sqrt(head_dim).
+      const double sq = 1.0 / (std::sqrt(nq + 1e-6) * std::sqrt(head_k));
+      const double sk = 1.0 / std::sqrt(nk + 1e-6);
       for (std::size_t i = 0; i < head_k; ++i) {
-        q[h * head_k + i] =
-            static_cast<float>(mq[h * head_k + i] * sq / std::sqrt(head_k));
+        q[h * head_k + i] = static_cast<float>(mq[h * head_k + i] * sq);
         k[h * head_k + i] = static_cast<float>(mk[h * head_k + i] * sk);
       }
     }
@@ -238,10 +239,13 @@ void Reference::LinearLayer(std::uint32_t layer, const float* x,
     }
     for (std::size_t h = 0; h < v_heads; ++h) {
       b[h] = static_cast<float>(Sigmoid(beta[r * v_heads + h]));
+      // The file stores the negative decay rates (-A) directly, as the
+      // converter bakes -exp() of the checkpoint's A_log in; the graph
+      // multiplies them with the softplus as is.
       const double aval = static_cast<double>(a_vec[h]);
       const double soft =
           std::log1p(std::exp(alpha[r * v_heads + h] + dt_vec[h]));
-      g[h] = static_cast<float>(-std::exp(aval) * soft);
+      g[h] = static_cast<float>(aval * soft);
     }
     // Recurrent gated delta update, head by head.
     const std::size_t rep = v_heads / k_heads;
