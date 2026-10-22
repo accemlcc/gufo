@@ -747,7 +747,14 @@ bool GgufReader::ParseHeaders(std::string* error_msg) {
     tensors_.push_back(std::move(info));
   }
 
-  // Align data payload base to alignment boundary
+  // Align data payload base to alignment boundary. A metadata-only split
+  // shard carries no tensors, so there is no payload to align: Unsloth
+  // writes such shards with no slack past the headers, and requiring room
+  // for padding would reject a complete file. Truncation inside the headers
+  // already fails above.
+  if (tensor_count == 0) {
+    return true;
+  }
   const auto padding = (alignment_ - offset % alignment_) % alignment_;
   if (offset > size_ || padding > size_ - offset)
     return false;
