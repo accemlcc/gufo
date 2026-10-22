@@ -1,0 +1,17 @@
+# Host contracts run in the hosted PR suite and need no GPU. Model-backed
+# checks read the GGUF named by GUFO_QWEN35MOE_MODEL and skip (77) without it.
+add_custom_target(qwen35moe_tests)
+
+function(add_qwen35moe_test name library labels)
+  set(target qwen35moe_${name}_test)
+  add_executable(${target} ${name}_test.cpp)
+  target_link_libraries(${target} PRIVATE ${library})
+  add_test(NAME qwen35moe.${name} COMMAND ${target})
+  set_tests_properties(qwen35moe.${name} PROPERTIES
+    LABELS "qwen35moe;${labels}" SKIP_RETURN_CODE 77)
+  add_dependencies(qwen35moe_tests ${target})
+endfunction()
+
+add_qwen35moe_test(config gufo_qwen35moe "cpu")
+add_qwen35moe_test(weights gufo_qwen35moe "cpu")
+add_qwen35moe_test(artifact gufo_qwen35moe "cpu;external-model")

@@ -80,6 +80,10 @@ add_subdirectory(src/models/gemma4)
 # reference plus ROCm runtime.
 add_subdirectory(src/models/kolibri1)
 
+# Qwen3.5-MoE hybrid (Gated DeltaNet + full attention, softmax top-k mixture).
+# Config and weight binding only; the HIP engine is the next step.
+add_subdirectory(src/models/qwen35moe)
+
 # Qwen3-TTS — CPU reference + HIP kernels (CustomVoice 12Hz).
 add_subdirectory(src/models/qwen3_tts)
 
@@ -497,6 +501,7 @@ if (BUILD_TESTING)
   add_subdirectory(tests/models/qwen38_flash_next)
   add_subdirectory(tests/models/gemma4)
   add_subdirectory(tests/models/kolibri1)
+  add_subdirectory(tests/models/qwen35moe)
 
   if(ENGINE_ENABLE_HIP)
     add_executable(chat_template_hf_token_golden_test
