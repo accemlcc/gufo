@@ -15,8 +15,8 @@ namespace gufo::models::qwen35moe {
 /// implementation (`modeling_qwen3_5_moe.py`). Weights dequantize on the fly,
 /// reductions accumulate in double, and every layer keeps full state for all
 /// positions, so it only suits short prefixes. It pins the operator semantics
-/// the kernels have to reproduce: zero-centered RMSNorms (`y = rms(x)(1+w)`),
-/// Gated DeltaNet linear layers with SiLU conv, L2-normalised q/k and a
+/// the kernels have to reproduce: standard RMSNorms (`y = rms(x) * w`; the
+/// file stores the baked weights, so no +1 is added), Gated DeltaNet linear
 /// recurrent state, full-attention layers with packed q|gate, per-head-dim Q/K
 /// norms, mRoPE on the rotated prefix and a sigmoid output gate, and a softmax
 /// top-k mixture with renormalised weights beside one sigmoid-gated shared

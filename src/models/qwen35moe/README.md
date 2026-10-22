@@ -32,8 +32,12 @@ routing). GGUF architecture key `qwen35moe`, Unsloth dynamic quants plus the
   selection is `top-k(softmax(logits))` renormalised to sum 1 (no bias, no
   `expert_gating_func` metadata); the shared expert is
   `sigmoid(ffn_gate_inp_shexp . x) * MLP_shexp(x)`.
-- **Norms are zero-centered:** `y = rms(x) * (1 + w)`, initialised at 0. A
-  kernel that reads them as plain RMSNorm weights computes the wrong graph.
+- **Norms are standard RMSNorms on file:** `y = rms(x) * w`. The transformers
+  checkpoint centres them at 0 and reads `(1 + w)`, but the GGUF converter
+  bakes that shift in: every norm tensor in both files is all-positive with
+  mean near 1 (e.g. `attn_q_norm` in [0.61, 2.13]). A runtime that adds 1
+  again amplifies every branch 2-4x and diverges. The shared-expert gate
+  vector is not a norm (mean 0) and is used raw.
 - **Vocabulary:** 248320 entries, the Qwen3.5/3.8 vocabulary.
 
 ## Status
