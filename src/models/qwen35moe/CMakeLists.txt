@@ -8,3 +8,9 @@
 add_library(gufo_qwen35moe STATIC config.cpp weights.cpp)
 target_include_directories(gufo_qwen35moe PUBLIC ${PROJECT_SOURCE_DIR})
 target_link_libraries(gufo_qwen35moe PUBLIC gufo_core Threads::Threads)
+
+# The scalar oracle decodes every weight on the fly; unoptimized it is unusable
+# even as a reference, so it keeps -O2 in every configuration.
+add_library(gufo_qwen35moe_reference STATIC EXCLUDE_FROM_ALL reference.cpp)
+target_link_libraries(gufo_qwen35moe_reference PUBLIC gufo_qwen35moe)
+set_source_files_properties(reference.cpp PROPERTIES COMPILE_OPTIONS "-O2")

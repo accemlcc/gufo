@@ -15,3 +15,9 @@ endfunction()
 add_qwen35moe_test(config gufo_qwen35moe "cpu")
 add_qwen35moe_test(weights gufo_qwen35moe "cpu")
 add_qwen35moe_test(artifact gufo_qwen35moe "cpu;external-model")
+
+# The oracle is checked against a NumPy fixture of the same tiny artifact;
+# both must implement the graph independently, so the check keeps -O2.
+add_qwen35moe_test(reference gufo_qwen35moe_reference "cpu;slow")
+target_compile_definitions(qwen35moe_reference_test PRIVATE
+  GUFO_QWEN35MOE_FIXTURES="${PROJECT_SOURCE_DIR}/tests/models/qwen35moe/fixtures")
