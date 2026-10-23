@@ -165,21 +165,15 @@ void AddGateUp() {
          "add=" + Number(d0) + " act=" + Number(d1));
 }
 
-void Finish() {
+void Combine() {
   constexpr std::uint32_t kRows = 3;
   constexpr std::uint32_t kHidden = 2048;
   constexpr std::uint32_t kUsed = 8;
-  constexpr float kEps = 1e-6F;
   std::mt19937 rng(23);
   std::normal_distribution<float> normal(0.0F, 1.0F);
-  std::vector<float> x(kRows * kHidden);
   std::vector<float> routed(kRows * kUsed * kHidden);
   std::vector<float> shared(kRows * kHidden);
   std::vector<float> weights(kRows * kUsed);
-  std::vector<float> post(kHidden);
-  for (float& v : x) {
-    v = normal(rng);
-  }
   for (float& v : routed) {
     v = normal(rng);
   }
@@ -188,9 +182,6 @@ void Finish() {
   }
   for (float& v : weights) {
     v = normal(rng);
-  }
-  for (float& v : post) {
-    v = 1.0F + 0.1F * normal(rng);
   }
   // Renormalise the weights the way the router leaves them.
   for (std::uint32_t r = 0; r < kRows; ++r) {
@@ -203,52 +194,39 @@ void Finish() {
           static_cast<float>(std::exp(weights[r * kUsed + j]) / s);
     }
   }
-  std::vector<float> want = x;
+  std::vector<float> want(kRows * kHidden, 0.0F);
   for (std::uint32_t r = 0; r < kRows; ++r) {
-    std::vector<double> mix(kHidden);
     for (std::uint32_t i = 0; i < kHidden; ++i) {
-      mix[i] = shared[r * kHidden + i];
+      double m = shared[r * kHidden + i];
       for (std::uint32_t j = 0; j < kUsed; ++j) {
-        mix[i] += weights[r * kUsed + j] *
-                  routed[(r * kUsed + j) * kHidden + i];
+        m += static_cast<double>(weights[r * kUsed + j]) *
+             routed[(r * kUsed + j) * kHidden + i];
       }
-    }
-    double ss = 0.0;
-    for (double v : mix) {
-      ss += v * v;
-    }
-    const double s = 1.0 / std::sqrt(ss / kHidden + kEps);
-    for (std::uint32_t i = 0; i < kHidden; ++i) {
-      want[r * kHidden + i] += static_cast<float>(mix[i] * s * post[i]);
+      want[r * kHidden + i] = static_cast<float>(m);
     }
   }
-  float* dx = Device(x);
   float* drouted = Device(routed);
   float* dshared = Device(shared);
   float* dweights = Device(weights);
-  float* dpost = Device(post);
-  k::MoeFinishArgs args{};
-  args.x = dx;
+  std::vector<float> got(kRows * kHidden, 0.0F);
+  float* dgot = Device(got);
+  k::MoeCombineArgs args{};
+  args.out = dgot;
   args.routed = drouted;
   args.shared = dshared;
   args.weights = dweights;
-  args.post_norm = dpost;
   args.rows = kRows;
   args.hidden = kHidden;
   args.used = kUsed;
-  args.eps = kEps;
-  k::MoeFinish(args, nullptr);
+  k::MoeCombine(args, nullptr);
   HIP_CHECK(hipDeviceSynchronize());
-  x = Read(dx, x);
-  const double d = MaxAbsDiff(x, want);
-  HIP_CHECK(hipFree(dx));
+  got = Read(dgot, got);
+  const double d = MaxAbsDiff(got, want);
   HIP_CHECK(hipFree(drouted));
   HIP_CHECK(hipFree(dshared));
   HIP_CHECK(hipFree(dweights));
-  HIP_CHECK(hipFree(dpost));
-  // The kernel reads `x` back and the want holds the same float rounding the
-  // reference takes, so this is tight; the engine contract only needs 0.5.
-  Report("blocks.finish", d < 1e-4, "max_abs=" + Number(d));
+  HIP_CHECK(hipFree(dgot));
+  Report("blocks.combine", d < 1e-5, "max_abs=" + Number(d));
 }
 
 }  // namespace
@@ -263,7 +241,7 @@ int main() {
 
   NormRows();
   AddGateUp();
-  Finish();
+  Combine();
 
   if (failures != 0) {
     std::cout << "FAILURES: " << failures << "\n";
