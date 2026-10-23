@@ -124,7 +124,8 @@ Built Build(k::WeightFormat format, std::uint32_t experts, std::uint32_t m,
             ? sizeof(q::block_q8_0)
             : row / (kdim / 256);
     for (std::uint32_t b = 0; b < nblocks; ++b) {
-      std::uint8_t* p = w.bytes.data() + r * row + static_cast<std::size_t>(b) * bb;
+      std::uint8_t* p =
+          w.bytes.data() + r * row + static_cast<std::size_t>(b) * bb;
       if (format == k::WeightFormat::kQ4_K) {
         auto* blk = reinterpret_cast<q::block_q4_K*>(p);
         blk->d = ToHalf(scale(rng));
