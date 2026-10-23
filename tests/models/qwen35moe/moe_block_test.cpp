@@ -83,14 +83,6 @@ void DecodeRow(const m::TensorRef& t, std::uint32_t row, std::uint32_t expert,
   } else if (t.type == gufo::core::GgmlType::kQ6_K) {
     q::DequantizeQ6_K(base, out.data(), t.cols);
   } else {
-    std::fprintf(stderr,
-                 "moe.DecodeRow abort: type=%d cols=%llu rows=%llu experts=%llu"
-                 " row=%u expert=%u name=%.*s\n",
-                 static_cast<int>(t.type),
-                 static_cast<unsigned long long>(t.cols),
-                 static_cast<unsigned long long>(t.rows),
-                 static_cast<unsigned long long>(t.experts), row, expert,
-                 static_cast<int>(t.name.size()), t.name.data());
     std::abort();  // the binder rejects anything else already
   }
 }
@@ -241,6 +233,8 @@ void CpuMoe(const m::ModelWeights& w, const m::LayerWeights& l,
           q::DequantizeQ4_K(gb, gr.data(), d);
         } else if (l.ffn_gate_shexp.type == gufo::core::GgmlType::kQ6_K) {
           q::DequantizeQ6_K(gb, gr.data(), d);
+        } else if (l.ffn_gate_shexp.type == gufo::core::GgmlType::kQ8_0) {
+          q::DequantizeQ8_0(gb, gr.data(), d);
         } else {
           std::abort();
         }
@@ -250,6 +244,8 @@ void CpuMoe(const m::ModelWeights& w, const m::LayerWeights& l,
           q::DequantizeQ4_K(ub, ur.data(), d);
         } else if (l.ffn_up_shexp.type == gufo::core::GgmlType::kQ6_K) {
           q::DequantizeQ6_K(ub, ur.data(), d);
+        } else if (l.ffn_up_shexp.type == gufo::core::GgmlType::kQ8_0) {
+          q::DequantizeQ8_0(ub, ur.data(), d);
         } else {
           std::abort();
         }
@@ -280,6 +276,8 @@ void CpuMoe(const m::ModelWeights& w, const m::LayerWeights& l,
           q::DequantizeQ4_K(base, dr.data(), s);
         } else if (l.ffn_down_shexp.type == gufo::core::GgmlType::kQ5_K) {
           q::DequantizeQ5_K(base, dr.data(), s);
+        } else if (l.ffn_down_shexp.type == gufo::core::GgmlType::kQ8_0) {
+          q::DequantizeQ8_0(base, dr.data(), s);
         } else {
           std::abort();
         }
