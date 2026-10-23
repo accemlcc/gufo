@@ -500,7 +500,7 @@ void Executor::Experts(const DeviceLayer& l, const float* h,
     DumpStage(tag, moe_act_, count * u, static_cast<std::uint32_t>(f),
               dump_call_);
     std::snprintf(tag, sizeof(tag), "layer%02u_rdown", layer_idx);
-    DumpStage(tag, routed, count * u, static_cast<std::uint32_t>(d),
+    DumpStage(tag, routed, count * u, static_cast<std::uint32_t>(c.hidden_size),
               dump_call_);
   }
 }
