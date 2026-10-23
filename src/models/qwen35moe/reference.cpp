@@ -15,10 +15,6 @@
 namespace gufo::models::qwen35moe {
 namespace {
 
-/// DIAGNOSTIC ONLY: per-Forward call index shared by Forward and Mixture so
-/// the dumped stages stay apart across calls. Remove before finishing.
-int g_ref_call = 0;
-
 /// y = rms(x) * w: the file stores standard RMSNorm weights (mean near 1,
 /// all positive). The transformers checkpoint centres them at 0 and the graph
 /// reads (1 + w); the GGUF converter bakes that shift in, so the runtime -
@@ -413,7 +409,7 @@ void Reference::FullLayer(std::uint32_t layer, const float* x,
 }
 
 void Reference::Mixture(const LayerWeights& w, const float* x, std::size_t rows,
-                        float* out, std::uint32_t layer) const {
+                        float* out) const {
   const Config& c = weights_.config;
   const std::size_t d = c.hidden_size;
   const std::size_t f = c.expert_ffn_size;
@@ -429,9 +425,6 @@ void Reference::Mixture(const LayerWeights& w, const float* x, std::size_t rows,
   std::vector<float> up(f);
   std::vector<float> down(d);
   std::vector<float> probs(e);
-  // DIAGNOSTIC ONLY: the routed choice per row. Remove before finishing.
-  std::vector<std::int32_t> d_ids(rows * c.experts_used, -1);
-  std::vector<float> d_w(rows * c.experts_used, 0.0F);
   for (std::size_t r = 0; r < rows; ++r) {
     double best = -INFINITY;
     for (std::size_t i = 0; i < e; ++i) {
@@ -464,8 +457,6 @@ void Reference::Mixture(const LayerWeights& w, const float* x, std::size_t rows,
     for (std::size_t j = 0; j < c.experts_used; ++j) {
       const std::size_t ex = order[j];
       const double weight = probs[ex] / wsum;
-      d_ids[r * c.experts_used + j] = static_cast<std::int32_t>(ex);
-      d_w[r * c.experts_used + j] = static_cast<float>(weight);
       const std::uint8_t* gb =
           static_cast<const std::uint8_t*>(w.ffn_gate_exps.data) +
           ex * gate_expert;
@@ -487,25 +478,6 @@ void Reference::Mixture(const LayerWeights& w, const float* x, std::size_t rows,
     }
   }
   // The shared expert is gated by sigmoid(gate_vector . x).
-  if (std::getenv("GUFO_QWEN35MOE_DUMP_LAYERS") != nullptr) {
-    char path[256];
-    std::snprintf(path, sizeof(path), "%s/ref_c%d_layer%02u_ids.bin",
-                  std::getenv("GUFO_QWEN35MOE_DUMP_LAYERS"), g_ref_call,
-                  layer);
-    FILE* f = std::fopen(path, "wb");
-    if (f != nullptr) {
-      std::fwrite(d_ids.data(), sizeof(std::int32_t), d_ids.size(), f);
-      std::fclose(f);
-    }
-    std::snprintf(path, sizeof(path), "%s/ref_c%d_layer%02u_w.bin",
-                  std::getenv("GUFO_QWEN35MOE_DUMP_LAYERS"), g_ref_call,
-                  layer);
-    f = std::fopen(path, "wb");
-    if (f != nullptr) {
-      std::fwrite(d_w.data(), sizeof(float), d_w.size(), f);
-      std::fclose(f);
-    }
-  }
   std::vector<float> sh_gate(rows * s);
   std::vector<float> sh_up(rows * s);
   MatMulRef(w.ffn_gate_shexp, s, d, x, rows, sh_gate.data());
@@ -556,9 +528,6 @@ void Reference::Forward(std::span<const std::int32_t> tokens,
   // writes the post-residual stream after every layer. Used to bisect
   // oracle-vs-oracle disagreements layer by layer.
   const char* dump_dir = std::getenv("GUFO_QWEN35MOE_DUMP_LAYERS");
-  // DIAGNOSTIC ONLY counter part: keeps the test's three Forward calls apart.
-  // Remove before finishing.
-  const int ref_call = g_ref_call;
   for (std::uint32_t l = 0; l < c.num_layers; ++l) {
     const LayerWeights& w = weights_.layers[l];
     const float* wn = static_cast<const float*>(w.attn_norm.data);
@@ -574,23 +543,6 @@ void Reference::Forward(std::span<const std::int32_t> tokens,
     } else {
       FullLayer(l, normed.data(), n, mixed.data());
     }
-    if (dump_dir != nullptr) {
-      // normed still holds the post-attention norm input here; mixed the
-      // mixer output. Post-norm overwrites normed below, tmp holds the MoE
-      // mixture after Mixture().
-      const char* tags[] = {"anorm", "mix"};
-      const std::vector<float>* vecs[] = {&normed, &mixed};
-      for (int s = 0; s < 2; ++s) {
-        char path[256];
-        std::snprintf(path, sizeof(path), "%s/ref_c%d_layer%02u_%s.bin",
-                      dump_dir, ref_call, l, tags[s]);
-        FILE* f = std::fopen(path, "wb");
-        if (f != nullptr) {
-          std::fwrite(vecs[s]->data(), sizeof(float), n * d, f);
-          std::fclose(f);
-        }
-      }
-    }
     for (std::size_t i = 0; i < n * d; ++i) {
       h[i] += mixed[i];
     }
@@ -598,28 +550,13 @@ void Reference::Forward(std::span<const std::int32_t> tokens,
     for (std::size_t r = 0; r < n; ++r) {
       RmsNorm(&h[r * d], wp, d, c.rms_eps, &normed[r * d]);
     }
-    Mixture(w, normed.data(), n, tmp.data(), l);
-    if (dump_dir != nullptr) {
-      const char* tags[] = {"pnorm", "moe"};
-      const std::vector<float>* vecs[] = {&normed, &tmp};
-      for (int s = 0; s < 2; ++s) {
-        char path[256];
-        std::snprintf(path, sizeof(path), "%s/ref_c%d_layer%02u_%s.bin",
-                      dump_dir, ref_call, l, tags[s]);
-        FILE* f = std::fopen(path, "wb");
-        if (f != nullptr) {
-          std::fwrite(vecs[s]->data(), sizeof(float), n * d, f);
-          std::fclose(f);
-        }
-      }
-    }
+    Mixture(w, normed.data(), n, tmp.data());
     for (std::size_t i = 0; i < n * d; ++i) {
       h[i] += tmp[i];
     }
     if (dump_dir != nullptr) {
       char path[256];
-      std::snprintf(path, sizeof(path), "%s/ref_c%d_layer%02u.bin", dump_dir,
-                    ref_call, l);
+      std::snprintf(path, sizeof(path), "%s/layer%02u.bin", dump_dir, l);
       FILE* f = std::fopen(path, "wb");
       if (f != nullptr) {
         std::fwrite(h.data(), sizeof(float), n * d, f);
@@ -634,7 +571,6 @@ void Reference::Forward(std::span<const std::int32_t> tokens,
   out_logits->assign(n * vocab, 0.0F);
   MatMulRef(weights_.output, vocab, d, normed.data(), n, out_logits->data());
   position_ += static_cast<std::uint32_t>(n);
-  ++g_ref_call;
 }
 
 }  // namespace gufo::models::qwen35moe

@@ -100,17 +100,11 @@ void Forward(const std::string& path) {
       }
     }
     double worst = 0.0;
-    double gmax = -1e300, rmax = -1e300, gsum = 0.0;
     for (std::size_t i = 0; i < v; ++i) {
       worst = std::max(worst, std::fabs(static_cast<double>(
                                            session->logits()[i]) -
                                        ref_last[i]));
-      gmax = std::max(gmax, static_cast<double>(session->logits()[i]));
-      rmax = std::max(rmax, static_cast<double>(ref_last[i]));
-      gsum += std::fabs(static_cast<double>(session->logits()[i]));
     }
-    std::fprintf(stderr, "k=%zu gotmax=%.3f refmax=%.3f gotmeanabs=%.3e\n",
-                 splits[k], gmax, rmax, gsum / v);
     char buf[128];
     std::snprintf(buf, sizeof(buf), "k=%zu got=%zu want=%zu worst=%.3f",
                   splits[k], got_top, want_top, worst);

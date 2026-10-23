@@ -53,7 +53,7 @@ private:
                  float* out);
   /// Softmax top-k mixture plus the sigmoid-gated shared expert.
   void Mixture(const LayerWeights& w, const float* x, std::size_t rows,
-               float* out, std::uint32_t layer) const;
+               float* out) const;
 
   const ModelWeights& weights_;
   /// Per linear layer: recurrent state [v_heads][k_dim][v_dim] (float) and

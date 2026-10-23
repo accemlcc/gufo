@@ -270,37 +270,25 @@ void Executor::Forward(KvCache& cache, SsmState& ssm,
   EmbedRows({model_.token_embd().data, model_.token_embd().quant(), tokens_,
              x_, n, static_cast<std::uint32_t>(d)},
             stream_);
-  // DIAGNOSTIC ONLY: with GUFO_QWEN35MOE_DUMP_DEV_LAYERS set to a directory,
-  // writes the embed stream, the post-residual stream after every layer and
-  // the final normed stream. Filenames carry a per-Forward call index so the
-  // test's prefill plus two decodes do not overwrite each other. Remove
-  // before finishing: it synchronizes the stream on every layer.
-  const char* dev_dump = std::getenv("GUFO_QWEN35MOE_DUMP_DEV_LAYERS");
-  static int dev_call = 0;
-  const int this_call = dev_call;
-  dump_call_ = this_call;
-  auto dump_stream = [&](const char* tag, const float* ptr) {
-    DumpStage(tag, ptr, n, static_cast<std::uint32_t>(d), this_call);
-  };
-  {
-    char tag[32];
-    std::snprintf(tag, sizeof(tag), "embed");
-    dump_stream(tag, x_);
-  }
+    if (std::getenv("GUFO_QWEN35MOE_DUMP_DEV") != nullptr) {
+      std::vector<float> dbg(static_cast<std::size_t>(n) * d);
+      HIP_CHECK(hipMemcpy(dbg.data(), x_, dbg.size() * sizeof(float),
+                          hipMemcpyDeviceToHost));
+      double amax = 0.0;
+      for (float v : dbg) {
+        amax = std::max(amax, std::fabs(static_cast<double>(v)));
+      }
+      std::fprintf(stderr, "DEV embed max=%.3f\n", amax);
+    }
   for (std::uint32_t l = 0; l < c.num_layers; ++l) {
     ForwardLayer(cache, ssm, model_.layers()[l], l, x_, n, first_position, h_);
-    if (dev_dump != nullptr) {
-      char tag[32];
-      std::snprintf(tag, sizeof(tag), "layer%02u_mix", l);
-      DumpStage(tag, h_, n, static_cast<std::uint32_t>(d), this_call);
-    }
     AddRows({x_, h_, static_cast<std::size_t>(n) * d}, stream_);
     const DeviceLayer& w = model_.layers()[l];
     RmsNormRows({x_, w.post_attention_norm.f32(), h_, n,
                  static_cast<std::uint32_t>(d), c.rms_eps},
                 stream_);
-    Experts(w, h_, n, moe_out_, moe_weights_, l);
-    SharedExpert(w, h_, n, shared_, shared_, l);
+    Experts(w, h_, n, moe_out_, moe_weights_);
+    SharedExpert(w, h_, n, shared_, shared_);
     MoeCombineArgs margs{};
     margs.out = tmp_mix_;
     margs.routed = moe_out_;
@@ -311,21 +299,10 @@ void Executor::Forward(KvCache& cache, SsmState& ssm,
     margs.used = c.experts_used;
     MoeCombine(margs, stream_);
     AddRows({x_, tmp_mix_, static_cast<std::size_t>(n) * d}, stream_);
-    if (dev_dump != nullptr) {
-      char tag[32];
-      std::snprintf(tag, sizeof(tag), "layer%02u", l);
-      dump_stream(tag, x_);
-      std::snprintf(tag, sizeof(tag), "layer%02u_pnorm", l);
-      DumpStage(tag, h_, n, static_cast<std::uint32_t>(d), this_call);
-      std::snprintf(tag, sizeof(tag), "layer%02u_moe", l);
-      DumpStage(tag, tmp_mix_, n, static_cast<std::uint32_t>(d), this_call);
-    }
   }
   RmsNormRows({x_, model_.output_norm().f32(), h_, n,
                static_cast<std::uint32_t>(d), c.rms_eps},
               stream_);
-  dump_stream("final", h_);
-  ++dev_call;
   for (std::size_t k = 0; k < logit_rows.size(); ++k) {
     const std::uint32_t r = logit_rows[k];
     if (r >= n) {
@@ -352,11 +329,6 @@ void Executor::ForwardLayer(KvCache& cache, SsmState& ssm,
   RmsNormRows({x, w.attn_norm.f32(), mixed, n, static_cast<std::uint32_t>(d),
                c.rms_eps},
               stream_);
-  if (dump_call_ >= 0) {
-    char tag[32];
-    std::snprintf(tag, sizeof(tag), "layer%02u_anorm", layer);
-    DumpStage(tag, mixed, n, static_cast<std::uint32_t>(d), dump_call_);
-  }
   if (!w.is_full_attention) {
     const std::uint32_t qkv = c.SsmQkvDim();
     const std::uint32_t vd = c.SsmValueDim();
@@ -444,8 +416,7 @@ void Executor::Project(const DeviceTensor& w, const float* x,
 }
 
 void Executor::Experts(const DeviceLayer& l, const float* h,
-                       std::uint32_t count, float* routed, float* weights,
-                       std::uint32_t layer_idx) {
+                       std::uint32_t count, float* routed, float* weights) {
   const Config& c = model_.config();
   const std::uint32_t u = c.experts_used;
   const std::uint32_t e = c.num_experts;
@@ -464,13 +435,6 @@ void Executor::Experts(const DeviceLayer& l, const float* h,
   rargs.experts = e;
   rargs.used = u;
   MoeRoute(rargs, stream_);
-  if (dump_call_ >= 0) {
-    char tag[32];
-    std::snprintf(tag, sizeof(tag), "layer%02u_ids", layer_idx);
-    DumpStageI32(tag, moe_ids_, count * u, dump_call_);
-    std::snprintf(tag, sizeof(tag), "layer%02u_w", layer_idx);
-    DumpStage(tag, weights, count * u, 1, dump_call_);
-  }
   auto routed_proj = [&](const DeviceTensor& w, const float* in, float* y,
                          std::uint32_t m, std::uint32_t k,
                          std::uint32_t spr) {
@@ -491,23 +455,10 @@ void Executor::Experts(const DeviceLayer& l, const float* h,
   routed_proj(l.ffn_down_exps, moe_act_, routed,
               static_cast<std::uint32_t>(c.hidden_size),
               static_cast<std::uint32_t>(f), 1);
-  if (dump_call_ >= 0) {
-    char tag[32];
-    std::snprintf(tag, sizeof(tag), "layer%02u_rgate", layer_idx);
-    DumpStage(tag, moe_gate_, count * u, static_cast<std::uint32_t>(f),
-              dump_call_);
-    std::snprintf(tag, sizeof(tag), "layer%02u_ract", layer_idx);
-    DumpStage(tag, moe_act_, count * u, static_cast<std::uint32_t>(f),
-              dump_call_);
-    std::snprintf(tag, sizeof(tag), "layer%02u_rdown", layer_idx);
-    DumpStage(tag, routed, count * u, static_cast<std::uint32_t>(c.hidden_size),
-              dump_call_);
-  }
 }
 
 void Executor::SharedExpert(const DeviceLayer& l, const float* h,
-                            std::uint32_t rows, float* out, float* gated,
-                            std::uint32_t layer_idx) {
+                            std::uint32_t rows, float* out, float* gated) {
   const Config& c = model_.config();
   const std::uint32_t s = c.shared_ffn_size;
   const std::uint32_t d = c.hidden_size;
@@ -525,11 +476,6 @@ void Executor::SharedExpert(const DeviceLayer& l, const float* h,
   dense(l.ffn_up_shexp, h, dense_up_, s, d);
   GateUpAct({dense_gate_, dense_up_, dense_up_, static_cast<std::size_t>(rows) * s}, stream_);
   dense(l.ffn_down_shexp, dense_up_, out, d, s);
-  if (dump_call_ >= 0) {
-    char tag[32];
-    std::snprintf(tag, sizeof(tag), "layer%02u_shpre", layer_idx);
-    DumpStage(tag, out, rows, d, dump_call_);
-  }
   GateSharedArgs gargs{};
   gargs.shared = out;
   gargs.gate = l.ffn_gate_inp_shexp.f32();
@@ -537,11 +483,6 @@ void Executor::SharedExpert(const DeviceLayer& l, const float* h,
   gargs.rows = rows;
   gargs.hidden = d;
   GateShared(gargs, stream_);
-  if (dump_call_ >= 0) {
-    char tag[32];
-    std::snprintf(tag, sizeof(tag), "layer%02u_shpost", layer_idx);
-    DumpStage(tag, out, rows, d, dump_call_);
-  }
   if (gated != out) {
     HIP_CHECK(hipMemcpyAsync(gated, out,
                              static_cast<std::size_t>(rows) * d * sizeof(float),
@@ -564,46 +505,6 @@ void Executor::CopyLogits(std::size_t rows,
                            rows * model_.vocab_size() * sizeof(float),
                            hipMemcpyDeviceToHost, stream_));
   HIP_CHECK(hipStreamSynchronize(stream_));
-}
-
-// DIAGNOSTIC ONLY. Remove before finishing.
-void Executor::DumpStage(const char* tag, const float* ptr, std::uint32_t n,
-                         std::uint32_t d, int call) {
-  const char* dir = std::getenv("GUFO_QWEN35MOE_DUMP_DEV_LAYERS");
-  if (dir == nullptr) {
-    return;
-  }
-  HIP_CHECK(hipStreamSynchronize(stream_));
-  std::vector<float> host(static_cast<std::size_t>(n) * d);
-  HIP_CHECK(hipMemcpy(host.data(), ptr, host.size() * sizeof(float),
-                      hipMemcpyDeviceToHost));
-  char path[320];
-  std::snprintf(path, sizeof(path), "%s/dev_c%d_%s.bin", dir, call, tag);
-  FILE* f = std::fopen(path, "wb");
-  if (f != nullptr) {
-    std::fwrite(host.data(), sizeof(float), host.size(), f);
-    std::fclose(f);
-  }
-}
-
-// DIAGNOSTIC ONLY. Remove before finishing.
-void Executor::DumpStageI32(const char* tag, const std::int32_t* ptr,
-                             std::uint32_t n, int call) {
-  const char* dir = std::getenv("GUFO_QWEN35MOE_DUMP_DEV_LAYERS");
-  if (dir == nullptr) {
-    return;
-  }
-  HIP_CHECK(hipStreamSynchronize(stream_));
-  std::vector<std::int32_t> host(n);
-  HIP_CHECK(hipMemcpy(host.data(), ptr, host.size() * sizeof(std::int32_t),
-                      hipMemcpyDeviceToHost));
-  char path[320];
-  std::snprintf(path, sizeof(path), "%s/dev_c%d_%s.bin", dir, call, tag);
-  FILE* f = std::fopen(path, "wb");
-  if (f != nullptr) {
-    std::fwrite(host.data(), sizeof(std::int32_t), host.size(), f);
-    std::fclose(f);
-  }
 }
 
 }  // namespace gufo::models::qwen35moe::rocm

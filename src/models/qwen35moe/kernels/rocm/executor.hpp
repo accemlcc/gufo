@@ -94,16 +94,10 @@ class Executor {
   void StageDenseGroups(std::uint32_t rows);
   /// The routed experts of one layer over the rows of `h`.
   void Experts(const DeviceLayer& l, const float* h, std::uint32_t count,
-               float* routed, float* weights, std::uint32_t layer_idx);
+               float* routed, float* weights);
   /// The one sigmoid-gated shared expert over `rows` rows of `h`.
   void SharedExpert(const DeviceLayer& l, const float* h, std::uint32_t rows,
-                    float* out, float* gated, std::uint32_t layer_idx);
-  /// DIAGNOSTIC ONLY: writes `n`x`d` floats to the directory named by
-  /// GUFO_QWEN35MOE_DUMP_DEV_LAYERS. Remove before finishing.
-  void DumpStage(const char* tag, const float* ptr, std::uint32_t n,
-                 std::uint32_t d, int call);
-  void DumpStageI32(const char* tag, const std::int32_t* ptr, std::uint32_t n,
-                    int call);
+                    float* out, float* gated);
 
   const DeviceModel& model_;
   std::uint32_t max_rows_;
@@ -139,9 +133,6 @@ class Executor {
   float* dense_up_{nullptr};
   float* shared_{nullptr};
   float* tmp_mix_{nullptr};
-  // DIAGNOSTIC ONLY: per-Forward call index for the stage dumps. Remove
-  // before finishing.
-  int dump_call_{-1};
   float* logits_{nullptr};
   void* act_q8_{nullptr};
   std::size_t act_q8_bytes_{0};
