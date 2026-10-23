@@ -4296,7 +4296,11 @@ private:
 // adapter: tokenize, render, append, sample. There is no snapshot support -
 // the session has no save/restore path - so continuation caches stay off and
 // every request prefills from the start.
-constexpr std::uint32_t kQwen35moePrefillChunk = 16;
+// 256 rows per forward: qualified 2026-10-23 on the 122B artifact (whole-
+// prompt prefill top-3 logits identical at 16/128/256, 1681-token passage:
+// 86 tok/s at 16, 166 at 128, 186 at 256), which is what the prompt CLI and
+// the serve runner below both use.
+constexpr std::uint32_t kQwen35moePrefillChunk = 256;
 
 using Qwen35moeModel = models::qwen35moe::Model;
 using Qwen35moeSession = models::qwen35moe::Session;
@@ -4897,7 +4901,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
     }
     // The session walks the prompt through the executor itself, one
     // `prefill_chunk`-row forward at a time, the way the prompt CLI does;
-    // 16 is the qualified width there.
+    // 256 is the qualified width (top-3 logits identical at 16/128/256).
     std::shared_ptr<models::qwen35moe::Model> model(
         models::qwen35moe::Model::Load(
             model_path,

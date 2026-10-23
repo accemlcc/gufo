@@ -38,7 +38,7 @@ double Elapsed(std::chrono::steady_clock::time_point since) {
   auto model = q35::Model::Load(opt.model_path,
                                 q35::ModelOptions{
                                     .max_context = kQwen35MoeContext,
-                                    .prefill_chunk = 16,
+                                    .prefill_chunk = 256,
                                 },
                                 &error);
   if (!model) {
