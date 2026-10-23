@@ -219,7 +219,11 @@ def main():
             mix = o.reshape(m.vd) @ m.t(p + "ssm_out.weight").T
         else:
             qg = x @ m.t(p + "attn_q.weight").T
-            q, gate = qg[:m.qd], qg[m.qd:]
+            # The projection interleaves query and gate per head:
+            # [q0, g0, q1, g1, ...]. Split per head, not in halves.
+            qg2 = qg.reshape(m.heads, 2, m.hd)
+            q = qg2[:, 0, :].reshape(m.qd)
+            gate = qg2[:, 1, :].reshape(m.qd)
             q = q.reshape(m.heads, m.hd)
             q = rms(q, m.t(p + "attn_q_norm.weight"), m.eps)
             fr = 1.0 / (m.theta ** (2.0 * np.arange(m.rot // 2) / m.rot))

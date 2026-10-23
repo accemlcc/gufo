@@ -356,10 +356,14 @@ void Reference::FullLayer(std::uint32_t layer, const float* x,
   for (std::size_t r = 0; r < rows; ++r) {
     const std::uint32_t pos = first + static_cast<std::uint32_t>(r);
     const std::uint32_t hi = pos + 1;
+    // The packed projection interleaves query and gate per head:
+    // [q0, g0, q1, g1, ...], each `dim` wide. A flat first-half/second-half
+    // split would mix queries of one half of the heads with gates of the
+    // other; index both halves per head instead.
     const float* qgr = &qg[r * 2 * q_dim];
     for (std::size_t h = 0; h < heads; ++h) {
       for (std::size_t i = 0; i < dim; ++i) {
-        qh[i] = qgr[h * dim + i];
+        qh[i] = qgr[h * 2 * dim + i];
       }
       RmsNorm(qh.data(), qn, dim, c.rms_eps, qh.data());
       Rope(qh.data(), c.rotary_dim, pos, c.rope_theta);
@@ -394,7 +398,7 @@ void Reference::FullLayer(std::uint32_t layer, const float* x,
       }
       // The output gate is the second half of the packed q projection,
       // applied elementwise before the output projection.
-      const float* gh = qgr + q_dim + h * dim;
+      const float* gh = qgr + h * 2 * dim + dim;
       for (std::size_t i = 0; i < dim; ++i) {
         gated[(r * heads + h) * dim + i] =
             static_cast<float>(acc[i] * Sigmoid(gh[i]));

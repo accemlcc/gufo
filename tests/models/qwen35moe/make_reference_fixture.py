@@ -150,7 +150,10 @@ def main():
         x = rms_norm(h, T[p + "attn_norm.weight"])
         if full:
             qg = x @ T[p + "attn_q.weight"].T
-            q, gate = qg[:, :Q_DIM], qg[:, Q_DIM:]
+            # Packed per head: [q0, g0, q1, g1, ...]. Split per head.
+            qg2 = qg.reshape(n, HEADS, 2, HEAD_DIM)
+            q = qg2[:, :, 0, :].reshape(n, HEADS * HEAD_DIM)
+            gate = qg2[:, :, 1, :].reshape(n, HEADS * HEAD_DIM)
             q = q.reshape(n, HEADS, HEAD_DIM)
             q = rms_norm(q, T[p + "attn_q_norm.weight"])
             q = rope(q.reshape(n * HEADS, HEAD_DIM),
