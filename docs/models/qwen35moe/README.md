@@ -20,10 +20,9 @@ graph at larger widths.
 - `reference.cpp` is the scalar oracle of the same graph. It matches an
   independent NumPy implementation of the transformers graph bit-for-bit on a
   synthetic F32 artifact (`reference_test`, max_abs ~1e-5) and is chunk
-  invariant. Both oracles agree layer by layer on real 35B weights through
-  layer 3 (post-MoE residual, max_abs ~1e-8); the full 40-layer check is
-  running. Parity of the oracle against served weights is open
-  ([parity](#parity-against-served-weights)).
+  invariant. Both oracles agree on real 35B weights through all 40 layers
+  (post-MoE residual, worst max_abs 4.77e-06). Parity of the oracle against
+  served weights is open ([parity](#parity-against-served-weights)).
 - The served engine, tokenizer/chat-template wiring and quality runs are open.
 
 ## Parity against served weights
