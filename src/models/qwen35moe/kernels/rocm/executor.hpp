@@ -90,6 +90,8 @@ class Executor {
   /// One dense projection through the grouped kernel.
   void Project(const DeviceTensor& w, const float* x, std::uint32_t rows,
                float* y);
+  /// Stages a dense single-group table for `rows` rows into dense_groups_.
+  void StageDenseGroups(std::uint32_t rows);
   /// The routed experts of one layer over the rows of `h`.
   void Experts(const DeviceLayer& l, const float* h, std::uint32_t count,
                float* routed, float* weights);

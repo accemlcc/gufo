@@ -292,10 +292,7 @@ void Executor::Forward(KvCache& cache, SsmState& ssm,
     if (r >= n) {
       throw std::invalid_argument("logit row past the chunk");
     }
-    DenseGroups(dense_groups_, 1);
-    HIP_CHECK(hipMemcpyAsync(dense_groups_, dense_groups_,
-                             (2 + 1) * sizeof(std::int32_t),
-                             hipMemcpyHostToDevice, stream_));
+    StageDenseGroups(1);
     if (!GroupedGemv({model_.output().quant(), model_.output().data,
                        dense_groups_, 1, h_ + static_cast<std::size_t>(r) * d,
                        logits_ + k * model_.vocab_size(), 1, 1,
@@ -393,10 +390,7 @@ void Executor::ForwardLayer(KvCache& cache, SsmState& ssm,
 
 void Executor::Project(const DeviceTensor& w, const float* x,
                        std::uint32_t rows, float* y) {
-  DenseGroups(dense_groups_, rows);
-  HIP_CHECK(hipMemcpyAsync(dense_groups_, dense_groups_,
-                           (2 + rows) * sizeof(std::int32_t),
-                           hipMemcpyHostToDevice, stream_));
+  StageDenseGroups(rows);
   if (!GroupedGemv({w.quant(), w.data, dense_groups_, 1, x, y, rows, 1,
                      w.rows, w.cols},
                     stream_)) {
@@ -452,10 +446,7 @@ void Executor::SharedExpert(const DeviceLayer& l, const float* h,
   const Config& c = model_.config();
   const std::uint32_t s = c.shared_ffn_size;
   const std::uint32_t d = c.hidden_size;
-  DenseGroups(dense_groups_, rows);
-  HIP_CHECK(hipMemcpyAsync(dense_groups_, dense_groups_,
-                           (2 + rows) * sizeof(std::int32_t),
-                           hipMemcpyHostToDevice, stream_));
+  StageDenseGroups(rows);
   auto dense = [&](const DeviceTensor& w, const float* in, float* y,
                    std::uint32_t m, std::uint32_t k) {
     if (!GroupedGemv({w.quant(), w.data, dense_groups_, 1, in, y, rows, 1, m,
@@ -481,6 +472,14 @@ void Executor::SharedExpert(const DeviceLayer& l, const float* h,
                              static_cast<std::size_t>(rows) * d * sizeof(float),
                              hipMemcpyDeviceToDevice, stream_));
   }
+}
+
+void Executor::StageDenseGroups(std::uint32_t rows) {
+  std::vector<std::int32_t> host(2 + rows);
+  DenseGroups(host.data(), rows);
+  HIP_CHECK(hipMemcpyAsync(dense_groups_, host.data(),
+                           (2 + rows) * sizeof(std::int32_t),
+                           hipMemcpyHostToDevice, stream_));
 }
 
 void Executor::CopyLogits(std::size_t rows,
