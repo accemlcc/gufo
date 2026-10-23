@@ -78,6 +78,8 @@ void FreeAll() {
   g_live.clear();
 }
 
+// Super-block bytes: one kernel unit of 256 values. Q8_0 packs eight
+// 32-value blocks per unit while the K-quants pack one.
 std::size_t BlockBytes(k::WeightFormat format) {
   switch (format) {
     case k::WeightFormat::kQ4_K:
@@ -87,7 +89,7 @@ std::size_t BlockBytes(k::WeightFormat format) {
     case k::WeightFormat::kQ6_K:
       return sizeof(q::block_q6_K);
     case k::WeightFormat::kQ8_0:
-      return sizeof(q::block_q8_0);
+      return 8 * sizeof(q::block_q8_0);
   }
   return 0;
 }
@@ -104,7 +106,6 @@ struct Built {
 Built Build(k::WeightFormat format, std::uint32_t experts, std::uint32_t m,
             std::uint32_t kdim, std::mt19937& rng) {
   const std::size_t row = RowBytes(format, kdim);
-  const std::size_t bb = BlockBytes(format);
   Built w;
   w.bytes.assign(static_cast<std::size_t>(experts) * m * row, 0);
   std::uniform_int_distribution<int> raw(0, 255);
@@ -113,9 +114,15 @@ Built Build(k::WeightFormat format, std::uint32_t experts, std::uint32_t m,
   }
   std::uniform_real_distribution<float> scale(0.001F, 0.006F);
   for (std::size_t r = 0; r < static_cast<std::size_t>(experts) * m; ++r) {
-    for (std::uint32_t b = 0; b < kdim / 256; ++b) {
-      std::uint8_t* p =
-          w.bytes.data() + r * row + static_cast<std::size_t>(b) * bb;
+    // Q8_0's unit holds eight 32-value blocks; the K-quants hold one block
+    // per unit. Every block gets a small scale so no random exponent bit
+    // becomes an infinity.
+    const std::uint32_t nblocks =
+        format == k::WeightFormat::kQ8_0 ? kdim / 32 : kdim / 256;
+    const std::size_t bb =
+        format == k::WeightFormat::kQ8_0 ? sizeof(q::block_q8_0) : row / (kdim / 256);
+    for (std::uint32_t b = 0; b < nblocks; ++b) {
+      std::uint8_t* p = w.bytes.data() + r * row + static_cast<std::size_t>(b) * bb;
       if (format == k::WeightFormat::kQ4_K) {
         auto* blk = reinterpret_cast<q::block_q4_K*>(p);
         blk->d = ToHalf(scale(rng));
