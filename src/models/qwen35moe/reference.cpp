@@ -249,10 +249,13 @@ void Reference::LinearLayer(std::uint32_t layer, const float* x,
           std::log1p(std::exp(alpha[r * v_heads + h] + dt_vec[h]));
       g[h] = static_cast<float>(aval * soft);
     }
-    // Recurrent gated delta update, head by head.
-    const std::size_t rep = v_heads / k_heads;
+    // Recurrent gated delta update, head by head. K/V heads repeat to the
+    // value heads by tiling: v-head h reads k-head h % k_heads. This matches
+    // the checkpoint: the adjacent (repeat-interleave) pairing taken from the
+    // transformers reference gives PPL ~1.1M on real text, the tiled pairing
+    // used by ggml/llama gives ~4.3.
     for (std::size_t h = 0; h < v_heads; ++h) {
-      const std::size_t kh = h / rep;
+      const std::size_t kh = h % k_heads;
       float* s = &st.recurrent[(h * head_k) * head_v];
       const float* qh = &q[kh * head_k];
       const float* khv = &k[kh * head_k];

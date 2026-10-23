@@ -197,8 +197,10 @@ def main():
             q = q / np.sqrt((q * q).sum(-1, keepdims=True) + 1e-6)
             q = q / np.sqrt(m.ss)
             k = k / np.sqrt((k * k).sum(-1, keepdims=True) + 1e-6)
-            qr = np.repeat(q, m.rk // m.gc, 0)
-            kr = np.repeat(k, m.rk // m.gc, 0)
+            # K/V heads repeat to the value heads by tiling (block), matching
+            # the checkpoint (see reference.cpp): v-head h reads k-head h %.
+            qr = np.tile(q, (m.rk // m.gc, 1))
+            kr = np.tile(k, (m.rk // m.gc, 1))
             b = 1.0 / (1.0 + np.exp(-(x @ m.t(p + "ssm_beta.weight").T)))
             a = x @ m.t(p + "ssm_alpha.weight").T
             dt = m.t(p + "ssm_dt.bias")
