@@ -37,6 +37,10 @@ namespace gufo::models::qwen38_flash_next {
 class Model;
 }
 
+namespace gufo::models::qwen35moe {
+class Model;
+}
+
 namespace gufo::tokenization {
 class QwenTokenizer;
 }
@@ -155,6 +159,19 @@ public:
   /// model: the artifact's `general.name`, which the loader reads, since this
   /// model class keeps no name of its own. Empty selects "kolibri1".
   bool load(std::shared_ptr<models::kolibri1::Model> model, std::string* error,
+            std::uint32_t max_context = 0, std::size_t session_count = 1,
+            TextPrefillPolicy prefill_policy = {},
+            TextSchedulerPolicy scheduler_policy = {},
+            TextSpeculativeConfig speculative_config = {},
+            TextDiskCacheConfig disk_cache_config = {},
+            TextRunnerRamCacheOptions ram_cache_config = {},
+            std::string model_id = {});
+
+  /// Installs a previously loaded qwen35moe model with request-owned sessions.
+  /// Sessions have no snapshot path, so continuation caches stay off and disk
+  /// caches are refused; `model_id` names the served model from the
+  /// artifact's `general.name`. Empty selects "qwen35moe".
+  bool load(std::shared_ptr<models::qwen35moe::Model> model, std::string* error,
             std::uint32_t max_context = 0, std::size_t session_count = 1,
             TextPrefillPolicy prefill_policy = {},
             TextSchedulerPolicy scheduler_policy = {},

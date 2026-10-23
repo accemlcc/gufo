@@ -52,6 +52,8 @@
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
 #include "src/models/qwen/hip/executor.hpp"
+#include "src/models/qwen35moe/chat_template.hpp"
+#include "src/models/qwen35moe/engine.hpp"
 #include "src/models/qwen38_flash_next/continuation_adapter.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
 #endif
@@ -4285,6 +4287,269 @@ private:
   std::size_t session_bytes_;
   std::optional<TextRunnerPersistenceDescriptor> persistence_;
 };
+
+// One qwen35moe session owns its hybrid state - the full layers' K/V at the
+// loaded context plus the SSM conv history and recurrent state - while one
+// executor serves every session, serialised on its stream. The session walks
+// a prompt through the executor itself, one `prefill_chunk`-row forward at a
+// time, exactly the way the prompt CLI does, so the runner below is a thin
+// adapter: tokenize, render, append, sample. There is no snapshot support -
+// the session has no save/restore path - so continuation caches stay off and
+// every request prefills from the start.
+constexpr std::uint32_t kQwen35moePrefillChunk = 16;
+
+using Qwen35moeModel = models::qwen35moe::Model;
+using Qwen35moeSession = models::qwen35moe::Session;
+
+std::int32_t Qwen35moeEngineToken(TextRunnerToken token) {
+  if (token >
+      static_cast<TextRunnerToken>(std::numeric_limits<std::int32_t>::max())) {
+    throw std::invalid_argument("qwen35moe token ID exceeds engine range");
+  }
+  return static_cast<std::int32_t>(token);
+}
+
+class Qwen35moeTextRunnerState final : public TextRunnerState {
+public:
+  Qwen35moeTextRunnerState(const std::shared_ptr<Qwen35moeModel>& model,
+                           std::size_t state_bytes) {
+    std::string error;
+    session_ = model->CreateSession(&error);
+    if (session_ == nullptr) {
+      throw std::runtime_error("Failed to create qwen35moe session: " + error);
+    }
+    state_bytes_ = state_bytes;
+  }
+  void Invalidate() noexcept override { session_->Reset(); }
+  void SetCancellationCheck(const CancellationCheck&) override {}
+  [[nodiscard]] TextRunnerMeasuredResources MeasuredResources()
+      const noexcept override {
+    return {.per_request_state_bytes = state_bytes_,
+            .temporary_scratch_bytes = 0};
+  }
+  [[nodiscard]] Qwen35moeSession& session() const { return *session_; }
+
+private:
+  std::unique_ptr<Qwen35moeSession> session_;
+  std::size_t state_bytes_{0};
+};
+
+Qwen35moeTextRunnerState& RequireQwen35moeState(TextRunnerState& state) {
+  auto* runner = dynamic_cast<Qwen35moeTextRunnerState*>(&state);
+  if (runner == nullptr) {
+    throw std::logic_error("text runner state is not qwen35moe");
+  }
+  return *runner;
+}
+
+const Qwen35moeTextRunnerState& RequireQwen35moeState(
+    const TextRunnerState& state) {
+  const auto* runner = dynamic_cast<const Qwen35moeTextRunnerState*>(&state);
+  if (runner == nullptr) {
+    throw std::logic_error("text runner state is not qwen35moe");
+  }
+  return *runner;
+}
+
+class Qwen35moeTextRunner final : public TextModelRunner {
+public:
+  Qwen35moeTextRunner(std::shared_ptr<Qwen35moeModel> model,
+                      std::string model_id)
+      : model_(std::move(model)),
+        model_id_(std::move(model_id)),
+        max_context_(model_->max_context()),
+        session_bytes_(models::qwen35moe::rocm::Executor::CacheBytes(
+                           model_->config(), max_context_) +
+                       model_->tokenizer().GetVocabSize() * sizeof(float)) {}
+
+  [[nodiscard]] TextRunnerDescriptor Descriptor() const override {
+    return {
+        .model_id = model_id_,
+        .state_abi = "qwen35moe-rocm-v1",
+        .max_context = max_context_,
+        .capabilities =
+            TextRunnerCapabilities{
+                .incremental_prefill = true,
+                .snapshot = false,
+                .fork = false,
+                .final_token_advance_required = false,
+                .incremental_text_is_exact = true,
+                .prefix_reuse = false,
+            },
+    };
+  }
+
+  [[nodiscard]] TextRunnerResourceClaim ResourceClaim() const override {
+    std::size_t free_bytes = 0;
+    std::size_t total_bytes = 0;
+    std::optional<std::size_t> capacity;
+    if (hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
+      capacity = free_bytes;
+    }
+    return {
+        .resident_weights_bytes = model_->resident_bytes(),
+        .state_capacity_bytes = capacity,
+        .per_request_state_bytes = session_bytes_,
+        .temporary_scratch_bytes = 0,
+        .retained_snapshot_capacity_bytes = HostSnapshotBudgetBytes(),
+        .retained_snapshot_ceiling_bytes = HostSnapshotCeilingBytes(),
+        .requires_device_runtime_lock = true,
+    };
+  }
+
+  [[nodiscard]] std::vector<TextExecutionPlan> SupportedPlans() const override {
+    return {{.kind = TextExecutionPlanKind::kSerial, .physical_width = 1}};
+  }
+
+  [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
+      std::string_view text) const override {
+    const auto tokens = model_->tokenizer().Encode(text);
+    return {tokens.begin(), tokens.end()};
+  }
+
+  [[nodiscard]] std::optional<std::vector<TextRunnerToken>> RenderAndTokenize(
+      const ChatRequest& request) const override {
+    const auto prepared = PreparePrompt(request);
+    if (!prepared) {
+      return std::nullopt;
+    }
+    return prepared->tokens;
+  }
+
+  [[nodiscard]] std::optional<TextPreparedPrompt> PreparePrompt(
+      const ChatRequest& request) const override {
+    if (std::ranges::any_of(request.messages,
+                            [](const auto& m) { return !m.images.empty(); })) {
+      throw std::invalid_argument("model does not support image input");
+    }
+    std::string error;
+    const auto rendered = models::qwen35moe::ChatTemplate::Render(
+        request.messages, Tools(request),
+        models::qwen35moe::ChatOptions{
+            .add_generation_prompt = true,
+            .enable_thinking = request.reasoning.enabled.value_or(true),
+        },
+        model_->template_variant(), &error);
+    if (!rendered) {
+      throw std::invalid_argument("qwen35moe chat template: " + error);
+    }
+    TextPreparedPrompt prepared;
+    prepared.tokens = Tokenize(rendered->text);
+    if (rendered->stable_prefix_offset < rendered->text.size()) {
+      const auto suffix = Tokenize(std::string_view(rendered->text)
+                                       .substr(rendered->stable_prefix_offset));
+      if (suffix.size() < prepared.tokens.size() &&
+          std::equal(suffix.begin(), suffix.end(),
+                     prepared.tokens.end() -
+                         static_cast<std::ptrdiff_t>(suffix.size()))) {
+        prepared.cache_prefix_tokens = prepared.tokens.size() - suffix.size();
+      }
+    }
+    return prepared;
+  }
+
+  [[nodiscard]] std::shared_ptr<const sampling::ConstraintVocabulary>
+  BuildConstraintVocabulary() const override {
+    return std::make_shared<const sampling::ConstraintVocabulary>(
+        model_->tokenizer().GetVocabSize(), [this](std::uint32_t id) {
+          const auto token = static_cast<tokenization::TokenId>(id);
+          return sampling::ConstraintVocabulary::Piece{
+              model_->tokenizer().DecodeTokenCopy(token),
+              model_->tokenizer().IsStopToken(token)};
+        });
+  }
+
+  [[nodiscard]] std::string Decode(
+      std::span<const TextRunnerToken> tokens) const override {
+    std::vector<tokenization::TokenId> converted(tokens.begin(), tokens.end());
+    return model_->tokenizer().Decode(converted);
+  }
+
+  [[nodiscard]] std::unique_ptr<TextRunnerState> CreateState() const override {
+    return std::make_unique<Qwen35moeTextRunnerState>(model_, session_bytes_);
+  }
+
+  [[nodiscard]] TextGenerationBackend::InitialOutputState InitialOutputState(
+      const ChatRequest& request) const override {
+    return request.reasoning.enabled.value_or(true)
+               ? TextGenerationBackend::InitialOutputState::kReasoning
+               : TextGenerationBackend::InitialOutputState::kContent;
+  }
+
+  [[nodiscard]] TextPrefillStep Prefill(
+      TextRunnerState& state, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t max_input_tokens) const override {
+    auto& session = RequireQwen35moeState(state).session();
+    if (offset != session.position() || offset >= prompt.size()) {
+      throw std::logic_error("qwen35moe prefill offset does not match state");
+    }
+    const std::size_t end =
+        offset + std::min(max_input_tokens, prompt.size() - offset);
+    std::vector<std::int32_t> chunk;
+    chunk.reserve(end - offset);
+    for (const auto token : prompt.subspan(offset, end - offset)) {
+      chunk.push_back(Qwen35moeEngineToken(token));
+    }
+    try {
+      session.Append(chunk);
+    } catch (...) {
+      session.Reset();
+      throw;
+    }
+    return {.consumed_tokens = end - offset,
+            .decode_ready = end == prompt.size()};
+  }
+
+  [[nodiscard]] TextDecodeSelection SelectNext(
+      TextRunnerState& state, sampling::SamplerState& sampler) const override {
+    auto& session = RequireQwen35moeState(state).session();
+    if (session.position() >= max_context_) {
+      return {.stop = true, .piece = {}};
+    }
+    const auto logits = session.logits();
+    if (logits.empty()) {
+      throw std::runtime_error("qwen35moe token selection has no logits");
+    }
+    const auto token = static_cast<std::int32_t>(sampler.Sample(logits));
+    if (state.stop_at_eos() && model_->tokenizer().IsStopToken(token)) {
+      return {.stop = true, .token = 0, .piece = {}};
+    }
+    return {.stop = false,
+            .token = static_cast<TextRunnerToken>(token),
+            .piece = model_->tokenizer().DecodeTokenCopy(token)};
+  }
+
+  void Advance(TextRunnerState& state, TextRunnerToken token) const override {
+    const std::int32_t engine_token = Qwen35moeEngineToken(token);
+    RequireQwen35moeState(state).session().Append(
+        std::span<const std::int32_t>(&engine_token, 1));
+  }
+
+  [[nodiscard]] std::optional<TextDecodeSelection> PreviewFirstToken(
+      TextRunnerState& state, sampling::SamplerState& sampler) const override {
+    return SelectNext(state, sampler);
+  }
+
+  [[nodiscard]] std::size_t CheckpointPosition(
+      const TextRunnerState& state) const override {
+    return RequireQwen35moeState(state).session().position();
+  }
+
+private:
+  /// The template refuses tool definitions, so the serve layer passes an
+  /// empty tool list the way it does when the tool choice is none.
+  static std::span<const tokenization::ChatTool> Tools(
+      const ChatRequest& request) {
+    return request.tool_choice == ChatRequest::ToolChoice::kNone
+               ? std::span<const tokenization::ChatTool>{}
+               : std::span<const tokenization::ChatTool>{request.tools};
+  }
+
+  std::shared_ptr<Qwen35moeModel> model_;
+  std::string model_id_;
+  std::uint32_t max_context_;
+  std::size_t session_bytes_;
+};
 #endif
 
 }  // namespace
@@ -4614,6 +4879,42 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                 prefill_policy, scheduler_policy, speculative_config,
                 std::move(resolved_disk_cache_config), ram_cache_config,
                 name ? std::string(*name) : std::string("kolibri1"));
+  }
+  if (reader->GetMetadataString("general.architecture") == "qwen35moe") {
+    if (!vision_model_path.empty()) {
+      SetError(error, "qwen35moe does not support --mmproj");
+      return false;
+    }
+    if (speculative_config.backend != TextSpeculativeBackend::kDisabled) {
+      SetError(error, "qwen35moe has no draft model; drop --speculative");
+      return false;
+    }
+    if (DiskCacheEnabled(resolved_disk_cache_config)) {
+      SetError(error,
+               "qwen35moe does not support persistent disk cache: sessions "
+               "have no snapshot path");
+      return false;
+    }
+    // The session walks the prompt through the executor itself, one
+    // `prefill_chunk`-row forward at a time, the way the prompt CLI does;
+    // 16 is the qualified width there.
+    std::shared_ptr<models::qwen35moe::Model> model(
+        models::qwen35moe::Model::Load(
+            model_path,
+            models::qwen35moe::ModelOptions{
+                .max_context = max_context,
+                .prefill_chunk = kQwen35moePrefillChunk,
+            },
+            &load_error));
+    if (model == nullptr) {
+      SetError(error, "Failed to create qwen35moe model: " + load_error);
+      return false;
+    }
+    const auto name = reader->GetMetadataString("general.name");
+    return load(std::move(model), error, max_context, session_count,
+                prefill_policy, scheduler_policy, speculative_config,
+                std::move(resolved_disk_cache_config), ram_cache_config,
+                name ? std::string(*name) : std::string("qwen35moe"));
   }
   if (reader->GetMetadataString("general.architecture") == "qwen4exp") {
     if (speculative_config.backend != TextSpeculativeBackend::kDisabled &&
@@ -5192,6 +5493,65 @@ bool InferenceBackend::load(std::shared_ptr<models::kolibri1::Model> model,
     auto runner_pool = std::make_shared<TextRunnerPool>(
         std::move(runner), session_count, std::move(runner_disk_cache),
         ram_cache_config);
+    new_state->scheduler = std::make_shared<TextGenerationScheduler>(
+        std::move(runner_pool), prefill_policy, scheduler_policy);
+    {
+      const std::lock_guard<std::mutex> lock(impl_->state_mutex);
+      impl_->state = std::move(new_state);
+    }
+    return true;
+  } catch (const std::exception& exception) {
+    SetError(error, exception.what());
+    return false;
+  }
+}
+
+bool InferenceBackend::load(std::shared_ptr<models::qwen35moe::Model> model,
+                            std::string* error, std::uint32_t max_context,
+                            std::size_t session_count,
+                            TextPrefillPolicy prefill_policy,
+                            TextSchedulerPolicy scheduler_policy,
+                            TextSpeculativeConfig speculative_config,
+                            TextDiskCacheConfig disk_cache_config,
+                            TextRunnerRamCacheOptions ram_cache_config,
+                            std::string model_id) {
+  if (model == nullptr) {
+    SetError(error, "qwen35moe model must not be null");
+    return false;
+  }
+  // A session's cache is allocated to the context the model itself was loaded
+  // with, so the server's --context has to be that context; nothing here can
+  // narrow it per session the way a runner with its own cache sizing can.
+  if (max_context == 0)
+    max_context = model->max_context();
+  if (session_count == 0 || max_context == 0 ||
+      max_context != model->max_context()) {
+    SetError(error,
+             "qwen35moe HTTP sessions or context do not match the loaded "
+             "model's context");
+    return false;
+  }
+  if (speculative_config.backend != TextSpeculativeBackend::kDisabled) {
+    SetError(error, "qwen35moe has no draft model");
+    return false;
+  }
+  if (DiskCacheEnabled(disk_cache_config)) {
+    SetError(error, "qwen35moe does not support persistent disk cache");
+    return false;
+  }
+  try {
+    auto new_state = std::make_shared<Impl::State>();
+    // The artifact's `general.sampling.*` (temp 1.0, top_p 0.95, top_k 20)
+    // matches the Qwen3.8 preset's thinking branch, so it is reused.
+    new_state->sampling_defaults.model = sampling::TextModelPreset::kQwen38;
+    new_state->sampling_defaults.supplied = {};
+    auto runner = std::make_shared<Qwen35moeTextRunner>(
+        std::move(model),
+        model_id.empty() ? std::string("qwen35moe") : std::move(model_id));
+    new_state->model_id = runner->Descriptor().model_id;
+    new_state->max_context = max_context;
+    auto runner_pool = std::make_shared<TextRunnerPool>(
+        std::move(runner), session_count, std::nullopt, ram_cache_config);
     new_state->scheduler = std::make_shared<TextGenerationScheduler>(
         std::move(runner_pool), prefill_policy, scheduler_policy);
     {
