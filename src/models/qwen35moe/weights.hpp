@@ -13,14 +13,34 @@
 namespace gufo::models::qwen35moe {
 
 /// Borrowed view of one mapped tensor. Weights are never copied here; the
-/// device upload reads them in place from the mapped shards.
+/// device upload reads them in place from the mapped shards. The shape triple
+/// follows the GGUF dimension order: `cols` is the contiguous dimension, an
+/// optional second and third dimension hold rows and stacked experts.
 struct TensorRef {
   const void* data = nullptr;
   core::GgmlType type = core::GgmlType::kF32;
   std::size_t num_elements = 0;
+  std::uint64_t cols = 0;
+  std::uint64_t rows = 1;
+  std::uint64_t experts = 1;
+  /// Byte offset of the payload inside the owning shard.
+  std::uint64_t file_offset = 0;
+  /// Mapped region index in the reader.
+  std::uint32_t shard = 0;
+  std::string_view name;
 
   [[nodiscard]] bool empty() const noexcept {
     return data == nullptr || num_elements == 0;
+  }
+  /// Encoded bytes of one row (`cols` elements) in this format.
+  [[nodiscard]] std::size_t RowBytes() const noexcept;
+  /// Encoded bytes of one [cols, rows] matrix, all experts together.
+  [[nodiscard]] std::size_t SizeBytes() const noexcept {
+    return RowBytes() * rows * experts;
+  }
+  /// Distance between two stacked experts.
+  [[nodiscard]] std::size_t ExpertBytes() const noexcept {
+    return RowBytes() * rows;
   }
 };
 

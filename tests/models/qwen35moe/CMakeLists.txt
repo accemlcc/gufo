@@ -16,6 +16,12 @@ add_qwen35moe_test(config gufo_qwen35moe "cpu")
 add_qwen35moe_test(weights gufo_qwen35moe "cpu")
 add_qwen35moe_test(artifact gufo_qwen35moe "cpu;external-model")
 
+# The device checks need the matrix cores of this generation.
+if (ENGINE_ENABLE_HIP)
+  add_qwen35moe_test(route gufo_qwen35moe "hip;gpu;gfx1151")
+  add_qwen35moe_test(blocks gufo_qwen35moe "hip;gpu;gfx1151")
+endif()
+
 # The oracle is checked against a NumPy fixture of the same tiny artifact;
 # both must implement the graph independently, so the check keeps -O2.
 add_qwen35moe_test(reference gufo_qwen35moe_reference "cpu;slow")

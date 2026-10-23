@@ -1,6 +1,9 @@
 #include "src/models/qwen35moe/weights.hpp"
 
+#include <cstdint>
 #include <string_view>
+
+#include "src/core/quant/ggml_dequant.hpp"
 
 namespace gufo::models::qwen35moe {
 namespace {
@@ -11,9 +14,30 @@ TensorRef ExtractTensorRef(const core::GgufReader& reader,
   if (tensor == nullptr || tensor->data == nullptr) {
     return {};
   }
-  return {.data = tensor->data,
-          .type = tensor->type,
-          .num_elements = static_cast<std::size_t>(tensor->ElementCount())};
+  TensorRef ref;
+  ref.data = tensor->data;
+  ref.type = tensor->type;
+  ref.num_elements =
+      static_cast<std::size_t>(tensor->ElementCount());
+  const auto& d = tensor->dimensions;
+  ref.cols = d.size() > 0 ? d[0] : 1;
+  ref.rows = d.size() > 1 ? d[1] : 1;
+  ref.experts = d.size() > 2 ? d[2] : 1;
+  ref.name = tensor->name;
+  // Locate the shard so the device upload can address the payload directly
+  // and a payload running past its shard is caught here, not as a fault on
+  // the device.
+  const auto regions = reader.GetMappedRegions();
+  const auto address = reinterpret_cast<std::uintptr_t>(tensor->data);
+  for (std::uint32_t i = 0; i < regions.size(); ++i) {
+    const auto base = reinterpret_cast<std::uintptr_t>(regions[i].data);
+    if (address >= base && address < base + regions[i].size) {
+      ref.shard = i;
+      ref.file_offset = address - base;
+      break;
+    }
+  }
+  return ref;
 }
 
 enum class TensorRole : std::uint8_t {
@@ -214,6 +238,10 @@ bool BindMixture(const core::GgufReader& reader, const Config& config,
 }
 
 }  // namespace
+
+std::size_t TensorRef::RowBytes() const noexcept {
+  return quant::EncodedSizeBytes(type, static_cast<std::size_t>(cols));
+}
 
 std::optional<ModelWeights> ModelWeights::LoadFromGguf(
     const core::GgufReader& reader, std::string* error_msg) {
