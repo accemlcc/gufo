@@ -1,0 +1,4 @@
+<|im_start|>user
+Hello world<|im_end|>
+<|im_start|>assistant
+<think>

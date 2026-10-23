@@ -1,0 +1,19 @@
+<|im_start|>user
+How are you?<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+
+Let me check.<|im_end|>
+<|im_start|>user
+<tool_response>
+fine
+</tool_response>
+<tool_response>
+indeed
+</tool_response><|im_end|>
+<|im_start|>user
+Thanks<|im_end|>
+<|im_start|>assistant
+<think>

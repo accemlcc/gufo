@@ -14,6 +14,9 @@ endfunction()
 
 add_qwen35moe_test(config gufo_qwen35moe "cpu")
 add_qwen35moe_test(weights gufo_qwen35moe "cpu")
+add_qwen35moe_test(chat_template gufo_qwen35moe "cpu")
+target_compile_definitions(qwen35moe_chat_template_test PRIVATE
+  GUFO_QWEN35MOE_FIXTURES="${PROJECT_SOURCE_DIR}/tests/models/qwen35moe/fixtures")
 add_qwen35moe_test(artifact gufo_qwen35moe "cpu;external-model")
 
 # The device checks need the matrix cores of this generation.

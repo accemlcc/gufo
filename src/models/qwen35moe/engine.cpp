@@ -3,6 +3,9 @@
 #include <string>
 #include <utility>
 
+#include "src/models/qwen/tokenizer.hpp"
+#include "src/models/qwen35moe/chat_template.hpp"
+
 namespace gufo::models::qwen35moe {
 
 Model::~Model() = default;
@@ -18,6 +21,15 @@ std::unique_ptr<Model> Model::Load(const std::string& path,
   }
   m->weights_ = ModelWeights::LoadFromGguf(*m->reader_, error_msg);
   if (!m->weights_.has_value()) {
+    return nullptr;
+  }
+  m->tokenizer_ =
+      tokenization::QwenTokenizer::CreateFromGguf(*m->reader_, error_msg);
+  if (!m->tokenizer_) {
+    return nullptr;
+  }
+  if (!ChatTemplate::ValidateGgufTemplate(*m->reader_, &m->template_variant_,
+                                          error_msg)) {
     return nullptr;
   }
   m->device_ = rocm::DeviceModel::Upload(*m->weights_, *m->reader_, error_msg);

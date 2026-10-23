@@ -1,0 +1,6 @@
+<|im_start|>system
+Dev note.<|im_end|>
+<|im_start|>user
+Go<|im_end|>
+<|im_start|>assistant
+<think>

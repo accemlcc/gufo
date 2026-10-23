@@ -1,0 +1,14 @@
+<|im_start|>system
+Be concise.<|im_end|>
+<|im_start|>user
+Hi<|im_end|>
+<|im_start|>assistant
+<think>
+greet back
+</think>
+
+Hey there!<|im_end|>
+<|im_start|>user
+Bye<|im_end|>
+<|im_start|>assistant
+<think>

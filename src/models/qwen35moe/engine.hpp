@@ -10,6 +10,8 @@
 #include <vector>
 
 #include "src/core/gguf_reader.hpp"
+#include "src/models/qwen/tokenizer.hpp"
+#include "src/models/qwen35moe/chat_template.hpp"
 #include "src/models/qwen35moe/config.hpp"
 #include "src/models/qwen35moe/kernels/rocm/device_model.hpp"
 #include "src/models/qwen35moe/kernels/rocm/executor.hpp"
@@ -64,6 +66,14 @@ public:
       const noexcept {
     return executor_;
   }
+  /// The vocabulary the artifact was trained with; text enters through it.
+  [[nodiscard]] const tokenization::QwenTokenizer& tokenizer() const noexcept {
+    return *tokenizer_;
+  }
+  /// Which of the two qualified chat templates the file carries.
+  [[nodiscard]] TemplateVariant template_variant() const noexcept {
+    return template_variant_;
+  }
 
 private:
   Model() = default;
@@ -73,6 +83,8 @@ private:
   std::optional<ModelWeights> weights_;
   std::unique_ptr<rocm::DeviceModel> device_;
   std::shared_ptr<rocm::Executor> executor_;
+  std::unique_ptr<tokenization::QwenTokenizer> tokenizer_;
+  TemplateVariant template_variant_{TemplateVariant::kMergedSystem};
 };
 
 class Session {

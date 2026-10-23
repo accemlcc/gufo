@@ -1,0 +1,7 @@
+<|im_start|>system
+First.
+Second.<|im_end|>
+<|im_start|>user
+Go<|im_end|>
+<|im_start|>assistant
+<think>

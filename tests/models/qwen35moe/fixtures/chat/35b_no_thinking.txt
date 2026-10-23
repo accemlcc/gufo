@@ -1,0 +1,7 @@
+<|im_start|>user
+Short answer<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+

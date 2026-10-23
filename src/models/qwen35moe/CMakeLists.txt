@@ -5,7 +5,7 @@
 # in every layer) runs on the device through grouped projections, a fused
 # QK-norm/RoPE/split/cache write, online GQA attention, the ported gated-delta
 # recurrence and the mixture kernels, all validated against the oracle.
-add_library(gufo_qwen35moe STATIC config.cpp weights.cpp)
+add_library(gufo_qwen35moe STATIC config.cpp weights.cpp chat_template.cpp)
 target_include_directories(gufo_qwen35moe PUBLIC ${PROJECT_SOURCE_DIR})
 target_link_libraries(gufo_qwen35moe PUBLIC gufo_core Threads::Threads)
 
