@@ -278,22 +278,9 @@ void Executor::Forward(KvCache& cache, SsmState& ssm,
   const char* dev_dump = std::getenv("GUFO_QWEN35MOE_DUMP_DEV_LAYERS");
   static int dev_call = 0;
   const int this_call = dev_call;
+  dump_call_ = this_call;
   auto dump_stream = [&](const char* tag, const float* ptr) {
-    if (dev_dump == nullptr) {
-      return;
-    }
-    HIP_CHECK(hipStreamSynchronize(stream_));
-    std::vector<float> host(static_cast<std::size_t>(n) * d);
-    HIP_CHECK(hipMemcpy(host.data(), ptr, host.size() * sizeof(float),
-                        hipMemcpyDeviceToHost));
-    char path[320];
-    std::snprintf(path, sizeof(path), "%s/dev_c%d_%s.bin", dev_dump,
-                  this_call, tag);
-    FILE* f = std::fopen(path, "wb");
-    if (f != nullptr) {
-      std::fwrite(host.data(), sizeof(float), host.size(), f);
-      std::fclose(f);
-    }
+    DumpStage(tag, ptr, n, static_cast<std::uint32_t>(d), this_call);
   };
   {
     char tag[32];
@@ -302,6 +289,11 @@ void Executor::Forward(KvCache& cache, SsmState& ssm,
   }
   for (std::uint32_t l = 0; l < c.num_layers; ++l) {
     ForwardLayer(cache, ssm, model_.layers()[l], l, x_, n, first_position, h_);
+    if (dev_dump != nullptr) {
+      char tag[32];
+      std::snprintf(tag, sizeof(tag), "layer%02u_mix", l);
+      DumpStage(tag, h_, n, static_cast<std::uint32_t>(d), this_call);
+    }
     AddRows({x_, h_, static_cast<std::size_t>(n) * d}, stream_);
     const DeviceLayer& w = model_.layers()[l];
     RmsNormRows({x_, w.post_attention_norm.f32(), h_, n,
@@ -323,6 +315,10 @@ void Executor::Forward(KvCache& cache, SsmState& ssm,
       char tag[32];
       std::snprintf(tag, sizeof(tag), "layer%02u", l);
       dump_stream(tag, x_);
+      std::snprintf(tag, sizeof(tag), "layer%02u_pnorm", l);
+      DumpStage(tag, h_, n, static_cast<std::uint32_t>(d), this_call);
+      std::snprintf(tag, sizeof(tag), "layer%02u_moe", l);
+      DumpStage(tag, tmp_mix_, n, static_cast<std::uint32_t>(d), this_call);
     }
   }
   RmsNormRows({x_, model_.output_norm().f32(), h_, n,
@@ -356,6 +352,11 @@ void Executor::ForwardLayer(KvCache& cache, SsmState& ssm,
   RmsNormRows({x, w.attn_norm.f32(), mixed, n, static_cast<std::uint32_t>(d),
                c.rms_eps},
               stream_);
+  if (dump_call_ >= 0) {
+    char tag[32];
+    std::snprintf(tag, sizeof(tag), "layer%02u_anorm", layer_idx);
+    DumpStage(tag, mixed, n, static_cast<std::uint32_t>(d), dump_call_);
+  }
   if (!w.is_full_attention) {
     const std::uint32_t qkv = c.SsmQkvDim();
     const std::uint32_t vd = c.SsmValueDim();
@@ -532,6 +533,26 @@ void Executor::CopyLogits(std::size_t rows,
                            rows * model_.vocab_size() * sizeof(float),
                            hipMemcpyDeviceToHost, stream_));
   HIP_CHECK(hipStreamSynchronize(stream_));
+}
+
+// DIAGNOSTIC ONLY. Remove before finishing.
+void Executor::DumpStage(const char* tag, const float* ptr, std::uint32_t n,
+                         std::uint32_t d, int call) {
+  const char* dir = std::getenv("GUFO_QWEN35MOE_DUMP_DEV_LAYERS");
+  if (dir == nullptr) {
+    return;
+  }
+  HIP_CHECK(hipStreamSynchronize(stream_));
+  std::vector<float> host(static_cast<std::size_t>(n) * d);
+  HIP_CHECK(hipMemcpy(host.data(), ptr, host.size() * sizeof(float),
+                      hipMemcpyDeviceToHost));
+  char path[320];
+  std::snprintf(path, sizeof(path), "%s/dev_c%d_%s.bin", dir, call, tag);
+  FILE* f = std::fopen(path, "wb");
+  if (f != nullptr) {
+    std::fwrite(host.data(), sizeof(float), host.size(), f);
+    std::fclose(f);
+  }
 }
 
 }  // namespace gufo::models::qwen35moe::rocm
