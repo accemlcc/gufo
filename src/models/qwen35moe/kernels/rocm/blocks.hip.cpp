@@ -178,264 +178,31 @@ __global__ void __launch_bounds__(kBlock)
   }
 }
 
-/// The end of a mixture block. `kLanes` threads take one output row, so the
-/// shared row and the `used` expert rows belonging to it are read side by side
-/// and each of those reads is coalesced; a thread per row would walk the seven
-/// rows of a token one element at a time.
-///
-/// The contributions add in ascending expert index and the shared one is folded
-/// in first, so a row cannot pick up a neighbour's rounding and a change of
-/// batch leaves its value alone.
-template<int kLanes, int kWindow>
-__global__ void __launch_bounds__(kBlock) MoeFinishKernel(MoeFinishArgs a) {
-  constexpr int kRowsPerBlock = kBlock / kLanes;
-  [[maybe_unused]] __shared__ float
-      scratch[kLanes > kWave ? kLanes / kWave : 1];
-  const std::uint32_t lane = threadIdx.x % kLanes;
-  const std::size_t row = static_cast<std::size_t>(blockIdx.x) * kRowsPerBlock +
-                          threadIdx.x / kLanes;
-  if (kLanes == kWave && row >= a.rows) {
+/// The end of a mixture block, per row r: the gated shared expert plus
+/// the weight-weighted routed experts, with no normalization (the trunk adds
+/// the raw mixture to the residual). One block per row; lanes split the row.
+__global__ void __launch_bounds__(kBlock) MoeCombineKernel(MoeCombineArgs a) {
+  const std::size_t row = static_cast<std::size_t>(blockIdx.x);
+  if (row >= a.rows) {
     return;
   }
-  const std::uint32_t groups = Groups(a.hidden);
+  const std::uint32_t lane = threadIdx.x;
   const std::size_t first_slot = row * a.used;
-  const float4* shared_row = reinterpret_cast<const float4*>(a.shared) +
-                             static_cast<std::size_t>(row) * groups;
-  const float4* routed = reinterpret_cast<const float4*>(a.routed);
   const float* weights = a.weights + first_slot;
-  float4 mix[kWindow];
-  float ss = 0.0F;
-#pragma unroll
-  for (std::uint32_t j = 0; j < kWindow; ++j) {
-    const std::uint32_t g = lane + j * kLanes;
-    if (g < groups) {
-      float4 m = shared_row[g];
-      for (std::uint32_t e = 0; e < a.used; ++e) {
-        const float4 v = routed[(first_slot + e) * groups + g];
-        const float w = weights[e];
-        m.x += w * v.x;
-        m.y += w * v.y;
-        m.z += w * v.z;
-        m.w += w * v.w;
-      }
-      mix[j] = m;
-      ss += m.x * m.x;
-      ss += m.y * m.y;
-      ss += m.z * m.z;
-      ss += m.w * m.w;
-    } else {
-      mix[j] = Zero4();
+  for (std::uint32_t i = lane; i < a.hidden; i += kBlock) {
+    float m = a.shared[row * a.hidden + i];
+    for (std::uint32_t e = 0; e < a.used; ++e) {
+      m += weights[e] * a.routed[(first_slot + e) * a.hidden + i];
     }
-  }
-  const float mean = RowSum<kLanes>(ss, scratch) / static_cast<float>(a.hidden);
-  const float r = 1.0F / sqrtf(mean + a.eps);
-  float4* xr =
-      reinterpret_cast<float4*>(a.x) + static_cast<std::size_t>(row) * groups;
-  const float4* nr = reinterpret_cast<const float4*>(a.post_norm);
-#pragma unroll
-  for (std::uint32_t j = 0; j < kWindow; ++j) {
-    const std::uint32_t g = lane + j * kLanes;
-    if (g >= groups) {
-      break;
-    }
-    const float4 x = xr[g];
-    const float4 n = nr[g];
-    const float4 m = mix[j];
-    xr[g] = {x.x + m.x * r * n.x, x.y + m.y * r * n.y, x.z + m.z * r * n.z,
-             x.w + m.w * r * n.w};
+    a.out[row * a.hidden + i] = m;
   }
 }
 
-/// Launches the norm over the grid with one row per `kLanes` threads.
-template<int kLanes, int kWindow>
-void LaunchNormAt(const NormRowsArgs& a, hipStream_t stream) {
-  const std::uint32_t rows_per_block = kBlock / kLanes;
-  const dim3 grid((a.rows + rows_per_block - 1) / rows_per_block);
-  RmsNormKernel<kLanes, kWindow><<<grid, kBlock, 0, stream>>>(a);
-}
-
-/// The narrowest register window that still covers the row. `n` picks it and
-/// nothing else does, which is the whole reason a row sums the same way in a
-/// one-token decode as in a prefill.
-template<int kLanes, int kWindow>
-void LaunchNorm(const NormRowsArgs& a, hipStream_t stream) {
-  if constexpr (kWindow <
-                (kLanes == kWave ? kMaxWaveWindow : kMaxBlockWindow)) {
-    if (Groups(a.n) <= static_cast<std::uint32_t>(kLanes) * kWindow) {
-      LaunchNormAt<kLanes, kWindow>(a, stream);
-      return;
-    }
-    LaunchNorm<kLanes, kWindow + 1>(a, stream);
-  } else {
-    LaunchNormAt<kLanes, kWindow>(a, stream);
-  }
-}
-
-template<int kLanes, int kWindow>
-void LaunchFinishAt(const MoeFinishArgs& a, hipStream_t stream) {
-  const std::uint32_t rows_per_block = kBlock / kLanes;
-  const dim3 grid((a.rows + rows_per_block - 1) / rows_per_block);
-  MoeFinishKernel<kLanes, kWindow><<<grid, kBlock, 0, stream>>>(a);
-}
-
-template<int kLanes, int kWindow>
-void LaunchFinish(const MoeFinishArgs& a, hipStream_t stream) {
-  if constexpr (kWindow <
-                (kLanes == kWave ? kMaxWaveWindow : kMaxBlockWindow)) {
-    if (Groups(a.hidden) <= static_cast<std::uint32_t>(kLanes) * kWindow) {
-      LaunchFinishAt<kLanes, kWindow>(a, stream);
-      return;
-    }
-    LaunchFinish<kLanes, kWindow + 1>(a, stream);
-  } else {
-    LaunchFinishAt<kLanes, kWindow>(a, stream);
-  }
-}
-
-/// Enough blocks for the whole vectors of a flat count, with one spare so a
-/// count that ends mid-vector still has threads left for its tail.
-[[nodiscard]] unsigned ElementBlocks(std::size_t groups) noexcept {
-  return static_cast<unsigned>(groups / kBlock + 1);
-}
-
-/// The vector bodies need a 16-byte aligned base. Rows inherit that from a
-/// length that is a multiple of 32, so this is only ever about the pointer the
-/// caller handed over.
-[[nodiscard]] bool Aligned(const void* p) noexcept {
-  return reinterpret_cast<std::uintptr_t>(p) % (kVec * sizeof(float)) == 0;
-}
-
-}  // namespace
-
-void RmsNormRows(const NormRowsArgs& args, hipStream_t stream) {
-  if (args.n % 32 != 0) {
-    throw std::invalid_argument(
-        "RmsNormRows needs a row length that is a multiple of 32");
-  }
-  if (Groups(args.n) > static_cast<std::uint32_t>(kBlock) * kMaxBlockWindow) {
-    throw std::invalid_argument("RmsNormRows supports rows up to 8192 floats");
-  }
+void MoeCombine(const MoeCombineArgs& args, hipStream_t stream) {
   if (args.rows == 0) {
     return;
   }
-  if (Groups(args.n) <= static_cast<std::uint32_t>(kWave) * kMaxWaveWindow) {
-    LaunchNorm<kWave, 1>(args, stream);
-  } else {
-    LaunchNorm<kBlock, 1>(args, stream);
-  }
-}
-
-void AddRows(const AddRowsArgs& args, hipStream_t stream) {
-  if (args.count == 0) {
-    return;
-  }
-  if (!Aligned(args.x) || !Aligned(args.add)) {
-    throw std::invalid_argument("AddRows needs 16-byte aligned buffers");
-  }
-  AddKernel<<<ElementBlocks(args.count / kVec), kBlock, 0, stream>>>(
-      args.x, args.add, args.count / kVec, args.count);
-}
-
-__global__ void __launch_bounds__(kBlock)
-    SigmoidGateKernel(const float* attn, const float* gate, float* out,
-                      std::size_t groups, std::size_t count) {
-  const std::size_t first =
-      static_cast<std::size_t>(blockIdx.x) * kBlock + threadIdx.x;
-  if (first < groups) {
-    const float4 a = reinterpret_cast<const float4*>(attn)[first];
-    const float4 g = reinterpret_cast<const float4*>(gate)[first];
-    float4 o;
-    o.x = a.x / (1.0F + expf(-g.x));
-    o.y = a.y / (1.0F + expf(-g.y));
-    o.z = a.z / (1.0F + expf(-g.z));
-    o.w = a.w / (1.0F + expf(-g.w));
-    reinterpret_cast<float4*>(out)[first] = o;
-  }
-  const std::size_t tail = groups * kVec;
-  if (first < count - tail) {
-    const float gg = gate[tail + first];
-    out[tail + first] = attn[tail + first] / (1.0F + expf(-gg));
-  }
-}
-
-void GateUpAct(const GateUpArgs& args, hipStream_t stream) {
-  if (args.count == 0) {
-    return;
-  }
-  if (!Aligned(args.gate) || !Aligned(args.up) || !Aligned(args.act)) {
-    throw std::invalid_argument("GateUpAct needs 16-byte aligned buffers");
-  }
-  GateUpKernel<<<ElementBlocks(args.count / kVec), kBlock, 0, stream>>>(
-      args.gate, args.up, args.act, args.count / kVec, args.count);
-}
-
-void SigmoidGateAct(const SigmoidGateArgs& args, hipStream_t stream) {
-  if (args.count == 0) {
-    return;
-  }
-  if (!Aligned(args.attn) || !Aligned(args.gate) || !Aligned(args.out)) {
-    throw std::invalid_argument("SigmoidGateAct needs 16-byte aligned buffers");
-  }
-  SigmoidGateKernel<<<ElementBlocks(args.count / kVec), kBlock, 0, stream>>>(
-      args.attn, args.gate, args.out, args.count / kVec, args.count);
-}
-
-__global__ void __launch_bounds__(kBlock)
-    GateSharedKernel(float* shared, const float* gate, const float* h,
-                     std::uint32_t rows, std::uint32_t hidden) {
-  // One block per row: every thread accumulates its strided slice of the
-  // dot product, the waves reduce through shared memory, and lane 0
-  // broadcasts the sigmoid to the scaling loop below.
-  __shared__ float s_part[kBlock / kWave];
-  const std::uint32_t r = blockIdx.x;
-  if (r >= rows) {
-    return;
-  }
-  float part = 0.0F;
-  for (std::uint32_t i = threadIdx.x; i < hidden; i += kBlock) {
-    part += gate[i] * h[static_cast<std::size_t>(r) * hidden + i];
-  }
-  part = WaveSum(part);
-  if (threadIdx.x % kWave == 0) {
-    s_part[threadIdx.x / kWave] = part;
-  }
-  __syncthreads();
-  float dot = threadIdx.x < kBlock / kWave ? s_part[threadIdx.x] : 0.0F;
-  dot = WaveSum(dot);
-  const float sig = 1.0F / (1.0F + expf(-dot));
-  float* row = shared + static_cast<std::size_t>(r) * hidden;
-  for (std::uint32_t i = threadIdx.x; i < hidden; i += kBlock) {
-    row[i] *= sig;
-  }
-}
-
-void GateShared(const GateSharedArgs& args, hipStream_t stream) {
-  if (args.rows == 0) {
-    return;
-  }
-  GateSharedKernel<<<args.rows, kBlock, 0, stream>>>(args.shared, args.gate,
-                                                     args.h, args.rows,
-                                                     args.hidden);
-}
-
-void MoeFinish(const MoeFinishArgs& args, hipStream_t stream) {
-  if (args.hidden % 32 != 0) {
-    throw std::invalid_argument(
-        "MoeFinish needs a hidden size that is a multiple of 32");
-  }
-  if (Groups(args.hidden) >
-      static_cast<std::uint32_t>(kBlock) * kMaxBlockWindow) {
-    throw std::invalid_argument("MoeFinish supports hidden up to 8192");
-  }
-  if (args.rows == 0) {
-    return;
-  }
-  if (Groups(args.hidden) <=
-      static_cast<std::uint32_t>(kWave) * kMaxWaveWindow) {
-    LaunchFinish<kWave, 1>(args, stream);
-  } else {
-    LaunchFinish<kBlock, 1>(args, stream);
-  }
+  MoeCombineKernel<<<args.rows, kBlock, 0, stream>>>(args);
 }
 
 }  // namespace gufo::models::qwen35moe::rocm

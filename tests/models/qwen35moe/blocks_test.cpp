@@ -1,6 +1,6 @@
 // Qwen3.5-MoE's block arithmetic against an FP64 formula: the only
 // difference under test is the kernel's own rounding. RmsNorm reads the same
-// row once whatever the batch, MoeFinish folds the shared row in first and
+// row once whatever the batch boundary; the shared row goes first and
 // adds experts in increasing order, so a row keeps its value when a batch
 // boundary moves it.
 //

@@ -132,6 +132,7 @@ class Executor {
   float* dense_gate_{nullptr};
   float* dense_up_{nullptr};
   float* shared_{nullptr};
+  float* tmp_mix_{nullptr};
   float* logits_{nullptr};
   void* act_q8_{nullptr};
   std::size_t act_q8_bytes_{0};

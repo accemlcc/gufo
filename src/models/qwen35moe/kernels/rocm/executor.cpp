@@ -132,6 +132,7 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
   need(max_rows * s, sizeof(float));                    // dense_gate_
   need(max_rows * s, sizeof(float));                    // dense_up_
   need(max_rows * d, sizeof(float));                    // shared_
+  need(max_rows * d, sizeof(float));                    // tmp_mix_
   need(GroupTableInts(kMaxGroupSlots), sizeof(std::int32_t));
   need(max_logit_rows * v, sizeof(float));              // logits_
   HIP_CHECK(hipMalloc(&scratch_, arena));
@@ -160,6 +161,7 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
   dense_gate_ = a.Take<float>(max_rows_ * s);
   dense_up_ = a.Take<float>(max_rows_ * s);
   shared_ = a.Take<float>(max_rows_ * d);
+  tmp_mix_ = a.Take<float>(max_rows_ * d);
   dense_groups_ = a.Take<std::int32_t>(GroupTableInts(kMaxGroupSlots));
   logits_ = a.Take<float>(max_logit_rows_ * v);
 }
@@ -287,17 +289,16 @@ void Executor::Forward(KvCache& cache, SsmState& ssm,
                 stream_);
     Experts(w, h_, n, moe_out_, moe_weights_);
     SharedExpert(w, h_, n, shared_, shared_);
-    MoeFinishArgs fargs{};
-    fargs.x = x_;
-    fargs.routed = moe_out_;
-    fargs.shared = shared_;
-    fargs.weights = moe_weights_;
-    fargs.post_norm = w.post_attention_norm.f32();
-    fargs.rows = n;
-    fargs.hidden = static_cast<std::uint32_t>(d);
-    fargs.used = c.experts_used;
-    fargs.eps = c.rms_eps;
-    MoeFinish(fargs, stream_);
+    MoeCombineArgs margs{};
+    margs.out = tmp_mix_;
+    margs.routed = moe_out_;
+    margs.shared = shared_;
+    margs.weights = moe_weights_;
+    margs.rows = n;
+    margs.hidden = static_cast<std::uint32_t>(d);
+    margs.used = c.experts_used;
+    MoeCombine(margs, stream_);
+    AddRows({x_, tmp_mix_, static_cast<std::size_t>(n) * d}, stream_);
   }
   RmsNormRows({x_, model_.output_norm().f32(), h_, n,
                static_cast<std::uint32_t>(d), c.rms_eps},

@@ -266,17 +266,9 @@ void CpuMoe(const m::ModelWeights& w, const m::LayerWeights& l,
         mix[o] += gs * dd;
       }
     }
-    // finish: rms(mix) * post_norm + residual
-    const auto* pn =
-        static_cast<const float*>(l.post_attention_norm.data);
-    double ss = 0.0;
-    for (double v : mix) {
-      ss += v * v;
-    }
-    const double sc = 1.0 / std::sqrt(ss / d + w.config.rms_eps);
+    // finish: the raw mixture adds straight onto the residual
     for (std::size_t i = 0; i < d; ++i) {
-      out[r * d + i] =
-          static_cast<float>(h[r * d + i] + mix[i] * sc * pn[i]);
+      out[r * d + i] = static_cast<float>(h[r * d + i] + mix[i]);
     }
   }
 }
@@ -411,17 +403,18 @@ void MoeBlock(std::uint32_t layer_idx, std::uint32_t rows) {
   float* dshgated = Device(shout);
   std::vector<float> x = h;
   float* dx2 = Device(x);
-  k::MoeFinishArgs fargs{};
-  fargs.x = dx2;
-  fargs.routed = drouted;
-  fargs.shared = dshgated;
-  fargs.weights = dweights;
-  fargs.post_norm = dl.post_attention_norm.f32();
-  fargs.rows = rows;
-  fargs.hidden = static_cast<std::uint32_t>(d);
-  fargs.used = static_cast<std::uint32_t>(u);
-  fargs.eps = weights->config.rms_eps;
-  k::MoeFinish(fargs, stream);
+  std::vector<float> combined(rows * d);
+  float* dcombined = Device(combined);
+  k::MoeCombineArgs cargs{};
+  cargs.out = dcombined;
+  cargs.routed = drouted;
+  cargs.shared = dshgated;
+  cargs.weights = dweights;
+  cargs.rows = rows;
+  cargs.hidden = static_cast<std::uint32_t>(d);
+  cargs.used = static_cast<std::uint32_t>(u);
+  k::MoeCombine(cargs, stream);
+  k::AddRows({dx2, dcombined, rows * d}, stream);
   HIP_CHECK(hipDeviceSynchronize());
   x = Read(dx2, x);
   HIP_CHECK(hipStreamDestroy(stream));

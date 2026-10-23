@@ -172,22 +172,20 @@ struct EmbedArgs {
 void EmbedRows(const EmbedArgs& args, hipStream_t stream);
 
 /// The end of a mixture block, per row r:
-///   mix[r] = shared_gated[r] + sum_j weights[r][j] * routed[(r * used + j)]
-///   x[r] += rms(mix[r]) * post_norm
-/// The shared expert enters already gated by sigmoid(gate_vec . h); the norm
-/// sits on the branch, not on the residual.
-struct MoeFinishArgs {
-  float* x;
+///   out[r] = shared_gated[r] + sum_j weights[r][j] * routed[(r * used + j)]
+/// No normalization here: unlike kolibri the trunk adds the raw mixture to
+/// the residual (transformers adds `mlp(...)` straight onto it, and so does
+/// the graph). The caller adds `out` to the stream with AddRows.
+struct MoeCombineArgs {
+  float* out;           ///< [rows][hidden]
   const float* routed;  ///< [rows * used][hidden]
   const float* shared;  ///< [rows][hidden], gated shared-expert output
   const float* weights;  ///< [rows][used]
-  const float* post_norm;
   std::uint32_t rows;
   std::uint32_t hidden;
   std::uint32_t used;
-  float eps;
 };
-void MoeFinish(const MoeFinishArgs& args, hipStream_t stream);
+void MoeCombine(const MoeCombineArgs& args, hipStream_t stream);
 
 }  // namespace gufo::models::qwen35moe::rocm
 
