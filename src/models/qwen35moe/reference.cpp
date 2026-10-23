@@ -15,6 +15,10 @@
 namespace gufo::models::qwen35moe {
 namespace {
 
+/// DIAGNOSTIC ONLY: per-Forward call index shared by Forward and Mixture so
+/// the dumped stages stay apart across calls. Remove before finishing.
+int g_ref_call = 0;
+
 /// y = rms(x) * w: the file stores standard RMSNorm weights (mean near 1,
 /// all positive). The transformers checkpoint centres them at 0 and the graph
 /// reads (1 + w); the GGUF converter bakes that shift in, so the runtime -
@@ -486,14 +490,16 @@ void Reference::Mixture(const LayerWeights& w, const float* x, std::size_t rows,
   if (std::getenv("GUFO_QWEN35MOE_DUMP_LAYERS") != nullptr) {
     char path[256];
     std::snprintf(path, sizeof(path), "%s/ref_c%d_layer%02u_ids.bin",
-                  std::getenv("GUFO_QWEN35MOE_DUMP_LAYERS"), ref_call, layer);
+                  std::getenv("GUFO_QWEN35MOE_DUMP_LAYERS"), g_ref_call,
+                  layer);
     FILE* f = std::fopen(path, "wb");
     if (f != nullptr) {
       std::fwrite(d_ids.data(), sizeof(std::int32_t), d_ids.size(), f);
       std::fclose(f);
     }
     std::snprintf(path, sizeof(path), "%s/ref_c%d_layer%02u_w.bin",
-                  std::getenv("GUFO_QWEN35MOE_DUMP_LAYERS"), ref_call, layer);
+                  std::getenv("GUFO_QWEN35MOE_DUMP_LAYERS"), g_ref_call,
+                  layer);
     f = std::fopen(path, "wb");
     if (f != nullptr) {
       std::fwrite(d_w.data(), sizeof(float), d_w.size(), f);
@@ -552,7 +558,7 @@ void Reference::Forward(std::span<const std::int32_t> tokens,
   const char* dump_dir = std::getenv("GUFO_QWEN35MOE_DUMP_LAYERS");
   // DIAGNOSTIC ONLY counter part: keeps the test's three Forward calls apart.
   // Remove before finishing.
-  static int ref_call = 0;
+  const int ref_call = g_ref_call;
   for (std::uint32_t l = 0; l < c.num_layers; ++l) {
     const LayerWeights& w = weights_.layers[l];
     const float* wn = static_cast<const float*>(w.attn_norm.data);
@@ -628,7 +634,7 @@ void Reference::Forward(std::span<const std::int32_t> tokens,
   out_logits->assign(n * vocab, 0.0F);
   MatMulRef(weights_.output, vocab, d, normed.data(), n, out_logits->data());
   position_ += static_cast<std::uint32_t>(n);
-  ++ref_call;
+  ++g_ref_call;
 }
 
 }  // namespace gufo::models::qwen35moe
