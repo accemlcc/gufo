@@ -546,6 +546,23 @@ void Reference::Forward(std::span<const std::int32_t> tokens,
     } else {
       FullLayer(l, normed.data(), n, mixed.data());
     }
+    if (dump_dir != nullptr) {
+      // normed still holds the post-attention norm input here; mixed the
+      // mixer output. Post-norm overwrites normed below, tmp holds the MoE
+      // mixture after Mixture().
+      const char* tags[] = {"anorm", "mix"};
+      const std::vector<float>* vecs[] = {&normed, &mixed};
+      for (int s = 0; s < 2; ++s) {
+        char path[256];
+        std::snprintf(path, sizeof(path), "%s/ref_c%d_layer%02u_%s.bin",
+                      dump_dir, ref_call, l, tags[s]);
+        FILE* f = std::fopen(path, "wb");
+        if (f != nullptr) {
+          std::fwrite(vecs[s]->data(), sizeof(float), n * d, f);
+          std::fclose(f);
+        }
+      }
+    }
     for (std::size_t i = 0; i < n * d; ++i) {
       h[i] += mixed[i];
     }
@@ -554,6 +571,20 @@ void Reference::Forward(std::span<const std::int32_t> tokens,
       RmsNorm(&h[r * d], wp, d, c.rms_eps, &normed[r * d]);
     }
     Mixture(w, normed.data(), n, tmp.data());
+    if (dump_dir != nullptr) {
+      const char* tags[] = {"pnorm", "moe"};
+      const std::vector<float>* vecs[] = {&normed, &tmp};
+      for (int s = 0; s < 2; ++s) {
+        char path[256];
+        std::snprintf(path, sizeof(path), "%s/ref_c%d_layer%02u_%s.bin",
+                      dump_dir, ref_call, l, tags[s]);
+        FILE* f = std::fopen(path, "wb");
+        if (f != nullptr) {
+          std::fwrite(vecs[s]->data(), sizeof(float), n * d, f);
+          std::fclose(f);
+        }
+      }
+    }
     for (std::size_t i = 0; i < n * d; ++i) {
       h[i] += tmp[i];
     }
