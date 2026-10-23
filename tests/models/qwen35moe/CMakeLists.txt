@@ -21,6 +21,7 @@ if (ENGINE_ENABLE_HIP)
   add_qwen35moe_test(route gufo_qwen35moe "hip;gpu;gfx1151")
   add_qwen35moe_test(blocks gufo_qwen35moe "hip;gpu;gfx1151")
   add_qwen35moe_test(gemv gufo_qwen35moe "hip;gpu;gfx1151")
+  add_qwen35moe_test(moe_block gufo_qwen35moe "hip;gpu;gfx1151;slow;external-model")
 endif()
 
 # The oracle is checked against a NumPy fixture of the same tiny artifact;

@@ -34,9 +34,10 @@ graph at larger widths.
 `tools/qwen35moe/parity.cpp` drives the oracle over GGUF token ids and prints
 the top-5 per frontier; `compare_parity.py` checks it against the
 `/completion` top-logprobs of a llama.cpp server on the same file. Status:
-12/12 frontiers agree on the argmax on the 35B file (top-pair gaps within
-±0.2 nats of float noise), and the C++ oracle matches the independent NumPy
-oracle bit-for-bit through all 40 layers.
+12/12 frontiers agree on the argmax on both the 35B file (top-pair gaps
+within ±0.2 nats of float noise) and the 122B UD-Q4_K_XL shards (within
+±0.24), and the C++ oracle matches the independent NumPy oracle bit-for-bit
+through all 40 layers.
 
 Note the checkpoint on the M1 box is not this file: ollama's
 `ornith-1.5:122b` blob reports `general.name = Qwen3.5-122B-A10B-ck2100-...`
