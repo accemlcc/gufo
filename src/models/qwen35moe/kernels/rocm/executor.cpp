@@ -137,10 +137,6 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
   tokens_ = a.Take<std::int32_t>(max_rows_);
   x_ = a.Take<float>(max_rows_ * d);
   h_ = a.Take<float>(max_rows_ * d);
-  const std::size_t qkv_max =
-      std::max<std::size_t>(2 * c.AttnOutDim(), c.SsmQkvDim());
-  const std::size_t mix_max =
-      std::max(c.AttnOutDim(), c.SsmValueDim());
   qkv_ = a.Take<float>(max_rows_ * qkv_max);
   conv_ = a.Take<float>(max_rows_ * qkv_max);
   k_ = a.Take<float>(max_rows_ * kvd);
