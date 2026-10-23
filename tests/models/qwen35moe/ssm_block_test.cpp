@@ -176,8 +176,10 @@ void CpuSsm(const m::ModelWeights& w, const m::LayerWeights& l,
       vv[i] = mixed[2 * kd * kh + i];
     }
     const std::size_t rep = vh / kh;
+    (void)rep;
     for (std::size_t hh = 0; hh < vh; ++hh) {
-      const std::size_t khh = hh / rep;
+      // Tiled pairing, matching the file layout (see reference.cpp).
+      const std::size_t khh = hh % kh;
       const double g = avec[hh] * std::log1p(std::exp(alpha_r[hh] + dvec[hh]));
       const double b = 1.0 / (1.0 + std::exp(-beta_r[hh]));
       const double decay = std::exp(g);
