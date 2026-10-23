@@ -357,8 +357,7 @@ void BitInvariance() {
   Report("gemv.bit_invariance", ok, "q5k slot identical solo and grouped");
 }
 
-void Refusals() {
-  bool ok = true;
+void Refusals() {  bool ok = true;
   k::GroupedGemvArgs args{};
   args.format = k::WeightFormat::kQ5_K;
   args.rows = 1;
@@ -376,6 +375,56 @@ void Refusals() {
   Report("gemv.refusals", ok, "null and ragged widths refused");
 }
 
+void Embed() {
+  // Embedding gather against the CPU decoder on random tables: the row for
+  // each token must come back exactly, which is also what pins the token
+  // indexing (a row off by one fails every entry).
+  std::mt19937 rng(41);
+  constexpr std::uint32_t kVocab = 64;
+  constexpr std::uint32_t kN = 512;
+  for (k::WeightFormat format :
+       {k::WeightFormat::kQ4_K, k::WeightFormat::kQ5_K,
+        k::WeightFormat::kQ6_K, k::WeightFormat::kQ8_0}) {
+    Built w = Build(format, 1, kVocab, kN, rng);
+    const std::uint32_t rows = 5;
+    std::vector<std::int32_t> tokens = {0, 7, 63, 1, 32};
+    std::vector<float> want(rows * kN);
+    for (std::uint32_t r = 0; r < rows; ++r) {
+      const float* src = w.decoded.data() +
+                         static_cast<std::size_t>(tokens[r]) * kN;
+      std::memcpy(want.data() + r * kN, src, kN * sizeof(float));
+    }
+    std::vector<float> got(rows * kN, kPoison);
+    uint8_t* dtable = Device(w.bytes);
+    std::int32_t* dtokens = Device(tokens);
+    float* dy = Device(got);
+    k::EmbedArgs args{};
+    args.table = dtable;
+    args.format = format;
+    args.tokens = dtokens;
+    args.y = dy;
+    args.rows = rows;
+    args.n = kN;
+    bool threw = false;
+    try {
+      k::EmbedRows(args, nullptr);
+      HIP_CHECK(hipDeviceSynchronize());
+    } catch (const std::invalid_argument&) {
+      threw = true;
+    }
+    got = Read(dy, got);
+    FreeAll();
+    const char* name = format == k::WeightFormat::kQ4_K   ? "q4k"
+                       : format == k::WeightFormat::kQ5_K ? "q5k"
+                       : format == k::WeightFormat::kQ8_0 ? "q8_0"
+                                                         : "q6k";
+    const double worst = MaxAbsDiff(got, want);
+    Report(("gemv.embed_" + std::string(name)).c_str(),
+           !threw && worst < 1e-6,
+           "worst=" + std::to_string(worst));
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -388,6 +437,7 @@ int main() {
 
   DenseAndGrouped();
   BitInvariance();
+  Embed();
   Refusals();
 
   if (failures != 0) {
