@@ -226,12 +226,13 @@ void CpuAttn(const m::ModelWeights& w, const m::LayerWeights& l,
     }
   }
   out.assign(rows * d, 0.0F);
+  std::vector<float> orow(heads * dim);
   for (std::uint32_t r = 0; r < rows; ++r) {
     for (std::size_t o = 0; o < d; ++o) {
-      DecodeRow(l.attn_output, static_cast<std::uint32_t>(o), 0, row.data());
+      DecodeRow(l.attn_output, static_cast<std::uint32_t>(o), 0, orow.data());
       double acc = 0.0;
       for (std::size_t i = 0; i < heads * dim; ++i) {
-        acc += row[i] * gated[r * heads * dim + i];
+        acc += orow[i] * gated[r * heads * dim + i];
       }
       out[r * d + o] = static_cast<float>(acc);
     }
