@@ -61,7 +61,7 @@ double Elapsed(std::chrono::steady_clock::time_point since) {
   tokenization::TokenizerOptions options;
   options.add_bos = false;
   options.parse_special_tokens = true;
-  std::vector<tokenization::QwenTokenizer::TokenId> ids =
+  std::vector<tokenization::TokenId> ids =
       model.tokenizer().Encode(text, options);
   std::vector<q35::TokenId> out(ids.size());
   for (std::size_t i = 0; i < ids.size(); ++i) {
@@ -110,11 +110,11 @@ int Generate(const PromptOptions& opt, const q35::Model& model,
         sampler.Sample(session.logits()));
     sampler.Accept(static_cast<sampling::TokenId>(token));
     if (model.tokenizer().IsStopToken(
-            static_cast<tokenization::QwenTokenizer::TokenId>(token))) {
+            static_cast<tokenization::TokenId>(token))) {
       break;
     }
     const std::string piece = model.tokenizer().DecodeTokenCopy(
-        static_cast<tokenization::QwenTokenizer::TokenId>(token));
+        static_cast<tokenization::TokenId>(token));
     if (reply != nullptr) {
       reply->append(piece);
     }
