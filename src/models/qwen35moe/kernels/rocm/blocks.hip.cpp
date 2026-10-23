@@ -380,6 +380,44 @@ void SigmoidGateAct(const SigmoidGateArgs& args, hipStream_t stream) {
       args.attn, args.gate, args.out, args.count / kVec, args.count);
 }
 
+__global__ void __launch_bounds__(kBlock)
+    GateSharedKernel(float* shared, const float* gate, const float* h,
+                     std::uint32_t rows, std::uint32_t hidden) {
+  // One block per row: every thread accumulates its strided slice of the
+  // dot product, the waves reduce through shared memory, and lane 0
+  // broadcasts the sigmoid to the scaling loop below.
+  __shared__ float s_part[kBlock / kWave];
+  const std::uint32_t r = blockIdx.x;
+  if (r >= rows) {
+    return;
+  }
+  float part = 0.0F;
+  for (std::uint32_t i = threadIdx.x; i < hidden; i += kBlock) {
+    part += gate[i] * h[static_cast<std::size_t>(r) * hidden + i];
+  }
+  part = WaveSum(part);
+  if (threadIdx.x % kWave == 0) {
+    s_part[threadIdx.x / kWave] = part;
+  }
+  __syncthreads();
+  float dot = threadIdx.x < kBlock / kWave ? s_part[threadIdx.x] : 0.0F;
+  dot = WaveSum(dot);
+  const float sig = 1.0F / (1.0F + expf(-dot));
+  float* row = shared + static_cast<std::size_t>(r) * hidden;
+  for (std::uint32_t i = threadIdx.x; i < hidden; i += kBlock) {
+    row[i] *= sig;
+  }
+}
+
+void GateShared(const GateSharedArgs& args, hipStream_t stream) {
+  if (args.rows == 0) {
+    return;
+  }
+  GateSharedKernel<<<args.rows, kBlock, 0, stream>>>(args.shared, args.gate,
+                                                     args.h, args.rows,
+                                                     args.hidden);
+}
+
 void MoeFinish(const MoeFinishArgs& args, hipStream_t stream) {
   if (args.hidden % 32 != 0) {
     throw std::invalid_argument(

@@ -87,6 +87,9 @@ class Executor {
                     std::uint32_t layer_idx, const float* x,
                     std::uint32_t count, std::uint32_t first_position,
                     float* mixed);
+  /// One dense projection through the grouped kernel.
+  void Project(const DeviceTensor& w, const float* x, std::uint32_t rows,
+               float* y);
   /// The routed experts of one layer over the rows of `h`.
   void Experts(const DeviceLayer& l, const float* h, std::uint32_t count,
                float* routed, float* weights);

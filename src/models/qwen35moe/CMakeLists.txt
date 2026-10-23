@@ -1,29 +1,34 @@
 # Qwen3.5-MoE text model package (qwen35moe).
-
-# Config and weight binding only for now: the trunk graph (Gated DeltaNet and
-# full-attention layers with a softmax top-k mixture in every layer) is bound
-# and validated, the HIP engine that executes it is the next step. The kernels
-# it will reuse already exist: the SSM and GQA path of `qwen/hip`, and the
-# grouped expert projection of `kolibri1` / `qwen38_flash_next`.
+#
+# Config, weight binding and the scalar oracle plus the HIP engine: the trunk
+# graph (Gated DeltaNet and full-attention layers with a softmax top-k mixture
+# in every layer) runs on the device through grouped projections, a fused
+# QK-norm/RoPE/split/cache write, online GQA attention, the ported gated-delta
+# recurrence and the mixture kernels, all validated against the oracle.
 add_library(gufo_qwen35moe STATIC config.cpp weights.cpp)
 target_include_directories(gufo_qwen35moe PUBLIC ${PROJECT_SOURCE_DIR})
 target_link_libraries(gufo_qwen35moe PUBLIC gufo_core Threads::Threads)
 
 # The device path: the upload of the weights, the per-row norms, the router
-# whose group table a grouped projection consumes, and the end of a mixture
-# block. Host code that calls the kernels above. The grouped expert
-# projection, the attention paths and the executor follow in later steps.
+# whose group table a grouped projection consumes, the fused QK-norm/RoPE
+# gate-split and cache write, the online GQA attention, the gated-delta
+# recurrence, the end of a mixture block, and the executor plus engine that
+# run the trunk graph on them.
 if (ENGINE_ENABLE_HIP)
   target_sources(gufo_qwen35moe PRIVATE kernels/rocm/device_model.cpp
                       kernels/rocm/route.hip.cpp
                       kernels/rocm/qkv_post.hip.cpp
                       kernels/rocm/attention.hip.cpp
-                      kernels/rocm/ssm.hip.cpp)
+                      kernels/rocm/ssm.hip.cpp
+                      kernels/rocm/executor.cpp
+                      engine.cpp)
   set_source_files_properties(kernels/rocm/device_model.cpp
                               kernels/rocm/route.hip.cpp
                               kernels/rocm/qkv_post.hip.cpp
                               kernels/rocm/attention.hip.cpp
                               kernels/rocm/ssm.hip.cpp
+                              kernels/rocm/executor.cpp
+                              engine.cpp
     PROPERTIES LANGUAGE HIP)
 endif()
 
