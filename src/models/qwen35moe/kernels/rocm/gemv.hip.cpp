@@ -36,7 +36,9 @@
 // Q4_K block is 144 bytes and a Q4_K row 144 * k / 256, both multiples of 16,
 // sixteen-byte loads of a row are aligned whenever the tensor is. A Q5_K block
 // is 176 bytes, likewise a multiple of 16, and its fifth-bit plane sits at a
-// 16-byte boundary of every block, so it loads straight. A Q6_K block
+// 16-byte boundary of every block, so it loads straight. A Q5_K block is
+// d, dmin, twelve scale bytes, then the fifth-bit plane at +16 and the
+// nibbles at +48. A Q6_K block
 // is 210 bytes, so every other block of a row starts two bytes past a word and
 // no window of it is aligned. Those windows are read from the enclosing words
 // with the byte-alignment instruction, and the launcher only accepts a width
@@ -198,10 +200,10 @@ __device__ __forceinline__ void DecodeQ4K(const std::uint8_t* block, int p,
 }
 
 /// Q5_K task p, values [64 p, +64): the qs bytes are laid out like Q4_K's
-/// (low nibbles sub-block 2 p, high nibbles 2 p + 1) and byte lane + 16 h of
-/// the fifth-bit plane at block + 144 carries the top bit of the sixteen
-/// values of half h. The scale/min bytes sit where Q4_K's do, so the same
-/// header unpacking serves both.
+/// (low nibbles sub-block 2 p, high nibbles 2 p + 1) starting at block + 48,
+/// and byte lane + 16 h of the fifth-bit plane at block + 16 carries the top
+/// bit of the sixteen values of half h. The scale/min bytes sit where Q4_K's
+/// do, so the same header unpacking serves both.
 __device__ __forceinline__ void Dequant16Five(const std::uint8_t* q, int shift,
                                              const std::uint8_t* qh, int bit,
                                              float scale, float offset,
@@ -222,11 +224,13 @@ __device__ __forceinline__ void DecodeQ5K(const std::uint8_t* block, int p,
   float sc0, m0, sc1, m1;
   ScaleMin(header.y, header.z, header.w, 2 * p, &sc0, &m0);
   ScaleMin(header.y, header.z, header.w, 2 * p + 1, &sc1, &m1);
-  const std::uint8_t* qh = block + 144;
+  // d, dmin, scales[12], qh[32], qs[128]: the nibbles start at +48 and the
+  // fifth-bit plane at +16.
+  const std::uint8_t* qh = block + 16;
 #pragma unroll
   for (int h = 0; h < 2; ++h) {
     const uint4 raw_q =
-        *reinterpret_cast<const uint4*>(block + 16 + 32 * p + 16 * h);
+        *reinterpret_cast<const uint4*>(block + 48 + 32 * p + 16 * h);
     const auto* q = reinterpret_cast<const std::uint8_t*>(&raw_q);
     Dequant16Five(q, 0, qh + 16 * h, 2 * p, d * sc0, -(dmin * m0), w + 16 * h);
     Dequant16Five(q, 4, qh + 16 * h, 2 * p + 1, d * sc1, -(dmin * m1),

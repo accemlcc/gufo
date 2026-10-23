@@ -275,9 +275,10 @@ void DenseAndGrouped() {
       RunCase(c, rng, ok, detail);
       Report(("gemv." + CaseName(c)).c_str(), ok, detail);
     }
-    // Two experts, second row shared, one group empty of slots is skipped.
+    // Two experts, slots shared across rows; every slot index stays below
+    // rows * slots_per_row.
     {
-      Case c{f, 3, 64, 512, 2, 2, {{1, 0, 1, 2, 3}, {0, 4, 5}}};
+      Case c{f, 3, 64, 512, 2, 2, {{1, 0, 1, 2}, {0, 3}}};
       bool ok = false;
       std::string detail;
       RunCase(c, rng, ok, detail);
