@@ -172,6 +172,12 @@ struct Traits<WeightFormat::kQ5_K> {
   static constexpr int kTasks = 4;
   static constexpr int kValues = 64;
 };
+template<>
+struct Traits<WeightFormat::kQ8_0> {
+  static constexpr int kBytes = 8 * 34;
+  static constexpr int kTasks = 4;
+  static constexpr int kValues = 64;
+};
 
 template<WeightFormat F>
 __host__ __device__ constexpr std::size_t RowBytes(std::uint32_t k) {
@@ -238,6 +244,22 @@ __device__ __forceinline__ void DecodeQ5K(const std::uint8_t* block, int p,
   }
 }
 
+// Q8_0 task t, values [64 t, +64): eight contiguous 32-value blocks, each a
+// half scale and eight 4-wide quants. No second plane, no offset: the stored
+// integers are the values up to the block scale.
+__device__ __forceinline__ void DecodeQ80(const std::uint8_t* block, int t,
+                                         float (&w)[64]) {
+  for (int h = 0; h < 2; ++h) {
+    const std::uint8_t* b = block + (t * 2 + h) * 34;
+    const float d = Half(b);
+    const auto* qs = reinterpret_cast<const std::int8_t*>(b + 2);
+#pragma unroll
+    for (int i = 0; i < 32; ++i) {
+      w[h * 32 + i] = d * static_cast<float>(qs[i]);
+    }
+  }
+}
+
 /// Q6_K task t = 2 n + h: ql bytes [64 n + 16 h, +16) and
 /// [64 n + 32 + 16 h, +16) with qh bytes [128 + 32 n + 16 h, +16), which are
 /// the values 128 n + 16 h + 32 r + i under scale scales[8 n + h + 2 r] and the
@@ -283,6 +305,9 @@ __device__ __forceinline__ void Decode(const std::uint8_t* row,
               16 * static_cast<std::uint32_t>(t & 1);
   } else if constexpr (F == WeightFormat::kQ5_K) {
     DecodeQ5K(block, t, w);
+    *offset = unit * 256 + 64 * static_cast<std::uint32_t>(t);
+  } else if constexpr (F == WeightFormat::kQ8_0) {
+    DecodeQ80(block, t, w);
     *offset = unit * 256 + 64 * static_cast<std::uint32_t>(t);
   } else {
     DecodeQ4K(block, t, w);
@@ -519,7 +544,7 @@ __global__ void __launch_bounds__(kThreads)
 template<WeightFormat F>
 bool RowAligned(std::uint32_t k) noexcept {
   return F == WeightFormat::kQ4_K || F == WeightFormat::kQ5_K ||
-         (k / 256) % 2 == 0;
+         F == WeightFormat::kQ8_0 || (k / 256) % 2 == 0;
 }
 
 }  // namespace
@@ -557,6 +582,9 @@ bool GroupedGemv(const GroupedGemvArgs& args, hipStream_t stream) {
     case WeightFormat::kQ5_K:
       LaunchGrouped<WeightFormat::kQ5_K>(args, stream);
       return true;
+    case WeightFormat::kQ8_0:
+      LaunchGrouped<WeightFormat::kQ8_0>(args, stream);
+      return true;
   }
   return false;
 }
@@ -590,6 +618,9 @@ void EmbedRows(const EmbedArgs& args, hipStream_t stream) {
       return;
     case WeightFormat::kQ5_K:
       launch.template operator()<WeightFormat::kQ5_K>();
+      return;
+    case WeightFormat::kQ8_0:
+      launch.template operator()<WeightFormat::kQ8_0>();
       return;
     case WeightFormat::kQ6_K:
       if (!RowAligned<WeightFormat::kQ6_K>(args.n)) {

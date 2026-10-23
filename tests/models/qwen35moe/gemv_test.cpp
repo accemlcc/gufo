@@ -86,6 +86,8 @@ std::size_t BlockBytes(k::WeightFormat format) {
       return sizeof(q::block_q5_K);
     case k::WeightFormat::kQ6_K:
       return sizeof(q::block_q6_K);
+    case k::WeightFormat::kQ8_0:
+      return sizeof(q::block_q8_0);
   }
   return 0;
 }
@@ -122,6 +124,8 @@ Built Build(k::WeightFormat format, std::uint32_t experts, std::uint32_t m,
         auto* blk = reinterpret_cast<q::block_q5_K*>(p);
         blk->d = ToHalf(scale(rng));
         blk->dmin = ToHalf(0.5F * scale(rng));
+      } else if (format == k::WeightFormat::kQ8_0) {
+        reinterpret_cast<q::block_q8_0*>(p)->d = ToHalf(scale(rng));
       } else {
         reinterpret_cast<q::block_q6_K*>(p)->d = ToHalf(0.25F * scale(rng));
       }
@@ -135,6 +139,8 @@ Built Build(k::WeightFormat format, std::uint32_t experts, std::uint32_t m,
       q::DequantizeQ4_K(src, dst, kdim);
     } else if (format == k::WeightFormat::kQ5_K) {
       q::DequantizeQ5_K(src, dst, kdim);
+    } else if (format == k::WeightFormat::kQ8_0) {
+      q::DequantizeQ8_0(src, dst, kdim);
     } else {
       q::DequantizeQ6_K(src, dst, kdim);
     }
@@ -163,9 +169,10 @@ struct Case {
 };
 
 std::string CaseName(const Case& c) {
-  const char* f = c.format == k::WeightFormat::kQ4_K
-                      ? "q4k"
-                      : (c.format == k::WeightFormat::kQ5_K ? "q5k" : "q6k");
+  const char* f = c.format == k::WeightFormat::kQ4_K      ? "q4k"
+                    : c.format == k::WeightFormat::kQ5_K ? "q5k"
+                    : c.format == k::WeightFormat::kQ8_0 ? "q8_0"
+                                                         : "q6k";
   return std::string(f) + "_e" + std::to_string(c.experts) + "_m" +
          std::to_string(c.m) + "_k" + std::to_string(c.kdim) + "_r" +
          std::to_string(c.rows);
@@ -259,9 +266,9 @@ void RunCase(const Case& c, std::mt19937& rng, bool& ok, std::string& detail) {
 
 void DenseAndGrouped() {
   std::mt19937 rng(31);
-  const k::WeightFormat formats[3] = {k::WeightFormat::kQ4_K,
-                                      k::WeightFormat::kQ5_K,
-                                      k::WeightFormat::kQ6_K};
+  const k::WeightFormat formats[4] = {
+      k::WeightFormat::kQ4_K, k::WeightFormat::kQ5_K,
+      k::WeightFormat::kQ6_K, k::WeightFormat::kQ8_0};
   for (k::WeightFormat f : formats) {
     // Dense single-group, one row and sixteen.
     for (std::uint32_t rows : {1U, 16U}) {
