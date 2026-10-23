@@ -106,8 +106,8 @@ int Generate(const PromptOptions& opt, const q35::Model& model,
   const auto decode_start = std::chrono::steady_clock::now();
   std::size_t generated = 0;
   for (; generated < opt.max_tokens; ++generated) {
-    const q35::TokenId token = static_cast<q35::TokenId>(
-        sampler.Sample(session.logits()));
+    const q35::TokenId token =
+        static_cast<q35::TokenId>(sampler.Sample(session.logits()));
     sampler.Accept(static_cast<sampling::TokenId>(token));
     if (model.tokenizer().IsStopToken(
             static_cast<tokenization::TokenId>(token))) {
@@ -126,9 +126,8 @@ int Generate(const PromptOptions& opt, const q35::Model& model,
   std::cout << '\n';
   if (opt.verbose && generated > 0) {
     const double seconds = Elapsed(decode_start);
-    std::cout << "Prefill " << prompt.size() << " tokens in "
-              << prefill_seconds << " s ("
-              << static_cast<double>(prompt.size()) / prefill_seconds
+    std::cout << "Prefill " << prompt.size() << " tokens in " << prefill_seconds
+              << " s (" << static_cast<double>(prompt.size()) / prefill_seconds
               << " tok/s)\nGenerated " << generated << " tokens in " << seconds
               << " s (" << static_cast<double>(generated) / seconds
               << " tok/s)\n";
@@ -158,9 +157,9 @@ int Generate(const PromptOptions& opt, const q35::Model& model,
     const PromptOptions& opt) {
   std::string error;
   std::vector<tokenization::ChatTool> no_tools;
-  const auto rendered = q35::ChatTemplate::Render(
-      messages, no_tools, ResolveOptions(opt), model.template_variant(),
-      &error);
+  const auto rendered =
+      q35::ChatTemplate::Render(messages, no_tools, ResolveOptions(opt),
+                                model.template_variant(), &error);
   if (!rendered.has_value()) {
     throw std::invalid_argument("qwen35moe chat template: " + error);
   }
@@ -223,8 +222,7 @@ int RunQwen35MoeChat(const PromptOptions& opt,
             << "Type 'exit' or Ctrl+D to quit.\n\n";
   for (std::string input;;) {
     std::cout << ">>> User: " << std::flush;
-    if (!std::getline(std::cin, input) || input == "exit" ||
-        input == "quit") {
+    if (!std::getline(std::cin, input) || input == "exit" || input == "quit") {
       break;
     }
     if (input.empty()) {

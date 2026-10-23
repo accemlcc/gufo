@@ -76,8 +76,8 @@ void SplitThought(const tokenization::ChatMessage& message, std::string* out,
   const std::string after = out->substr(close + kThinkClose.size());
   const std::size_t open = before.rfind(kThinkOpen);
   std::string core = open == std::string::npos
-                           ? before
-                           : before.substr(open + kThinkOpen.size());
+                         ? before
+                         : before.substr(open + kThinkOpen.size());
   *thought = Trim(RStripNewlines(LStripNewlines(core)));
   *out = LStripNewlines(after);
 }
@@ -114,8 +114,7 @@ bool ChatTemplate::ValidateGgufTemplate(const core::GgufReader& reader,
     return false;
   }
   const auto* begin = reinterpret_cast<const std::uint8_t*>(text->data());
-  const std::string hash =
-      crypto::Sha256Hex({begin, text->size()});
+  const std::string hash = crypto::Sha256Hex({begin, text->size()});
   if (hash == TemplateSha25635B()) {
     if (variant != nullptr) {
       *variant = TemplateVariant::kMergedSystem;
@@ -211,8 +210,8 @@ std::optional<RenderedPrompt> ChatTemplate::Render(
         out.text += std::string(kImStart) + "user";
         in_tool_group = true;
       }
-      out.text += "\n<tool_response>\n" + Trim(message.content) +
-                  "\n</tool_response>";
+      out.text +=
+          "\n<tool_response>\n" + Trim(message.content) + "\n</tool_response>";
       if (last) {
         out.text += std::string(kImEnd) + "\n";
         in_tool_group = false;
@@ -232,8 +231,8 @@ std::optional<RenderedPrompt> ChatTemplate::Render(
     out.text += std::string(kImEnd) + "\n";
   }
   out.stable_prefix_offset = trailing_user_turn == std::string::npos
-                                     ? out.text.size()
-                                     : trailing_user_turn;
+                                 ? out.text.size()
+                                 : trailing_user_turn;
   out.generation_prompt_offset = out.text.size();
   if (options.add_generation_prompt) {
     out.stable_prefix_offset =

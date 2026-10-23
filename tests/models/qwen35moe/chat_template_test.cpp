@@ -77,8 +77,8 @@ void RenderCase(const std::string& name, q35::TemplateVariant variant,
   }
   std::string error;
   std::vector<tok::ChatTool> tools;
-  auto got = q35::ChatTemplate::Render(messages, tools, options, variant,
-                                       &error);
+  auto got =
+      q35::ChatTemplate::Render(messages, tools, options, variant, &error);
   if (!got.has_value()) {
     Report(("chat." + name).c_str(), false, error);
     return;
@@ -111,13 +111,12 @@ void RenderMatrix(q35::TemplateVariant variant, const std::string& tag) {
              {Msg(U, "Think this over"),
               Msg(A, "<think>\npondering\n</think>\n\nDone.")},
              gen);
-  RenderCase(tag + "_no_thinking", variant, {Msg(U, "Short answer")},
-             no_think);
-  RenderCase(tag + "_no_gen_prompt", variant,
-             {Msg(S, "S."), Msg(U, "Q?")}, no_prompt);
+  RenderCase(tag + "_no_thinking", variant, {Msg(U, "Short answer")}, no_think);
+  RenderCase(tag + "_no_gen_prompt", variant, {Msg(S, "S."), Msg(U, "Q?")},
+             no_prompt);
   RenderCase(tag + "_tool_roundtrip", variant,
-             {Msg(U, "How are you?"), Msg(A, "Let me check."),
-              Msg(T, "fine"), Msg(T, "indeed"), Msg(U, "Thanks")},
+             {Msg(U, "How are you?"), Msg(A, "Let me check."), Msg(T, "fine"),
+              Msg(T, "indeed"), Msg(U, "Thanks")},
              gen);
   if (variant == q35::TemplateVariant::kMergedSystem) {
     // The single-system template rejects these at render time instead, so
@@ -125,8 +124,8 @@ void RenderMatrix(q35::TemplateVariant variant, const std::string& tag) {
     // below).
     RenderCase(tag + "_double_system", variant,
                {Msg(S, "First."), Msg(S, "Second."), Msg(U, "Go")}, gen);
-    RenderCase(tag + "_developer", variant,
-               {Msg(D, "Dev note."), Msg(U, "Go")}, gen);
+    RenderCase(tag + "_developer", variant, {Msg(D, "Dev note."), Msg(U, "Go")},
+               gen);
   }
 }
 
@@ -144,8 +143,7 @@ void Refusals(q35::TemplateVariant variant, const std::string& tag) {
   std::vector<tok::ChatTool> tools(1);
   tools[0].name = "f";
   error.clear();
-  ok = !q35::ChatTemplate::Render(one, tools, gen, variant, &error)
-            .has_value();
+  ok = !q35::ChatTemplate::Render(one, tools, gen, variant, &error).has_value();
   Report(("chat." + tag + "_refuses_tools").c_str(), ok, error);
   std::vector<tok::ChatMessage> image = {
       Msg(ChatRole::kUser, "Look"),
@@ -161,8 +159,7 @@ void Refusals(q35::TemplateVariant variant, const std::string& tag) {
         Msg(ChatRole::kUser, "Go"),
     };
     error.clear();
-    ok = !q35::ChatTemplate::Render(developer, no_tools, gen, variant,
-                                    &error)
+    ok = !q35::ChatTemplate::Render(developer, no_tools, gen, variant, &error)
               .has_value();
     Report(("chat." + tag + "_refuses_developer").c_str(), ok, error);
     std::vector<tok::ChatMessage> late_system = {
@@ -170,8 +167,7 @@ void Refusals(q35::TemplateVariant variant, const std::string& tag) {
         Msg(ChatRole::kSystem, "Late."),
     };
     error.clear();
-    ok = !q35::ChatTemplate::Render(late_system, no_tools, gen, variant,
-                                    &error)
+    ok = !q35::ChatTemplate::Render(late_system, no_tools, gen, variant, &error)
               .has_value();
     Report(("chat." + tag + "_refuses_late_system").c_str(), ok, error);
   }

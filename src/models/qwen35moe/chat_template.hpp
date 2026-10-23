@@ -56,7 +56,7 @@ struct RenderedPrompt {
 ///   server fills from `reasoning`/`reasoning_content` or by splitting a
 ///   `<think>` pair out of the content, as the template's own fallback does.
 class ChatTemplate {
- public:
+public:
   /// SHA-256 of `tokenizer.chat_template` on the 35B file.
   [[nodiscard]] static constexpr std::string_view TemplateSha25635B() noexcept {
     return "f55f52930aa8bf44ab5cb85f99370fcc3c56e9a85640b812086d5330bce5d86b";
