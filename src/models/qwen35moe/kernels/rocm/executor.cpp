@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <stdexcept>
 
@@ -267,6 +268,16 @@ void Executor::Forward(KvCache& cache, SsmState& ssm,
   EmbedRows({model_.token_embd().data, model_.token_embd().quant(), tokens_,
              x_, n, static_cast<std::uint32_t>(d)},
             stream_);
+    if (std::getenv("GUFO_QWEN35MOE_DUMP_DEV") != nullptr) {
+      std::vector<float> dbg(static_cast<std::size_t>(n) * d);
+      HIP_CHECK(hipMemcpy(dbg.data(), x_, dbg.size() * sizeof(float),
+                          hipMemcpyDeviceToHost));
+      double amax = 0.0;
+      for (float v : dbg) {
+        amax = std::max(amax, std::fabs(static_cast<double>(v)));
+      }
+      std::fprintf(stderr, "DEV embed max=%.3f\n", amax);
+    }
   for (std::uint32_t l = 0; l < c.num_layers; ++l) {
     ForwardLayer(cache, ssm, model_.layers()[l], l, x_, n, first_position, h_);
     AddRows({x_, h_, static_cast<std::size_t>(n) * d}, stream_);
