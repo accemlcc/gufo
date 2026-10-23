@@ -52,7 +52,8 @@ constexpr std::uint32_t kHeads = 16;
 constexpr std::uint32_t kKv = 2;
 constexpr std::uint32_t kDim = 256;
 constexpr std::uint32_t kRot = 64;
-constexpr double kThetaScale = 1e-7;  // pow(1e7, -2/64)
+constexpr double kThetaScale =
+    0.6042963902381329;  // pow(1e7, -2/64), the rotary base rate
 constexpr float kEps = 1e-6F;
 
 std::vector<float> CpuQkvPost(const std::vector<float>& qg,

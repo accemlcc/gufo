@@ -118,7 +118,7 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
                   ? 0
                   : static_cast<std::uint32_t>(weights.token_embd.rows);
   m->theta_scale_ = std::pow(static_cast<double>(c.rope_theta),
-                             -2.0 / static_cast<double>(c.head_dim));
+                             -2.0 / static_cast<double>(c.rotary_dim));
 
   const auto regions = reader.GetMappedRegions();
   auto stager = gufo::hip::WeightUpload::Create(
