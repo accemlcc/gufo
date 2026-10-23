@@ -76,10 +76,10 @@ void Forward(const std::string& path) {
     session->Append(chunk);
     std::vector<float> ref_logits;
     std::vector<std::int32_t> prefix(ids.begin(), ids.begin() + splits[k]);
-    // The oracle appends after its own frontier, so restart it: each
-    // compared frontier is the same full prefix the session has seen.
-    ref.Reset();
-    ref.Forward(prefix, &ref_logits);
+    // DIAGNOSTIC ONLY: fresh oracle per frontier instead of Reset, to tell
+    // a Reset bug from a shape bug. Remove before finishing.
+    m::Reference ref2(*weights);
+    ref2.Forward(prefix, &ref_logits);
     // The session keeps only the requested (last) row; the oracle returns
     // every position, so compare against its last row.
     const std::size_t v = session->logits().size();
