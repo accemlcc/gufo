@@ -178,6 +178,86 @@ __global__ void __launch_bounds__(kBlock)
   }
 }
 
+/// Launches the norm over the grid with one row per `kLanes` threads.
+template<int kLanes, int kWindow>
+void LaunchNormAt(const NormRowsArgs& a, hipStream_t stream) {
+  const std::uint32_t rows_per_block = kBlock / kLanes;
+  const dim3 grid((a.rows + rows_per_block - 1) / rows_per_block);
+  RmsNormKernel<kLanes, kWindow><<<grid, kBlock, 0, stream>>>(a);
+}
+
+/// The narrowest register window that still covers the row. `n` picks it and
+/// nothing else does, which is the whole reason a row sums the same way in a
+/// one-token decode as in a prefill.
+template<int kLanes, int kWindow>
+void LaunchNorm(const NormRowsArgs& a, hipStream_t stream) {
+  if constexpr (kWindow <
+                (kLanes == kWave ? kMaxWaveWindow : kMaxBlockWindow)) {
+    if (Groups(a.n) <= static_cast<std::uint32_t>(kLanes) * kWindow) {
+      LaunchNormAt<kLanes, kWindow>(a, stream);
+      return;
+    }
+    LaunchNorm<kLanes, kWindow + 1>(a, stream);
+  } else {
+    LaunchNormAt<kLanes, kWindow>(a, stream);
+  }
+}
+
+/// Enough blocks for the whole vectors of a flat count, with one spare so a
+/// count that ends mid-vector still has threads left for its tail.
+[[nodiscard]] unsigned ElementBlocks(std::size_t groups) noexcept {
+  return static_cast<unsigned>(groups / kBlock + 1);
+}
+
+/// The vector bodies need a 16-byte aligned base. Rows inherit that from a
+/// length that is a multiple of 32, so this is only ever about the pointer the
+/// caller handed over.
+[[nodiscard]] bool Aligned(const void* p) noexcept {
+  return reinterpret_cast<std::uintptr_t>(p) % (kVec * sizeof(float)) == 0;
+}
+
+}  // namespace
+
+void RmsNormRows(const NormRowsArgs& args, hipStream_t stream) {
+  if (args.n % 32 != 0) {
+    throw std::invalid_argument(
+        "RmsNormRows needs a row length that is a multiple of 32");
+  }
+  if (Groups(args.n) > static_cast<std::uint32_t>(kBlock) * kMaxBlockWindow) {
+    throw std::invalid_argument("RmsNormRows supports rows up to 8192 floats");
+  }
+  if (args.rows == 0) {
+    return;
+  }
+  if (Groups(args.n) <= static_cast<std::uint32_t>(kWave) * kMaxWaveWindow) {
+    LaunchNorm<kWave, 1>(args, stream);
+  } else {
+    LaunchNorm<kBlock, 1>(args, stream);
+  }
+}
+
+void AddRows(const AddRowsArgs& args, hipStream_t stream) {
+  if (args.count == 0) {
+    return;
+  }
+  if (!Aligned(args.x) || !Aligned(args.add)) {
+    throw std::invalid_argument("AddRows needs 16-byte aligned buffers");
+  }
+  AddKernel<<<ElementBlocks(args.count / kVec), kBlock, 0, stream>>>(
+      args.x, args.add, args.count / kVec, args.count);
+}
+
+void GateUpAct(const GateUpArgs& args, hipStream_t stream) {
+  if (args.count == 0) {
+    return;
+  }
+  if (!Aligned(args.gate) || !Aligned(args.up) || !Aligned(args.act)) {
+    throw std::invalid_argument("GateUpAct needs 16-byte aligned buffers");
+  }
+  GateUpKernel<<<ElementBlocks(args.count / kVec), kBlock, 0, stream>>>(
+      args.gate, args.up, args.act, args.count / kVec, args.count);
+}
+
 /// The end of a mixture block, per row r: the gated shared expert plus
 /// the weight-weighted routed experts, with no normalization (the trunk adds
 /// the raw mixture to the residual). One block per row; lanes split the row.
@@ -196,6 +276,76 @@ __global__ void __launch_bounds__(kBlock) MoeCombineKernel(MoeCombineArgs a) {
     }
     a.out[row * a.hidden + i] = m;
   }
+}
+
+/// attn * sigmoid(gate), elementwise. The full-attention gate is a plain
+/// sigmoid, not the SiLU of the expert path.
+__global__ void __launch_bounds__(kBlock)
+    SigmoidGateKernel(const float* attn, const float* gate, float* out,
+                      std::size_t groups, std::size_t count) {
+  const std::size_t first =
+      static_cast<std::size_t>(blockIdx.x) * kBlock + threadIdx.x;
+  if (first < groups) {
+    const float4 a = reinterpret_cast<const float4*>(attn)[first];
+    const float4 g = reinterpret_cast<const float4*>(gate)[first];
+    float4 o;
+    o.x = a.x / (1.0F + expf(-g.x));
+    o.y = a.y / (1.0F + expf(-g.y));
+    o.z = a.z / (1.0F + expf(-g.z));
+    o.w = a.w / (1.0F + expf(-g.w));
+    reinterpret_cast<float4*>(out)[first] = o;
+  }
+  const std::size_t tail = groups * kVec;
+  if (first < count - tail) {
+    const float gg = gate[tail + first];
+    out[tail + first] = attn[tail + first] / (1.0F + expf(-gg));
+  }
+}
+
+/// out[row] *= sigmoid(dot(gate, h[row])): the shared expert's scalar gate.
+__global__ void __launch_bounds__(kBlock)
+    GateSharedKernel(float* shared, const float* gate, const float* h,
+                     std::uint32_t rows, std::uint32_t hidden) {
+  __shared__ float s_part[kBlock / kWave];
+  const std::uint32_t row = blockIdx.x;
+  if (row >= rows) {
+    return;
+  }
+  float part = 0.0F;
+  for (std::uint32_t i = threadIdx.x; i < hidden; i += kBlock) {
+    part += gate[i] * h[static_cast<std::size_t>(row) * hidden + i];
+  }
+  part = WaveSum(part);
+  if (threadIdx.x % kWave == 0) {
+    s_part[threadIdx.x / kWave] = part;
+  }
+  __syncthreads();
+  float dot = threadIdx.x < kBlock / kWave ? s_part[threadIdx.x] : 0.0F;
+  dot = WaveSum(dot);
+  const float sig = 1.0F / (1.0F + expf(-dot));
+  float* out = shared + static_cast<std::size_t>(row) * hidden;
+  for (std::uint32_t i = threadIdx.x; i < hidden; i += kBlock) {
+    out[i] *= sig;
+  }
+}
+
+void SigmoidGateAct(const SigmoidGateArgs& args, hipStream_t stream) {
+  if (args.count == 0) {
+    return;
+  }
+  if (!Aligned(args.attn) || !Aligned(args.gate) || !Aligned(args.out)) {
+    throw std::invalid_argument("SigmoidGateAct needs 16-byte aligned buffers");
+  }
+  SigmoidGateKernel<<<ElementBlocks(args.count / kVec), kBlock, 0, stream>>>(
+      args.attn, args.gate, args.out, args.count / kVec, args.count);
+}
+
+void GateShared(const GateSharedArgs& args, hipStream_t stream) {
+  if (args.rows == 0) {
+    return;
+  }
+  GateSharedKernel<<<args.rows, kBlock, 0, stream>>>(
+      args.shared, args.gate, args.h, args.rows, args.hidden);
 }
 
 void MoeCombine(const MoeCombineArgs& args, hipStream_t stream) {
