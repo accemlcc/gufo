@@ -44,9 +44,10 @@ struct Arena {
 /// Group table for one dense projection over `rows` rows.
 void DenseGroups(std::int32_t* groups, std::uint32_t rows) {
   groups[0] = 1;
-  groups[1] = static_cast<std::int32_t>(rows);
+  groups[1] = 0;
+  groups[2] = static_cast<std::int32_t>(rows);
   for (std::uint32_t r = 0; r < rows; ++r) {
-    groups[2 + r] = static_cast<std::int32_t>(r);
+    groups[3 + r] = static_cast<std::int32_t>(r);
   }
 }
 
@@ -478,10 +479,10 @@ void Executor::SharedExpert(const DeviceLayer& l, const float* h,
 }
 
 void Executor::StageDenseGroups(std::uint32_t rows) {
-  std::vector<std::int32_t> host(2 + rows);
+  std::vector<std::int32_t> host(3 + rows);
   DenseGroups(host.data(), rows);
   HIP_CHECK(hipMemcpyAsync(dense_groups_, host.data(),
-                           (2 + rows) * sizeof(std::int32_t),
+                           (3 + rows) * sizeof(std::int32_t),
                            hipMemcpyHostToDevice, stream_));
 }
 
