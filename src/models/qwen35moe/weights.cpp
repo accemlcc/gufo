@@ -17,8 +17,7 @@ TensorRef ExtractTensorRef(const core::GgufReader& reader,
   TensorRef ref;
   ref.data = tensor->data;
   ref.type = tensor->type;
-  ref.num_elements =
-      static_cast<std::size_t>(tensor->ElementCount());
+  ref.num_elements = static_cast<std::size_t>(tensor->ElementCount());
   const auto& d = tensor->dimensions;
   ref.cols = d.size() > 0 ? d[0] : 1;
   ref.rows = d.size() > 1 ? d[1] : 1;
@@ -63,7 +62,7 @@ enum class TensorRole : std::uint8_t {
 }
 
 [[nodiscard]] constexpr bool SupportsTensorType(core::GgmlType type,
-                                               TensorRole role) noexcept {
+                                                TensorRole role) noexcept {
   switch (role) {
     case TensorRole::kEmbedding:
       // The UD-Q4_K_XL shard keeps the embedding at Q8_0 and the Q5_K_M file
@@ -143,12 +142,10 @@ bool BindFullAttention(const core::GgufReader& reader, const Config& config,
          ValidateTensor(layer->attn_output, config.AttnOutDim() * h,
                         TensorRole::kProjection, prefix + "attn_output.weight",
                         error_msg) &&
-         ValidateTensor(layer->attn_q_norm, config.head_dim,
-                        TensorRole::kNorm, prefix + "attn_q_norm.weight",
-                        error_msg) &&
-         ValidateTensor(layer->attn_k_norm, config.head_dim,
-                        TensorRole::kNorm, prefix + "attn_k_norm.weight",
-                        error_msg);
+         ValidateTensor(layer->attn_q_norm, config.head_dim, TensorRole::kNorm,
+                        prefix + "attn_q_norm.weight", error_msg) &&
+         ValidateTensor(layer->attn_k_norm, config.head_dim, TensorRole::kNorm,
+                        prefix + "attn_k_norm.weight", error_msg);
 }
 
 bool BindLinear(const core::GgufReader& reader, const Config& config,
@@ -171,13 +168,13 @@ bool BindLinear(const core::GgufReader& reader, const Config& config,
          ValidateTensor(layer->attn_gate, h * config.SsmValueDim(),
                         TensorRole::kProjection, prefix + "attn_gate.weight",
                         error_msg) &&
-         ValidateTensor(layer->ssm_a, config.SsmValueHeads(),
-                        TensorRole::kNorm, prefix + "ssm_a", error_msg) &&
-         ValidateTensor(
-             layer->ssm_conv1d,
-             static_cast<std::size_t>(config.ssm_conv_kernel) *
-                 config.SsmQkvDim(),
-             TensorRole::kNorm, prefix + "ssm_conv1d.weight", error_msg) &&
+         ValidateTensor(layer->ssm_a, config.SsmValueHeads(), TensorRole::kNorm,
+                        prefix + "ssm_a", error_msg) &&
+         ValidateTensor(layer->ssm_conv1d,
+                        static_cast<std::size_t>(config.ssm_conv_kernel) *
+                            config.SsmQkvDim(),
+                        TensorRole::kNorm, prefix + "ssm_conv1d.weight",
+                        error_msg) &&
          ValidateTensor(layer->ssm_dt, config.SsmValueHeads(),
                         TensorRole::kNorm, prefix + "ssm_dt.bias", error_msg) &&
          ValidateTensor(layer->ssm_alpha, h * config.SsmValueHeads(),
@@ -229,8 +226,7 @@ bool BindMixture(const core::GgufReader& reader, const Config& config,
          ValidateTensor(layer->ffn_gate_exps, h * f * e,
                         TensorRole::kProjection,
                         prefix + "ffn_gate_exps.weight", error_msg) &&
-         ValidateTensor(layer->ffn_up_exps, h * f * e,
-                        TensorRole::kProjection,
+         ValidateTensor(layer->ffn_up_exps, h * f * e, TensorRole::kProjection,
                         prefix + "ffn_up_exps.weight", error_msg) &&
          ValidateTensor(layer->ffn_down_exps, f * h * e,
                         TensorRole::kProjection,
@@ -310,10 +306,9 @@ std::optional<ModelWeights> ModelWeights::LoadFromGguf(
       return std::nullopt;
     }
     const bool want_full = !config.IsLinear(i);
-    const bool ok = want_full
-                        ? BindFullAttention(reader, config, prefix, &layer,
-                                            error_msg)
-                        : BindLinear(reader, config, prefix, &layer, error_msg);
+    const bool ok =
+        want_full ? BindFullAttention(reader, config, prefix, &layer, error_msg)
+                  : BindLinear(reader, config, prefix, &layer, error_msg);
     if (!ok) {
       return std::nullopt;
     }
@@ -323,8 +318,7 @@ std::optional<ModelWeights> ModelWeights::LoadFromGguf(
   }
 
   if (config.has_mtp) {
-    const std::string prefix =
-        "blk." + std::to_string(config.num_layers) + ".";
+    const std::string prefix = "blk." + std::to_string(config.num_layers) + ".";
     if (!reader.HasTensor(prefix + "attn_q.weight") ||
         reader.HasTensor(prefix + "attn_qkv.weight")) {
       if (error_msg != nullptr) {
@@ -347,14 +341,11 @@ std::optional<ModelWeights> ModelWeights::LoadFromGguf(
     }
     weights.mtp.eh_proj =
         ExtractTensorRef(reader, prefix + "nextn.eh_proj.weight");
-    weights.mtp.enorm =
-        ExtractTensorRef(reader, prefix + "nextn.enorm.weight");
-    weights.mtp.hnorm =
-        ExtractTensorRef(reader, prefix + "nextn.hnorm.weight");
+    weights.mtp.enorm = ExtractTensorRef(reader, prefix + "nextn.enorm.weight");
+    weights.mtp.hnorm = ExtractTensorRef(reader, prefix + "nextn.hnorm.weight");
     weights.mtp.shared_head_norm =
         ExtractTensorRef(reader, prefix + "nextn.shared_head_norm.weight");
-    if (!ValidateTensor(weights.mtp.eh_proj, 2 * h * h,
-                        TensorRole::kProjection,
+    if (!ValidateTensor(weights.mtp.eh_proj, 2 * h * h, TensorRole::kProjection,
                         prefix + "nextn.eh_proj.weight", error_msg) ||
         !ValidateTensor(weights.mtp.enorm, h, TensorRole::kNorm,
                         prefix + "nextn.enorm.weight", error_msg) ||

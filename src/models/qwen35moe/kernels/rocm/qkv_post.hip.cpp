@@ -39,8 +39,8 @@ __device__ __forceinline__ float XorLane(float v) {
     return __int_as_float(__builtin_amdgcn_permlanex16(
         x, x, 0x76543210, 0xfedcba98, false, false));
   }
-  return __int_as_float(__builtin_amdgcn_update_dpp(x, x, 0x160 | M, 0xf, 0xf,
-                                                   false));
+  return __int_as_float(
+      __builtin_amdgcn_update_dpp(x, x, 0x160 | M, 0xf, 0xf, false));
 }
 
 __device__ __forceinline__ float WaveSum(float v) {
@@ -51,8 +51,7 @@ __device__ __forceinline__ float WaveSum(float v) {
   return v + XorLane<1>(v);
 }
 
-__global__ void __launch_bounds__(kThreads)
-    QkvPostKernel(QkvPostArgs a) {
+__global__ void __launch_bounds__(kThreads) QkvPostKernel(QkvPostArgs a) {
   __shared__ float s_cos[32];
   __shared__ float s_sin[32];
   const std::uint32_t lane = threadIdx.x % kWave;
@@ -130,8 +129,8 @@ __global__ void __launch_bounds__(kThreads)
     return;
   }
   if (is_k) {
-    const float* src = a.k + static_cast<std::size_t>(row) * a.kv_heads *
-                                  a.dim +
+    const float* src = a.k +
+                       static_cast<std::size_t>(row) * a.kv_heads * a.dim +
                        static_cast<std::size_t>(kh) * a.dim;
     for (std::uint32_t j = 0; j < kPerLane; ++j) {
       xh[j] = src[lane + j * kWave];
@@ -153,9 +152,9 @@ __global__ void __launch_bounds__(kThreads)
       xh[0] = p * c - q * s;
       xh[1] = p * s + q * c;
     }
-    float* dst = a.k_cache + (static_cast<std::size_t>(kh) * a.max_context +
-                              position) *
-                                 a.dim;
+    float* dst =
+        a.k_cache +
+        (static_cast<std::size_t>(kh) * a.max_context + position) * a.dim;
     for (std::uint32_t j = 0; j < kPerLane; ++j) {
       dst[lane + j * kWave] = xh[j];
     }
@@ -164,9 +163,9 @@ __global__ void __launch_bounds__(kThreads)
   // Values: no norm, no turn, straight into the cache.
   const float* vsrc = a.v + static_cast<std::size_t>(row) * a.kv_heads * a.dim +
                       static_cast<std::size_t>(kh) * a.dim;
-  float* vdst = a.v_cache + (static_cast<std::size_t>(kh) * a.max_context +
-                             position) *
-                                a.dim;
+  float* vdst =
+      a.v_cache +
+      (static_cast<std::size_t>(kh) * a.max_context + position) * a.dim;
   for (std::uint32_t j = 0; j < kPerLane; ++j) {
     vdst[lane + j * kWave] = vsrc[lane + j * kWave];
   }

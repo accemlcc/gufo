@@ -54,8 +54,8 @@ Metadata Base() {
 }
 
 void AddF32(Tensors& tensors, const std::string& name, std::size_t elements) {
-  tensors[name] = TensorSpec{{elements}, GgmlType::kF32,
-                             std::vector<std::uint8_t>(4 * elements, 0)};
+  tensors[name] = TensorSpec{
+      {elements}, GgmlType::kF32, std::vector<std::uint8_t>(4 * elements, 0)};
 }
 
 void AddLayer(Tensors& tensors, const std::string& prefix, bool full) {
@@ -151,7 +151,8 @@ void MissingTensor() {
 void NormMustBeFloat() {
   Tensors tensors = FullTensors();
   tensors["blk.1.attn_norm.weight"] =
-      TensorSpec{{kHidden}, GgmlType::kQ8_0,
+      TensorSpec{{kHidden},
+                 GgmlType::kQ8_0,
                  std::vector<std::uint8_t>(34 * (kHidden / 32), 0)};
   std::string error;
   Require(!Bind(Base(), tensors, &error).has_value(), "packed norm bound");
@@ -162,7 +163,8 @@ void NormMustBeFloat() {
 void ShapeMismatch() {
   Tensors tensors = FullTensors();
   tensors["blk.3.attn_q.weight"] =
-      TensorSpec{{kHidden * 128}, GgmlType::kF32,
+      TensorSpec{{kHidden * 128},
+                 GgmlType::kF32,
                  std::vector<std::uint8_t>(4 * kHidden * 128, 0)};
   std::string error;
   Require(!Bind(Base(), tensors, &error).has_value(), "short tensor bound");

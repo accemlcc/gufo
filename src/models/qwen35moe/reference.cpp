@@ -201,17 +201,17 @@ void Reference::LinearLayer(std::uint32_t layer, const float* x,
   for (std::size_t r = 0; r < rows; ++r) {
     // Depthwise causal convolution over the raw projection, then SiLU.
     for (std::size_t ch = 0; ch < qkv_dim; ++ch) {
-      const std::uint8_t* wch = static_cast<const std::uint8_t*>(
-                                    w.ssm_conv1d.data) +
-                                ch * conv_row_bytes;
+      const std::uint8_t* wch =
+          static_cast<const std::uint8_t*>(w.ssm_conv1d.data) +
+          ch * conv_row_bytes;
       std::vector<float> filt(k4);
       DequantRow(w.ssm_conv1d.type, wch, filt.data(), k4);
       double acc = 0.0;
       for (std::size_t i = 0; i < k4 - 1; ++i) {
         acc += static_cast<double>(filt[i]) * st.conv[ch * (k4 - 1) + i];
-        st.conv[ch * (k4 - 1) + i] =
-            (i + 1 < k4 - 1) ? st.conv[ch * (k4 - 1) + i + 1]
-                             : qkv[r * qkv_dim + ch];
+        st.conv[ch * (k4 - 1) + i] = (i + 1 < k4 - 1)
+                                         ? st.conv[ch * (k4 - 1) + i + 1]
+                                         : qkv[r * qkv_dim + ch];
       }
       acc += static_cast<double>(filt[k4 - 1]) * qkv[r * qkv_dim + ch];
       mixed[ch] = static_cast<float>(Silu(acc));
@@ -222,10 +222,8 @@ void Reference::LinearLayer(std::uint32_t layer, const float* x,
     for (std::size_t h = 0; h < k_heads; ++h) {
       double nq = 0.0, nk = 0.0;
       for (std::size_t i = 0; i < head_k; ++i) {
-        nq += static_cast<double>(mq[h * head_k + i]) *
-              mq[h * head_k + i];
-        nk += static_cast<double>(mk[h * head_k + i]) *
-              mk[h * head_k + i];
+        nq += static_cast<double>(mq[h * head_k + i]) * mq[h * head_k + i];
+        nk += static_cast<double>(mk[h * head_k + i]) * mk[h * head_k + i];
       }
       // L2 norm with the epsilon inside the sum, then the 1/sqrt(head_dim)
       // query scale: x / sqrt(sum(x^2) + eps) / sqrt(head_dim).
@@ -306,8 +304,8 @@ void Reference::LinearLayer(std::uint32_t layer, const float* x,
   (void)rows;
 }
 
-void Reference::FullLayer(std::uint32_t layer, const float* x,
-                          std::size_t rows, float* out) {
+void Reference::FullLayer(std::uint32_t layer, const float* x, std::size_t rows,
+                          float* out) {
   const Config& c = weights_.config;
   const LayerWeights& w = weights_.layers[layer];
   const std::size_t d = c.hidden_size;
@@ -371,9 +369,9 @@ void Reference::FullLayer(std::uint32_t layer, const float* x,
       std::vector<double> scores(hi);
       double best = -INFINITY;
       for (std::uint32_t p = 0; p < hi; ++p) {
-        const float* k =
-            keys.data() + static_cast<std::size_t>(p) * kv_heads * dim +
-            kvh * dim;
+        const float* k = keys.data() +
+                         static_cast<std::size_t>(p) * kv_heads * dim +
+                         kvh * dim;
         double s = 0.0;
         for (std::size_t i = 0; i < dim; ++i) {
           s += static_cast<double>(qh[i]) * k[i];
@@ -388,9 +386,9 @@ void Reference::FullLayer(std::uint32_t layer, const float* x,
       }
       std::vector<double> acc(dim, 0.0);
       for (std::uint32_t p = 0; p < hi; ++p) {
-        const float* v =
-            values.data() + static_cast<std::size_t>(p) * kv_heads * dim +
-            kvh * dim;
+        const float* v = values.data() +
+                         static_cast<std::size_t>(p) * kv_heads * dim +
+                         kvh * dim;
         const double weight = scores[p] / total;
         for (std::size_t i = 0; i < dim; ++i) {
           acc[i] += weight * v[i];
@@ -432,18 +430,16 @@ void Reference::Mixture(const LayerWeights& w, const float* x, std::size_t rows,
     }
     double total = 0.0;
     for (std::size_t i = 0; i < e; ++i) {
-      probs[i] =
-          static_cast<float>(std::exp(logits[r * e + i] - best));
+      probs[i] = static_cast<float>(std::exp(logits[r * e + i] - best));
       total += probs[i];
     }
     for (std::size_t i = 0; i < e; ++i) {
       probs[i] = static_cast<float>(probs[i] / total);
       order[i] = i;
     }
-    std::stable_sort(order.begin(), order.end(), [&](std::size_t a,
-                                                     std::size_t b) {
-      return probs[a] > probs[b];
-    });
+    std::stable_sort(
+        order.begin(), order.end(),
+        [&](std::size_t a, std::size_t b) { return probs[a] > probs[b]; });
     double wsum = 0.0;
     for (std::size_t j = 0; j < c.experts_used; ++j) {
       wsum += probs[order[j]];

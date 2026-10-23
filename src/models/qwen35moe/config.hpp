@@ -37,10 +37,10 @@ struct Config {
   std::uint32_t context_length{0};  ///< 262144.
   float rms_eps{1e-6F};
 
-  std::uint32_t num_heads{0};        ///< 16 (35B) or 32 (122B).
-  std::uint32_t num_kv_heads{0};     ///< 2.
-  std::uint32_t head_dim{0};         ///< 256.
-  std::uint32_t rotary_dim{0};       ///< 64, the rotated prefix.
+  std::uint32_t num_heads{0};     ///< 16 (35B) or 32 (122B).
+  std::uint32_t num_kv_heads{0};  ///< 2.
+  std::uint32_t head_dim{0};      ///< 256.
+  std::uint32_t rotary_dim{0};    ///< 64, the rotated prefix.
   std::array<std::uint32_t, 4> rope_sections{11, 11, 10, 0};
   float rope_theta{1e7F};
 
@@ -49,11 +49,11 @@ struct Config {
   std::vector<std::uint8_t> recurrent;
 
   // Gated DeltaNet (linear) layers.
-  std::uint32_t ssm_conv_kernel{0};    ///< 4.
-  std::uint32_t ssm_state_size{0};     ///< 128, both head dims.
-  std::uint32_t ssm_group_count{0};    ///< 16 key heads.
+  std::uint32_t ssm_conv_kernel{0};     ///< 4.
+  std::uint32_t ssm_state_size{0};      ///< 128, both head dims.
+  std::uint32_t ssm_group_count{0};     ///< 16 key heads.
   std::uint32_t ssm_time_step_rank{0};  ///< 64 value heads (35B: 32).
-  std::uint32_t ssm_inner_size{0};     ///< 8192 (35B: 4096), the value dim.
+  std::uint32_t ssm_inner_size{0};      ///< 8192 (35B: 4096), the value dim.
 
   // Mixture of experts, in every trunk layer.
   std::uint32_t num_experts{0};      ///< 256.

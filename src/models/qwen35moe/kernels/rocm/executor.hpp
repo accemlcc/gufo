@@ -47,7 +47,7 @@ struct SsmState {
 /// Runs the Qwen3.5-MoE graph on device-resident weights. Scratch is shared
 /// by every session of one executor and calls are serialized on one stream.
 class Executor {
- public:
+public:
   /// `max_rows` bounds one forward (the prefill chunk), `max_logit_rows`
   /// bounds how many rows of one forward ask for logits.
   Executor(const DeviceModel& model, std::uint32_t max_rows,
@@ -58,8 +58,8 @@ class Executor {
 
   /// Cache bytes for one session: the full layers' K/V at `max_context`
   /// positions plus the SSM conv history and recurrent state.
-  [[nodiscard]] static std::size_t CacheBytes(const Config& config,
-                                             std::uint32_t max_context) noexcept;
+  [[nodiscard]] static std::size_t CacheBytes(
+      const Config& config, std::uint32_t max_context) noexcept;
 
   [[nodiscard]] std::unique_ptr<KvCache> CreateCache(
       std::uint32_t max_context, std::string* error_msg = nullptr) const;
@@ -82,7 +82,7 @@ class Executor {
   [[nodiscard]] std::uint32_t max_rows() const noexcept { return max_rows_; }
   [[nodiscard]] const DeviceModel& model() const noexcept { return model_; }
 
- private:
+private:
   void ForwardLayer(KvCache& cache, SsmState& ssm, const DeviceLayer& l,
                     std::uint32_t layer_idx, const float* x,
                     std::uint32_t count, std::uint32_t first_position,

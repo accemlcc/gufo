@@ -72,8 +72,7 @@ void LaunchSsm(const SsmArgs& args, hipStream_t stream) {
           args.conv_out, args.recurrent, args.alpha, args.beta, args.ssm_a,
           args.ssm_dt, args.ssm_norm, args.gate, args.out, 0,
           args.num_key_heads, args.num_heads, args.key_dim, args.value_dim,
-          no_replay, args.rows, args.qkv_dim, args.num_heads,
-          args.value_dim);
+          no_replay, args.rows, args.qkv_dim, args.num_heads, args.value_dim);
 }
 
 }  // namespace gufo::models::qwen35moe::rocm

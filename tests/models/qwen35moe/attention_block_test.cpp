@@ -121,7 +121,9 @@ void Rope(float* head, std::size_t dim, std::uint32_t position, float theta) {
   }
 }
 
-double Sigmoid(double x) { return 1.0 / (1.0 + std::exp(-x)); }
+double Sigmoid(double x) {
+  return 1.0 / (1.0 + std::exp(-x));
+}
 
 /// CPU full-attention block, mirroring Reference::FullLayer at position zero
 /// with a fresh cache.
@@ -213,8 +215,7 @@ void CpuAttn(const m::ModelWeights& w, const m::LayerWeights& l,
       std::vector<double> acc(dim, 0.0);
       for (std::uint32_t p = 0; p <= r; ++p) {
         const float* vv = values.data() +
-                                (static_cast<std::size_t>(p) * kv_heads + kvh) *
-                                    dim;
+                          (static_cast<std::size_t>(p) * kv_heads + kvh) * dim;
         const double weight = scores[p] / total;
         for (std::size_t i = 0; i < dim; ++i) {
           acc[i] += weight * vv[i];
@@ -288,8 +289,7 @@ void AttnBlock(const m::ModelWeights& weights, k::DeviceModel& device,
   std::int32_t* dgroups = Device(groups);
   auto dense = [&](const k::DeviceTensor& w, const float* in, float* y,
                    std::uint32_t mm, std::uint32_t kk) {
-    if (!k::GroupedGemv({w.quant(), w.data, dgroups, 1, in, y, rows, 1, mm,
-                         kk},
+    if (!k::GroupedGemv({w.quant(), w.data, dgroups, 1, in, y, rows, 1, mm, kk},
                         stream)) {
       throw std::invalid_argument("no grouped kernel");
     }
@@ -342,8 +342,8 @@ void AttnBlock(const m::ModelWeights& weights, k::DeviceModel& device,
   got = Read(dgot, got);
   HIP_CHECK(hipStreamDestroy(stream));
   const double worst = MaxAbsDiff(got, want);
-  Report(("attn.block_layer" + std::to_string(layer_idx)).c_str(),
-         worst < 1e-3, "worst=" + std::to_string(worst));
+  Report(("attn.block_layer" + std::to_string(layer_idx)).c_str(), worst < 1e-3,
+         "worst=" + std::to_string(worst));
 }
 
 int main() {

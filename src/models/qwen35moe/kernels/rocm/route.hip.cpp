@@ -252,8 +252,7 @@ __device__ __forceinline__ bool Better(double a, std::int32_t ia, double b,
 /// experts in order. A row's numbers therefore depend on its own logits only.
 __global__ void __launch_bounds__(kSelectThreads)
     SelectKernel(const float* __restrict__ logits,
-                 std::int32_t* __restrict__ ids,
-                 float* __restrict__ weights,
+                 std::int32_t* __restrict__ ids, float* __restrict__ weights,
                  std::uint32_t* __restrict__ counts,
                  std::int32_t* __restrict__ groups, std::uint32_t rows,
                  std::uint32_t experts, std::uint32_t used) {
@@ -348,8 +347,7 @@ __global__ void __launch_bounds__(kSelectThreads)
       const float other = __shfl_xor(peak, static_cast<int>(m), kWave);
       peak = peak > other ? peak : other;
     }
-    const double e =
-        lane < used ? exp(static_cast<double>(mine) - peak) : 0.0;
+    const double e = lane < used ? exp(static_cast<double>(mine) - peak) : 0.0;
     double total = e;
     for (std::uint32_t m = kWave / 2; m > 0; m >>= 1) {
       total += __shfl_xor(total, static_cast<int>(m), kWave);
@@ -522,8 +520,8 @@ void MoeRoute(const MoeRouteArgs& args, hipStream_t stream) {
     throw std::invalid_argument(
         "MoeRoute needs a hidden size that is a multiple of 128");
   }
-  if (args.x == nullptr || args.router == nullptr ||
-      args.ids == nullptr || args.weights == nullptr) {
+  if (args.x == nullptr || args.router == nullptr || args.ids == nullptr ||
+      args.weights == nullptr) {
     throw std::invalid_argument(
         "MoeRoute needs the input, the router, ids and weights");
   }

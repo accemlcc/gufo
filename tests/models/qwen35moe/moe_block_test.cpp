@@ -136,10 +136,9 @@ void CpuMoe(const m::ModelWeights& w, const m::LayerWeights& l,
       probs[j] /= total;
       order[j] = j;
     }
-    std::stable_sort(order.begin(), order.end(),
-                     [&](std::size_t a, std::size_t b) {
-                       return probs[a] > probs[b];
-                     });
+    std::stable_sort(
+        order.begin(), order.end(),
+        [&](std::size_t a, std::size_t b) { return probs[a] > probs[b]; });
     double wsum = 0.0;
     for (std::size_t j = 0; j < u; ++j) {
       wsum += probs[order[j]];
@@ -150,20 +149,16 @@ void CpuMoe(const m::ModelWeights& w, const m::LayerWeights& l,
       const std::size_t ex = order[j];
       const double wt = probs[ex] / wsum;
       // gate[e][i] / up[e][i]: row i of expert e; down[e][o] similarly.
-      const std::size_t rbg =
-          q::EncodedSizeBytes(l.ffn_gate_exps.type, d);
-      const std::size_t rbu =
-          q::EncodedSizeBytes(l.ffn_up_exps.type, d);
-      const std::size_t rbd =
-          q::EncodedSizeBytes(l.ffn_down_exps.type, f);
+      const std::size_t rbg = q::EncodedSizeBytes(l.ffn_gate_exps.type, d);
+      const std::size_t rbu = q::EncodedSizeBytes(l.ffn_up_exps.type, d);
+      const std::size_t rbd = q::EncodedSizeBytes(l.ffn_down_exps.type, f);
       std::vector<double> avt(f);
       for (std::size_t i = 0; i < f; ++i) {
-        const auto* gb = static_cast<const std::uint8_t*>(
-                             l.ffn_gate_exps.data) +
-                         (ex * f + i) * rbg;
-        const auto* ub =
-            static_cast<const std::uint8_t*>(l.ffn_up_exps.data) +
-            (ex * f + i) * rbu;
+        const auto* gb =
+            static_cast<const std::uint8_t*>(l.ffn_gate_exps.data) +
+            (ex * f + i) * rbg;
+        const auto* ub = static_cast<const std::uint8_t*>(l.ffn_up_exps.data) +
+                         (ex * f + i) * rbu;
         if (l.ffn_gate_exps.type == gufo::core::GgmlType::kQ5_K) {
           q::DequantizeQ5_K(gb, grow.data(), d);
         } else if (l.ffn_gate_exps.type == gufo::core::GgmlType::kQ4_K) {
@@ -218,15 +213,13 @@ void CpuMoe(const m::ModelWeights& w, const m::LayerWeights& l,
       // NOTE: shared gate/up/down are [s][d] / [d][s] dense matrices.
       std::vector<double> sa(s, 0.0);
       const std::size_t rbg = q::EncodedSizeBytes(l.ffn_gate_shexp.type, d);
-      const std::size_t rbu =
-          q::EncodedSizeBytes(l.ffn_up_shexp.type, d);
+      const std::size_t rbu = q::EncodedSizeBytes(l.ffn_up_shexp.type, d);
       std::vector<float> gr(d), ur(d);
       for (std::size_t i = 0; i < s; ++i) {
-        const auto* gb = static_cast<const std::uint8_t*>(
-                             l.ffn_gate_shexp.data) +
-                         i * rbg;
-        const auto* ub = static_cast<const std::uint8_t*>(l.ffn_up_shexp.data) +
-                         i * rbu;
+        const auto* gb =
+            static_cast<const std::uint8_t*>(l.ffn_gate_shexp.data) + i * rbg;
+        const auto* ub =
+            static_cast<const std::uint8_t*>(l.ffn_up_shexp.data) + i * rbu;
         if (l.ffn_gate_shexp.type == gufo::core::GgmlType::kQ5_K) {
           q::DequantizeQ5_K(gb, gr.data(), d);
         } else if (l.ffn_gate_shexp.type == gufo::core::GgmlType::kQ4_K) {
@@ -256,8 +249,7 @@ void CpuMoe(const m::ModelWeights& w, const m::LayerWeights& l,
         }
         sa[i] = gg / (1.0 + std::exp(-gg)) * uu;
       }
-      const auto* gv0 =
-          static_cast<const float*>(l.ffn_gate_inp_shexp.data);
+      const auto* gv0 = static_cast<const float*>(l.ffn_gate_inp_shexp.data);
       double dot = 0.0;
       for (std::size_t i = 0; i < d; ++i) {
         dot += gv0[i] * xn[r * d + i];
@@ -265,11 +257,10 @@ void CpuMoe(const m::ModelWeights& w, const m::LayerWeights& l,
       const double gs = 1.0 / (1.0 + std::exp(-dot));
       for (std::size_t o = 0; o < d; ++o) {
         std::vector<float> dr(s);
-        const std::size_t rb = q::EncodedSizeBytes(
-            l.ffn_down_shexp.type, static_cast<std::size_t>(s));
-        const auto* base = static_cast<const std::uint8_t*>(
-                               l.ffn_down_shexp.data) +
-                           o * rb;
+        const std::size_t rb = q::EncodedSizeBytes(l.ffn_down_shexp.type,
+                                                   static_cast<std::size_t>(s));
+        const auto* base =
+            static_cast<const std::uint8_t*>(l.ffn_down_shexp.data) + o * rb;
         if (l.ffn_down_shexp.type == gufo::core::GgmlType::kQ6_K) {
           q::DequantizeQ6_K(base, dr.data(), s);
         } else if (l.ffn_down_shexp.type == gufo::core::GgmlType::kQ4_K) {
@@ -348,8 +339,8 @@ void MoeBlock(std::uint32_t layer_idx, std::uint32_t rows) {
   std::uint32_t* dcounts = Device(counts);
   std::vector<std::int32_t> groups(k::GroupTableInts(e), -1);
   std::int32_t* dgroups = Device(groups);
-  k::MoeRoute({dhnorm, dl.ffn_gate_inp.f32(), nullptr, dids, dweights,
-               dcounts, dgroups, rows, static_cast<std::uint32_t>(d),
+  k::MoeRoute({dhnorm, dl.ffn_gate_inp.f32(), nullptr, dids, dweights, dcounts,
+               dgroups, rows, static_cast<std::uint32_t>(d),
                static_cast<std::uint32_t>(e), static_cast<std::uint32_t>(u)},
               stream);
   const std::size_t f = weights->config.expert_ffn_size;
@@ -362,10 +353,10 @@ void MoeBlock(std::uint32_t layer_idx, std::uint32_t rows) {
   float* drouted = Device(routed);
   auto proj = [&](const k::DeviceTensor& w, const float* in, float* y,
                   std::uint32_t m, std::uint32_t kk, std::uint32_t spr) {
-    if (!k::GroupedGemv({w.quant(), w.data, dgroups,
-                         static_cast<std::uint32_t>(e), in, y, rows, spr, m,
-                         kk},
-                        stream)) {
+    if (!k::GroupedGemv(
+            {w.quant(), w.data, dgroups, static_cast<std::uint32_t>(e), in, y,
+             rows, spr, m, kk},
+            stream)) {
       throw std::invalid_argument("no grouped kernel");
     }
   };
@@ -393,9 +384,8 @@ void MoeBlock(std::uint32_t layer_idx, std::uint32_t rows) {
   std::int32_t* dshgroups = Device(shgroups);
   auto dense = [&](const k::DeviceTensor& w, const float* in, float* y,
                    std::uint32_t m, std::uint32_t kk) {
-    if (!k::GroupedGemv({w.quant(), w.data, dshgroups, 1, in, y, rows, 1, m,
-                         kk},
-                        stream)) {
+    if (!k::GroupedGemv(
+            {w.quant(), w.data, dshgroups, 1, in, y, rows, 1, m, kk}, stream)) {
       throw std::invalid_argument("no grouped kernel");
     }
   };
@@ -409,8 +399,7 @@ void MoeBlock(std::uint32_t layer_idx, std::uint32_t rows) {
   // gate the shared output on the host (one dot per row)
   shout = Read(dshout, shout);
   HIP_CHECK(hipDeviceSynchronize());
-  const auto* gv =
-      static_cast<const float*>(l.ffn_gate_inp_shexp.data);
+  const auto* gv = static_cast<const float*>(l.ffn_gate_inp_shexp.data);
   std::vector<float> hnorm_host = Read(dhnorm, hnorm);
   for (std::uint32_t r = 0; r < rows; ++r) {
     double dot = 0.0;
@@ -441,8 +430,7 @@ void MoeBlock(std::uint32_t layer_idx, std::uint32_t rows) {
   x = Read(dx2, x);
   HIP_CHECK(hipStreamDestroy(stream));
   const double worst = MaxAbsDiff(x, want);
-  Report(("moe.block_layer" + std::to_string(layer_idx)).c_str(),
-         worst < 1e-3,
+  Report(("moe.block_layer" + std::to_string(layer_idx)).c_str(), worst < 1e-3,
          "max_abs=" + std::to_string(worst));
 }
 

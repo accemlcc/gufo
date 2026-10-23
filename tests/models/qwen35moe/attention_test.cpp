@@ -3,6 +3,8 @@
 // crafted key/value heads that tell the groups apart.
 //
 // Needs a gfx1151 device; without one the check skips with 77.
+#include "src/models/qwen35moe/kernels/rocm/attention.hpp"
+
 #include <hip/hip_runtime.h>
 
 #include <cmath>
@@ -15,7 +17,6 @@
 #include <vector>
 
 #include "src/core/hip/hip_utils.hpp"
-#include "src/models/qwen35moe/kernels/rocm/attention.hpp"
 
 namespace k = gufo::models::qwen35moe::rocm;
 
@@ -67,8 +68,7 @@ std::vector<float> CpuAttention(const std::vector<float>& q,
       for (std::uint32_t p = 0; p < hi; ++p) {
         double s = 0.0;
         for (std::uint32_t i = 0; i < kDim; ++i) {
-          s += static_cast<double>(
-                   q[(r * kHeads + h) * kDim + i]) *
+          s += static_cast<double>(q[(r * kHeads + h) * kDim + i]) *
                kc[(kvh * kCtx + p) * kDim + i];
         }
         s *= kScale;
@@ -83,8 +83,8 @@ std::vector<float> CpuAttention(const std::vector<float>& q,
       for (std::uint32_t i = 0; i < kDim; ++i) {
         double acc = 0.0;
         for (std::uint32_t p = 0; p < hi; ++p) {
-          acc += std::exp(sc[p] - best) / total *
-                 vc[(kvh * kCtx + p) * kDim + i];
+          acc +=
+              std::exp(sc[p] - best) / total * vc[(kvh * kCtx + p) * kDim + i];
         }
         out[(r * kHeads + h) * kDim + i] = static_cast<float>(acc);
       }

@@ -33,7 +33,7 @@ class Session;
 /// A loaded model: the artifact mapped, its weights resident on the device.
 /// One executor serves every session; a forward is serialized on its stream.
 class Model {
- public:
+public:
   ~Model();
   Model(const Model&) = delete;
   Model& operator=(const Model&) = delete;
@@ -65,7 +65,7 @@ class Model {
     return executor_;
   }
 
- private:
+private:
   Model() = default;
 
   ModelOptions options_;
@@ -76,7 +76,7 @@ class Model {
 };
 
 class Session {
- public:
+public:
   Session(const Model& model, std::unique_ptr<rocm::KvCache> cache,
           std::unique_ptr<rocm::SsmState> ssm);
   Session(const Session&) = delete;
@@ -101,7 +101,7 @@ class Session {
     return static_cast<std::uint32_t>(tokens_.size());
   }
 
- private:
+private:
   const Model& model_;
   std::unique_ptr<rocm::KvCache> cache_;
   std::unique_ptr<rocm::SsmState> ssm_;

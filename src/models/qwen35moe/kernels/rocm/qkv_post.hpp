@@ -15,23 +15,23 @@ namespace gufo::models::qwen35moe::rocm {
 /// One wave per (row, head slot); slots are the query heads, then the key
 /// heads, then the value heads.
 struct QkvPostArgs {
-  const float* qg;  ///< [rows][2 * heads * dim], packed Q and gate
-  const float* k;   ///< [rows][kv_heads * dim]
-  const float* v;   ///< [rows][kv_heads * dim]
+  const float* qg;      ///< [rows][2 * heads * dim], packed Q and gate
+  const float* k;       ///< [rows][kv_heads * dim]
+  const float* v;       ///< [rows][kv_heads * dim]
   const float* q_norm;  ///< [dim], shared by every query head
   const float* k_norm;  ///< [dim], shared by every key head
-  float* q_out;     ///< [rows][heads][dim], normed and rotated queries
-  float* gate_out;  ///< [rows][heads * dim], the raw gate halves
-  float* k_cache;   ///< [kv_heads][max_context][dim], F32
-  float* v_cache;   ///< [kv_heads][max_context][dim], F32
+  float* q_out;         ///< [rows][heads][dim], normed and rotated queries
+  float* gate_out;      ///< [rows][heads * dim], the raw gate halves
+  float* k_cache;       ///< [kv_heads][max_context][dim], F32
+  float* v_cache;       ///< [kv_heads][max_context][dim], F32
   std::uint32_t rows;
   std::uint32_t first_position;  ///< cache slot of row 0
   std::uint32_t max_context;     ///< cache capacity in positions
   std::uint32_t heads;
   std::uint32_t kv_heads;
-  std::uint32_t dim;          ///< head dim (256)
-  std::uint32_t rotary_dim;   ///< rotated prefix (64)
-  double theta_scale;         ///< pow(rope_theta, -2 / rotary_dim)
+  std::uint32_t dim;         ///< head dim (256)
+  std::uint32_t rotary_dim;  ///< rotated prefix (64)
+  double theta_scale;        ///< pow(rope_theta, -2 / rotary_dim)
   float eps;
 };
 void QkvPost(const QkvPostArgs& args, hipStream_t stream);

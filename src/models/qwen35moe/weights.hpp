@@ -55,9 +55,9 @@ struct LayerWeights {
   TensorRef attn_norm;
 
   // Full attention (every `full_attention_interval`-th trunk layer).
-  TensorRef attn_q;  ///< [hidden, 2 * heads * head_dim]: query, then gate.
-  TensorRef attn_k;  ///< [hidden, kv_heads * head_dim].
-  TensorRef attn_v;  ///< [hidden, kv_heads * head_dim].
+  TensorRef attn_q;       ///< [hidden, 2 * heads * head_dim]: query, then gate.
+  TensorRef attn_k;       ///< [hidden, kv_heads * head_dim].
+  TensorRef attn_v;       ///< [hidden, kv_heads * head_dim].
   TensorRef attn_output;  ///< [heads * head_dim, hidden].
   TensorRef attn_q_norm;  ///< [head_dim], zero-centered RMSNorm.
   TensorRef attn_k_norm;  ///< [head_dim], zero-centered RMSNorm.
@@ -74,7 +74,7 @@ struct LayerWeights {
   TensorRef ssm_out;     ///< [value_dim, hidden].
 
   // Mixture, in every trunk layer.
-  TensorRef ffn_gate_inp;  ///< [hidden, experts] F32 router matrix.
+  TensorRef ffn_gate_inp;        ///< [hidden, experts] F32 router matrix.
   TensorRef ffn_gate_inp_shexp;  ///< [hidden] F32 shared-expert gate vector.
   TensorRef ffn_gate_shexp;      ///< [hidden, shared_ff].
   TensorRef ffn_up_shexp;        ///< [hidden, shared_ff].
@@ -91,9 +91,9 @@ struct LayerWeights {
 /// path lands; a file without it fails here rather than later.
 struct MtpWeights {
   LayerWeights block;
-  TensorRef eh_proj;  ///< [2 * hidden, hidden].
-  TensorRef enorm;    ///< [hidden].
-  TensorRef hnorm;    ///< [hidden].
+  TensorRef eh_proj;           ///< [2 * hidden, hidden].
+  TensorRef enorm;             ///< [hidden].
+  TensorRef hnorm;             ///< [hidden].
   TensorRef shared_head_norm;  ///< [hidden].
 };
 

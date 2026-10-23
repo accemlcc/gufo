@@ -46,8 +46,8 @@ std::unique_ptr<Session> Model::CreateSession(std::string* error_msg) const {
   if (!ssm) {
     return nullptr;
   }
-  return std::unique_ptr<Session>(new Session(*this, std::move(cache),
-                                              std::move(ssm)));
+  return std::unique_ptr<Session>(
+      new Session(*this, std::move(cache), std::move(ssm)));
 }
 
 Session::Session(const Model& model, std::unique_ptr<rocm::KvCache> cache,
@@ -79,8 +79,8 @@ void Session::Reset() noexcept {
   tokens_.clear();
   logits_.clear();
   logit_rows_.clear();
-  auto fresh_cache = model_.executor()->CreateCache(model_.max_context(),
-                                                    nullptr);
+  auto fresh_cache =
+      model_.executor()->CreateCache(model_.max_context(), nullptr);
   if (fresh_cache) {
     cache_ = std::move(fresh_cache);
   }

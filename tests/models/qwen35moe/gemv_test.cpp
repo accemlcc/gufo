@@ -121,10 +121,9 @@ Built Build(k::WeightFormat format, std::uint32_t experts, std::uint32_t m,
     // exponent bit becomes an infinity.
     const std::size_t nblocks =
         format == k::WeightFormat::kQ8_0 ? kdim / 32 : kdim / 256;
-    const std::size_t bb =
-        format == k::WeightFormat::kQ8_0
-            ? sizeof(q::block_q8_0)
-            : row / (kdim / 256);
+    const std::size_t bb = format == k::WeightFormat::kQ8_0
+                               ? sizeof(q::block_q8_0)
+                               : row / (kdim / 256);
     for (std::uint32_t b = 0; b < nblocks; ++b) {
       std::uint8_t* p =
           w.bytes.data() + r * row + static_cast<std::size_t>(b) * bb;
@@ -191,7 +190,7 @@ struct Case {
 };
 
 std::string CaseName(const Case& c) {
-  const char* f = c.format == k::WeightFormat::kQ4_K      ? "q4k"
+  const char* f = c.format == k::WeightFormat::kQ4_K     ? "q4k"
                   : c.format == k::WeightFormat::kQ5_K   ? "q5k"
                   : c.format == k::WeightFormat::kQ8_0   ? "q8_0"
                   : c.format == k::WeightFormat::kIQ4_XS ? "iq4_xs"
@@ -216,8 +215,7 @@ void RunCase(const Case& c, std::mt19937& rng, bool& ok, std::string& detail) {
   for (std::uint32_t gi = 0; gi < ngroups; ++gi) {
     std::int32_t* g = groups.data() + 1 + gi * k::kGroupInts;
     g[0] = c.table[gi][0];
-    const std::uint32_t n =
-        static_cast<std::uint32_t>(c.table[gi].size()) - 1;
+    const std::uint32_t n = static_cast<std::uint32_t>(c.table[gi].size()) - 1;
     g[1] = static_cast<std::int32_t>(n);
     for (std::uint32_t s = 0; s < n; ++s) {
       g[2 + s] = c.table[gi][1 + s];
@@ -241,11 +239,9 @@ void RunCase(const Case& c, std::mt19937& rng, bool& ok, std::string& detail) {
             static_cast<std::uint32_t>(g[s]) / c.slots_per_row;
         for (std::uint32_t i = 0; i < c.m; ++i) {
           const float* wrow = w.decoded.data() +
-                              (static_cast<std::size_t>(e) * c.m + i) *
-                                  c.kdim;
-          want[static_cast<std::size_t>(slot) * c.m + i] =
-              Dot(wrow, x.data() + static_cast<std::size_t>(r) * c.kdim,
-                  c.kdim);
+                              (static_cast<std::size_t>(e) * c.m + i) * c.kdim;
+          want[static_cast<std::size_t>(slot) * c.m + i] = Dot(
+              wrow, x.data() + static_cast<std::size_t>(r) * c.kdim, c.kdim);
         }
       }
     }
@@ -290,9 +286,8 @@ void RunCase(const Case& c, std::mt19937& rng, bool& ok, std::string& detail) {
 void DenseAndGrouped() {
   std::mt19937 rng(31);
   const k::WeightFormat formats[5] = {
-      k::WeightFormat::kQ4_K, k::WeightFormat::kQ5_K,
-      k::WeightFormat::kQ6_K, k::WeightFormat::kQ8_0,
-      k::WeightFormat::kIQ4_XS};
+      k::WeightFormat::kQ4_K, k::WeightFormat::kQ5_K, k::WeightFormat::kQ6_K,
+      k::WeightFormat::kQ8_0, k::WeightFormat::kIQ4_XS};
   for (k::WeightFormat f : formats) {
     // Dense single-group, one row and sixteen.
     for (std::uint32_t rows : {1U, 16U}) {
@@ -381,7 +376,8 @@ void BitInvariance() {
   Report("gemv.bit_invariance", ok, "q5k slot identical solo and grouped");
 }
 
-void Refusals() {  bool ok = true;
+void Refusals() {
+  bool ok = true;
   k::GroupedGemvArgs args{};
   args.format = k::WeightFormat::kQ5_K;
   args.rows = 1;
@@ -415,16 +411,15 @@ void Embed() {
   constexpr std::uint32_t kVocab = 64;
   constexpr std::uint32_t kN = 512;
   for (k::WeightFormat format :
-       {k::WeightFormat::kQ4_K, k::WeightFormat::kQ5_K,
-        k::WeightFormat::kQ6_K, k::WeightFormat::kQ8_0,
-        k::WeightFormat::kIQ4_XS}) {
+       {k::WeightFormat::kQ4_K, k::WeightFormat::kQ5_K, k::WeightFormat::kQ6_K,
+        k::WeightFormat::kQ8_0, k::WeightFormat::kIQ4_XS}) {
     Built w = Build(format, 1, kVocab, kN, rng);
     const std::uint32_t rows = 5;
     std::vector<std::int32_t> tokens = {0, 7, 63, 1, 32};
     std::vector<float> want(rows * kN);
     for (std::uint32_t r = 0; r < rows; ++r) {
-      const float* src = w.decoded.data() +
-                         static_cast<std::size_t>(tokens[r]) * kN;
+      const float* src =
+          w.decoded.data() + static_cast<std::size_t>(tokens[r]) * kN;
       std::memcpy(want.data() + r * kN, src, kN * sizeof(float));
     }
     std::vector<float> got(rows * kN, kPoison);
@@ -451,10 +446,9 @@ void Embed() {
                        : format == k::WeightFormat::kQ5_K   ? "q5k"
                        : format == k::WeightFormat::kQ8_0   ? "q8_0"
                        : format == k::WeightFormat::kIQ4_XS ? "iq4_xs"
-                                                           : "q6k";
+                                                            : "q6k";
     const double worst = MaxAbsDiff(got, want);
-    Report(("gemv.embed_" + std::string(name)).c_str(),
-           !threw && worst < 1e-6,
+    Report(("gemv.embed_" + std::string(name)).c_str(), !threw && worst < 1e-6,
            "worst=" + std::to_string(worst));
   }
 }

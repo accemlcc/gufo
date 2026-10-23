@@ -218,9 +218,9 @@ __device__ __forceinline__ void DecodeQ4K(const std::uint8_t* block, int p,
 /// bit of the sixteen values of half h. The scale/min bytes sit where Q4_K's
 /// do, so the same header unpacking serves both.
 __device__ __forceinline__ void Dequant16Five(const std::uint8_t* q, int shift,
-                                             const std::uint8_t* qh, int bit,
-                                             float scale, float offset,
-                                             float* out) {
+                                              const std::uint8_t* qh, int bit,
+                                              float scale, float offset,
+                                              float* out) {
 #pragma unroll
   for (int i = 0; i < 16; ++i) {
     const std::uint32_t v =
@@ -230,7 +230,7 @@ __device__ __forceinline__ void Dequant16Five(const std::uint8_t* q, int shift,
 }
 
 __device__ __forceinline__ void DecodeQ5K(const std::uint8_t* block, int p,
-                                         float (&w)[64]) {
+                                          float (&w)[64]) {
   const uint4 header = *reinterpret_cast<const uint4*>(block);
   const float d = HalfBits(header.x);
   const float dmin = HalfBits(header.x >> 16);
@@ -255,7 +255,7 @@ __device__ __forceinline__ void DecodeQ5K(const std::uint8_t* block, int p,
 // half scale and eight 4-wide quants. No second plane, no offset: the stored
 // integers are the values up to the block scale.
 __device__ __forceinline__ void DecodeQ80(const std::uint8_t* block, int t,
-                                         float (&w)[64]) {
+                                          float (&w)[64]) {
   for (int h = 0; h < 2; ++h) {
     const std::uint8_t* b = block + (t * 2 + h) * 34;
     const float d = Half(b);
@@ -270,8 +270,7 @@ __device__ __forceinline__ void DecodeQ80(const std::uint8_t* block, int t,
 /// The shared non-linear 4-bit codebook IQ4_XS indexes: the values enter the
 /// dot product straight, the super-scale carries the magnitude.
 __constant__ static const std::int8_t kIq4XsValues[16] = {
-    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13,
-    25,   38,   53,  69,  89,  113};
+    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};
 
 /// Q6_K task t = 2 n + h: ql bytes [64 n + 16 h, +16) and
 /// [64 n + 32 + 16 h, +16) with qh bytes [128 + 32 n + 16 h, +16), which are
@@ -310,27 +309,22 @@ __device__ __forceinline__ void DecodeQ6K(const std::uint8_t* block, int t,
 __device__ __forceinline__ void DecodeIQ4XS(const std::uint8_t* block, int t,
                                             float (&w)[64]) {
   const float d = Half(block);
-  const std::uint32_t scales_h =
-      static_cast<std::uint32_t>(block[2]) |
-      (static_cast<std::uint32_t>(block[3]) << 8);
+  const std::uint32_t scales_h = static_cast<std::uint32_t>(block[2]) |
+                                 (static_cast<std::uint32_t>(block[3]) << 8);
   const std::uint8_t* scales_l = block + 4;
   const std::uint8_t* qs = block + 8;
 #pragma unroll
   for (int h = 0; h < 2; ++h) {
     const int ib = 2 * t + h;
-    const std::uint32_t low =
-        (scales_l[ib >> 1] >> (4 * (ib & 1))) & 0xFU;
+    const std::uint32_t low = (scales_l[ib >> 1] >> (4 * (ib & 1))) & 0xFU;
     const std::uint32_t high = (scales_h >> (2 * ib)) & 0x3U;
-    const float scale =
-        d * (static_cast<float>((high << 4) | low) - 32.0F);
+    const float scale = d * (static_cast<float>((high << 4) | low) - 32.0F);
     const std::uint8_t* q = qs + 16 * ib;
 #pragma unroll
     for (int i = 0; i < 16; ++i) {
       const std::uint32_t v = q[i];
-      w[h * 32 + i] =
-          scale * static_cast<float>(kIq4XsValues[v & 0xFU]);
-      w[h * 32 + 16 + i] =
-          scale * static_cast<float>(kIq4XsValues[v >> 4]);
+      w[h * 32 + i] = scale * static_cast<float>(kIq4XsValues[v & 0xFU]);
+      w[h * 32 + 16 + i] = scale * static_cast<float>(kIq4XsValues[v >> 4]);
     }
   }
 }
@@ -693,8 +687,7 @@ void EmbedRows(const EmbedArgs& args, hipStream_t stream) {
       launch.template operator()<WeightFormat::kIQ4_XS>();
       return;
   }
-  throw std::invalid_argument(
-      "qwen35moe embedding: unsupported weight format");
+  throw std::invalid_argument("qwen35moe embedding: unsupported weight format");
 }
 
 }  // namespace gufo::models::qwen35moe::rocm

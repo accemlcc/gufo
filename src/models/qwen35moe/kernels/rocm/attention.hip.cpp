@@ -28,8 +28,8 @@ __device__ __forceinline__ float XorLane(float v) {
     return __int_as_float(__builtin_amdgcn_permlanex16(
         x, x, 0x76543210, 0xfedcba98, false, false));
   }
-  return __int_as_float(__builtin_amdgcn_update_dpp(x, x, 0x160 | M, 0xf, 0xf,
-                                                   false));
+  return __int_as_float(
+      __builtin_amdgcn_update_dpp(x, x, 0x160 | M, 0xf, 0xf, false));
 }
 
 __device__ __forceinline__ float WaveSum(float v) {
@@ -73,10 +73,8 @@ __global__ void __launch_bounds__(kThreads) AttentionKernel(AttentionArgs a) {
   float best = -INFINITY;
   float total = 0.0F;
   for (std::uint32_t p = 0; p < hi; ++p) {
-    const float* krow = a.k_cache + (static_cast<std::size_t>(kvh) *
-                                          a.max_context +
-                                      p) *
-                                         a.dim;
+    const float* krow =
+        a.k_cache + (static_cast<std::size_t>(kvh) * a.max_context + p) * a.dim;
     float s = 0.0F;
     for (std::uint32_t j = 0; j < kPerLane; ++j) {
       s += qv[j] * krow[lane + j * kWave];
@@ -92,20 +90,16 @@ __global__ void __launch_bounds__(kThreads) AttentionKernel(AttentionArgs a) {
   // Second pass: accumulate exp(score - best) * value.
   float acc[kPerLane] = {};
   for (std::uint32_t p = 0; p < hi; ++p) {
-    const float* krow = a.k_cache + (static_cast<std::size_t>(kvh) *
-                                          a.max_context +
-                                      p) *
-                                         a.dim;
+    const float* krow =
+        a.k_cache + (static_cast<std::size_t>(kvh) * a.max_context + p) * a.dim;
     float s = 0.0F;
     for (std::uint32_t j = 0; j < kPerLane; ++j) {
       s += qv[j] * krow[lane + j * kWave];
     }
     s = WaveSum(s) * a.scale;
     const float w = expf(s - best) / total;
-    const float* vrow = a.v_cache + (static_cast<std::size_t>(kvh) *
-                                          a.max_context +
-                                      p) *
-                                         a.dim;
+    const float* vrow =
+        a.v_cache + (static_cast<std::size_t>(kvh) * a.max_context + p) * a.dim;
     for (std::uint32_t j = 0; j < kPerLane; ++j) {
       acc[j] += w * vrow[lane + j * kWave];
     }

@@ -16,12 +16,6 @@
 #include "src/models/qwen35moe/kernels/rocm/qkv_post.hpp"
 #include "src/models/qwen35moe/kernels/rocm/ssm.hpp"
 
-#include "src/core/hip/hip_utils.hpp"
-#include "src/models/qwen35moe/kernels/rocm/attention.hpp"
-#include "src/models/qwen35moe/kernels/rocm/kernels.hpp"
-#include "src/models/qwen35moe/kernels/rocm/qkv_post.hpp"
-#include "src/models/qwen35moe/kernels/rocm/ssm.hpp"
-
 namespace gufo::models::qwen35moe::rocm {
 namespace {
 
@@ -76,8 +70,8 @@ std::size_t Executor::CacheBytes(const Config& config,
       bytes += 2 * Pad(max_context * kv_row * sizeof(float));
     } else {
       bytes += Pad(config.SsmQkvDim() * 4 * sizeof(float));
-      bytes += Pad(static_cast<std::size_t>(config.ssm_time_step_rank) *
-                   128 * 128 * sizeof(float));
+      bytes += Pad(static_cast<std::size_t>(config.ssm_time_step_rank) * 128 *
+                   128 * sizeof(float));
     }
   }
   return bytes;
@@ -108,33 +102,33 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
   const auto need = [&](std::size_t count, std::size_t element) {
     arena += Pad(count * element);
   };
-  need(max_rows, sizeof(std::int32_t));                 // tokens_
-  need(max_rows * d, sizeof(float));                    // x_
-  need(max_rows * d, sizeof(float));                    // h_
-  need(max_rows * qkv_max, sizeof(float));              // qkv_
-  need(max_rows * qkv_max, sizeof(float));              // conv_
-  need(max_rows * kvd, sizeof(float));                  // k_
-  need(max_rows * kvd, sizeof(float));                  // v_
-  need(max_rows * qd, sizeof(float));                   // attn_
-  need(max_rows * mix_max, sizeof(float));              // o_ (gated)
-  need(max_rows * vd, sizeof(float));                   // gate_ (ssm z)
-  need(max_rows * rk, sizeof(float));                   // alpha_
-  need(max_rows * rk, sizeof(float));                   // beta_
-  need(max_rows * u, sizeof(float));                    // moe_weights_
-  need(max_rows * u, sizeof(std::int32_t));             // moe_ids_
-  need(e, sizeof(std::uint32_t));                       // moe_counts_
+  need(max_rows, sizeof(std::int32_t));      // tokens_
+  need(max_rows * d, sizeof(float));         // x_
+  need(max_rows * d, sizeof(float));         // h_
+  need(max_rows * qkv_max, sizeof(float));   // qkv_
+  need(max_rows * qkv_max, sizeof(float));   // conv_
+  need(max_rows * kvd, sizeof(float));       // k_
+  need(max_rows * kvd, sizeof(float));       // v_
+  need(max_rows * qd, sizeof(float));        // attn_
+  need(max_rows * mix_max, sizeof(float));   // o_ (gated)
+  need(max_rows * vd, sizeof(float));        // gate_ (ssm z)
+  need(max_rows * rk, sizeof(float));        // alpha_
+  need(max_rows * rk, sizeof(float));        // beta_
+  need(max_rows * u, sizeof(float));         // moe_weights_
+  need(max_rows * u, sizeof(std::int32_t));  // moe_ids_
+  need(e, sizeof(std::uint32_t));            // moe_counts_
   need(GroupTableInts(static_cast<std::uint32_t>(e)),
-       sizeof(std::int32_t));                           // moe_groups_
-  need(max_rows * u * f, sizeof(float));                // moe_gate_
-  need(max_rows * u * f, sizeof(float));                // moe_up_
-  need(max_rows * u * f, sizeof(float));                // moe_act_
-  need(max_rows * u * d, sizeof(float));                // moe_out_
-  need(max_rows * s, sizeof(float));                    // dense_gate_
-  need(max_rows * s, sizeof(float));                    // dense_up_
-  need(max_rows * d, sizeof(float));                    // shared_
-  need(max_rows * d, sizeof(float));                    // tmp_mix_
+       sizeof(std::int32_t));             // moe_groups_
+  need(max_rows * u * f, sizeof(float));  // moe_gate_
+  need(max_rows * u * f, sizeof(float));  // moe_up_
+  need(max_rows * u * f, sizeof(float));  // moe_act_
+  need(max_rows * u * d, sizeof(float));  // moe_out_
+  need(max_rows * s, sizeof(float));      // dense_gate_
+  need(max_rows * s, sizeof(float));      // dense_up_
+  need(max_rows * d, sizeof(float));      // shared_
+  need(max_rows * d, sizeof(float));      // tmp_mix_
   need(GroupTableInts(kMaxGroupSlots), sizeof(std::int32_t));
-  need(max_logit_rows * v, sizeof(float));              // logits_
+  need(max_logit_rows * v, sizeof(float));  // logits_
   HIP_CHECK(hipMalloc(&scratch_, arena));
   Arena a{static_cast<char*>(scratch_)};
   tokens_ = a.Take<std::int32_t>(max_rows_);
@@ -152,8 +146,8 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
   moe_weights_ = a.Take<float>(max_rows_ * u);
   moe_ids_ = a.Take<std::int32_t>(max_rows_ * u);
   moe_counts_ = a.Take<std::uint32_t>(e);
-  moe_groups_ = a.Take<std::int32_t>(
-      GroupTableInts(static_cast<std::uint32_t>(e)));
+  moe_groups_ =
+      a.Take<std::int32_t>(GroupTableInts(static_cast<std::uint32_t>(e)));
   moe_gate_ = a.Take<float>(max_rows_ * u * f);
   moe_up_ = a.Take<float>(max_rows_ * u * f);
   moe_act_ = a.Take<float>(max_rows_ * u * f);
@@ -173,8 +167,8 @@ Executor::~Executor() {
   (void)hipStreamDestroy(stream_);
 }
 
-std::unique_ptr<KvCache> Executor::CreateCache(
-    std::uint32_t max_context, std::string* error_msg) const {
+std::unique_ptr<KvCache> Executor::CreateCache(std::uint32_t max_context,
+                                               std::string* error_msg) const {
   const Config& c = model_.config();
   auto cache = std::unique_ptr<KvCache>(new KvCache());
   cache->max_context = max_context;
@@ -239,8 +233,7 @@ std::unique_ptr<SsmState> Executor::CreateSsmState(
     const std::size_t ch = Pad(c.SsmQkvDim() * 4 * sizeof(float));
     st->conv.push_back(reinterpret_cast<float*>(at));
     at += ch;
-    const std::size_t rh = Pad(static_cast<std::size_t>(
-                                   c.ssm_time_step_rank) *
+    const std::size_t rh = Pad(static_cast<std::size_t>(c.ssm_time_step_rank) *
                                128 * 128 * sizeof(float));
     st->recurrent.push_back(reinterpret_cast<float*>(at));
     at += rh;
@@ -267,19 +260,19 @@ void Executor::Forward(KvCache& cache, SsmState& ssm,
   }
   HIP_CHECK(hipMemcpyAsync(tokens_, tokens.data(), n * sizeof(std::int32_t),
                            hipMemcpyHostToDevice, stream_));
-  EmbedRows({model_.token_embd().data, model_.token_embd().quant(), tokens_,
-             x_, n, static_cast<std::uint32_t>(d)},
+  EmbedRows({model_.token_embd().data, model_.token_embd().quant(), tokens_, x_,
+             n, static_cast<std::uint32_t>(d)},
             stream_);
-    if (std::getenv("GUFO_QWEN35MOE_DUMP_DEV") != nullptr) {
-      std::vector<float> dbg(static_cast<std::size_t>(n) * d);
-      HIP_CHECK(hipMemcpy(dbg.data(), x_, dbg.size() * sizeof(float),
-                          hipMemcpyDeviceToHost));
-      double amax = 0.0;
-      for (float v : dbg) {
-        amax = std::max(amax, std::fabs(static_cast<double>(v)));
-      }
-      std::fprintf(stderr, "DEV embed max=%.3f\n", amax);
+  if (std::getenv("GUFO_QWEN35MOE_DUMP_DEV") != nullptr) {
+    std::vector<float> dbg(static_cast<std::size_t>(n) * d);
+    HIP_CHECK(hipMemcpy(dbg.data(), x_, dbg.size() * sizeof(float),
+                        hipMemcpyDeviceToHost));
+    double amax = 0.0;
+    for (float v : dbg) {
+      amax = std::max(amax, std::fabs(static_cast<double>(v)));
     }
+    std::fprintf(stderr, "DEV embed max=%.3f\n", amax);
+  }
   for (std::uint32_t l = 0; l < c.num_layers; ++l) {
     ForwardLayer(cache, ssm, model_.layers()[l], l, x_, n, first_position, h_);
     AddRows({x_, h_, static_cast<std::size_t>(n) * d}, stream_);
@@ -310,19 +303,19 @@ void Executor::Forward(KvCache& cache, SsmState& ssm,
     }
     StageDenseGroups(1);
     if (!GroupedGemv({model_.output().quant(), model_.output().data,
-                       dense_groups_, 1, h_ + static_cast<std::size_t>(r) * d,
-                       logits_ + k * model_.vocab_size(), 1, 1,
-                       model_.vocab_size(), static_cast<std::uint32_t>(d)},
-                      stream_)) {
+                      dense_groups_, 1, h_ + static_cast<std::size_t>(r) * d,
+                      logits_ + k * model_.vocab_size(), 1, 1,
+                      model_.vocab_size(), static_cast<std::uint32_t>(d)},
+                     stream_)) {
       throw std::invalid_argument("no grouped kernel for the output head");
     }
   }
 }
 
-void Executor::ForwardLayer(KvCache& cache, SsmState& ssm,
-                            const DeviceLayer& w, std::uint32_t layer,
-                            const float* x, std::uint32_t count,
-                            std::uint32_t first_position, float* mixed) {
+void Executor::ForwardLayer(KvCache& cache, SsmState& ssm, const DeviceLayer& w,
+                            std::uint32_t layer, const float* x,
+                            std::uint32_t count, std::uint32_t first_position,
+                            float* mixed) {
   const Config& c = model_.config();
   const std::size_t d = c.hidden_size;
   const std::uint32_t n = count;
@@ -399,19 +392,17 @@ void Executor::ForwardLayer(KvCache& cache, SsmState& ssm,
   aargs.dim = c.head_dim;
   aargs.scale = 1.0F / std::sqrt(static_cast<float>(c.head_dim));
   Attention(aargs, stream_);
-  SigmoidGateAct({attn_, o_, attn_, static_cast<std::size_t>(n) * qd},
-                 stream_);
+  SigmoidGateAct({attn_, o_, attn_, static_cast<std::size_t>(n) * qd}, stream_);
   Project(w.attn_output, attn_, n, mixed);
 }
 
 void Executor::Project(const DeviceTensor& w, const float* x,
                        std::uint32_t rows, float* y) {
   StageDenseGroups(rows);
-  if (!GroupedGemv({w.quant(), w.data, dense_groups_, 1, x, y, rows, 1,
-                     w.rows, w.cols},
-                    stream_)) {
-    throw std::invalid_argument("no grouped kernel for " +
-                                std::string(w.name));
+  if (!GroupedGemv(
+          {w.quant(), w.data, dense_groups_, 1, x, y, rows, 1, w.rows, w.cols},
+          stream_)) {
+    throw std::invalid_argument("no grouped kernel for " + std::string(w.name));
   }
 }
 
@@ -436,11 +427,10 @@ void Executor::Experts(const DeviceLayer& l, const float* h,
   rargs.used = u;
   MoeRoute(rargs, stream_);
   auto routed_proj = [&](const DeviceTensor& w, const float* in, float* y,
-                         std::uint32_t m, std::uint32_t k,
-                         std::uint32_t spr) {
-    if (!GroupedGemv({w.quant(), w.data, moe_groups_,
-                       std::min(e, count * u), in, y, count, spr, m, k},
-                      stream_)) {
+                         std::uint32_t m, std::uint32_t k, std::uint32_t spr) {
+    if (!GroupedGemv({w.quant(), w.data, moe_groups_, std::min(e, count * u),
+                      in, y, count, spr, m, k},
+                     stream_)) {
       throw std::invalid_argument("no grouped kernel for " +
                                   std::string(w.name));
     }
@@ -449,9 +439,9 @@ void Executor::Experts(const DeviceLayer& l, const float* h,
               static_cast<std::uint32_t>(c.hidden_size), u);
   routed_proj(l.ffn_up_exps, h, moe_up_, static_cast<std::uint32_t>(f),
               static_cast<std::uint32_t>(c.hidden_size), u);
-  GateUpAct({moe_gate_, moe_up_, moe_act_,
-             static_cast<std::size_t>(count) * u * f},
-            stream_);
+  GateUpAct(
+      {moe_gate_, moe_up_, moe_act_, static_cast<std::size_t>(count) * u * f},
+      stream_);
   routed_proj(l.ffn_down_exps, moe_act_, routed,
               static_cast<std::uint32_t>(c.hidden_size),
               static_cast<std::uint32_t>(f), 1);
@@ -465,16 +455,18 @@ void Executor::SharedExpert(const DeviceLayer& l, const float* h,
   StageDenseGroups(rows);
   auto dense = [&](const DeviceTensor& w, const float* in, float* y,
                    std::uint32_t m, std::uint32_t k) {
-    if (!GroupedGemv({w.quant(), w.data, dense_groups_, 1, in, y, rows, 1, m,
-                       k},
-                      stream_)) {
+    if (!GroupedGemv(
+            {w.quant(), w.data, dense_groups_, 1, in, y, rows, 1, m, k},
+            stream_)) {
       throw std::invalid_argument("no grouped kernel for " +
                                   std::string(w.name));
     }
   };
   dense(l.ffn_gate_shexp, h, dense_gate_, s, d);
   dense(l.ffn_up_shexp, h, dense_up_, s, d);
-  GateUpAct({dense_gate_, dense_up_, dense_up_, static_cast<std::size_t>(rows) * s}, stream_);
+  GateUpAct(
+      {dense_gate_, dense_up_, dense_up_, static_cast<std::size_t>(rows) * s},
+      stream_);
   dense(l.ffn_down_shexp, dense_up_, out, d, s);
   GateSharedArgs gargs{};
   gargs.shared = out;
@@ -498,8 +490,7 @@ void Executor::StageDenseGroups(std::uint32_t rows) {
                            hipMemcpyHostToDevice, stream_));
 }
 
-void Executor::CopyLogits(std::size_t rows,
-                          std::vector<float>* out) const {
+void Executor::CopyLogits(std::size_t rows, std::vector<float>* out) const {
   out->assign(rows * model_.vocab_size(), 0.0F);
   HIP_CHECK(hipMemcpyAsync(out->data(), logits_,
                            rows * model_.vocab_size() * sizeof(float),

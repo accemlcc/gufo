@@ -144,9 +144,9 @@ void CraftLogits(Fixture* f, const std::vector<Craft>& crafts) {
 // ---------------------------------------------------------------------------
 
 struct Expected {
-  std::vector<float> logits;  ///< [rows][experts], rounded to float
-  std::vector<std::int32_t> ids;     ///< [rows][used]
-  std::vector<float> weights;        ///< [rows][used], sum to 1
+  std::vector<float> logits;      ///< [rows][experts], rounded to float
+  std::vector<std::int32_t> ids;  ///< [rows][used]
+  std::vector<float> weights;     ///< [rows][used], sum to 1
 };
 
 Expected Oracle(const Fixture& f) {
@@ -160,9 +160,8 @@ Expected Oracle(const Fixture& f) {
     for (std::uint32_t m = 0; m < f.experts; ++m) {
       double acc = 0.0;
       for (std::uint32_t i = 0; i < f.hidden; ++i) {
-        acc += static_cast<double>(f.router[static_cast<std::size_t>(m) *
-                                             f.hidden +
-                                             i]) *
+        acc += static_cast<double>(
+                   f.router[static_cast<std::size_t>(m) * f.hidden + i]) *
                f.x[static_cast<std::size_t>(r) * f.hidden + i];
       }
       e.logits[static_cast<std::size_t>(r) * f.experts + m] =
@@ -173,12 +172,11 @@ Expected Oracle(const Fixture& f) {
     for (std::uint32_t m = 0; m < f.experts; ++m) {
       order[m] = m;
     }
-    const float* row = e.logits.data() + static_cast<std::size_t>(r) *
-                                              f.experts;
-    std::stable_sort(order.begin(), order.end(),
-                     [&](std::uint32_t a, std::uint32_t b) {
-                       return row[a] > row[b];
-                     });
+    const float* row =
+        e.logits.data() + static_cast<std::size_t>(r) * f.experts;
+    std::stable_sort(
+        order.begin(), order.end(),
+        [&](std::uint32_t a, std::uint32_t b) { return row[a] > row[b]; });
     double peak = -std::numeric_limits<double>::infinity();
     for (std::uint32_t j = 0; j < f.used; ++j) {
       peak = std::max(peak, static_cast<double>(row[order[j]]));
@@ -215,8 +213,7 @@ Got Run(const Fixture& f, bool want_logits, bool want_groups) {
   g.ids.resize(static_cast<std::size_t>(f.rows) * f.used, kPoisonId);
   g.weights.resize(static_cast<std::size_t>(f.rows) * f.used);
   g.counts.resize(f.experts, 0);
-  const std::uint32_t groups =
-      std::min(f.experts, f.rows * f.used);
+  const std::uint32_t groups = std::min(f.experts, f.rows * f.used);
   g.groups.resize(k::GroupTableInts(groups), -1);
   float* dx = Device(f.x);
   float* drouter = Device(f.router);
@@ -291,8 +288,8 @@ void RandomRows() {
   wsum /= f.rows;
   const bool weights_ok = dw < 1e-6 && std::fabs(wsum - 1.0) < 1e-6;
   Report("route.random_rows", ids_ok && weights_ok,
-         "ids " + std::string(ids_ok ? "match" : "MISMATCH") + " dw=" +
-             Number(dw) + " wsum=" + Number(wsum));
+         "ids " + std::string(ids_ok ? "match" : "MISMATCH") +
+             " dw=" + Number(dw) + " wsum=" + Number(wsum));
 }
 
 void Ties() {
@@ -371,8 +368,8 @@ void GroupTable(std::uint32_t rows) {
   }
   ok = ok && count_sum == f.rows * f.used;
   Report(("route.group_table_" + std::to_string(rows)).c_str(), ok,
-         "groups=" + std::to_string(ngroups) + " slots=" +
-             std::to_string(total_slots));
+         "groups=" + std::to_string(ngroups) +
+             " slots=" + std::to_string(total_slots));
 }
 
 void Refusals() {

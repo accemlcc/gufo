@@ -240,9 +240,8 @@ std::optional<Config> Config::FromGguf(const core::GgufReader& reader,
   }
   if (c.experts_used == 0 || c.experts_used > c.num_experts ||
       c.experts_used > kMaxExpertsUsed) {
-    r.Fail("qwen35moe routing must use 1.." +
-           std::to_string(kMaxExpertsUsed) + " experts of " +
-           std::to_string(c.num_experts));
+    r.Fail("qwen35moe routing must use 1.." + std::to_string(kMaxExpertsUsed) +
+           " experts of " + std::to_string(c.num_experts));
     return std::nullopt;
   }
   if (c.expert_ffn_size == 0 || c.shared_ffn_size == 0) {

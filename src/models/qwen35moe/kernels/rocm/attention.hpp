@@ -18,7 +18,7 @@ namespace gufo::models::qwen35moe::rocm {
 /// attends positions [0, first_position + r]. The GQA pairing is adjacent
 /// groups, kv head `h / (heads / kv_heads)`, matching the training stack.
 struct AttentionArgs {
-  const float* q;       ///< [rows][heads][dim], normed and rotated queries
+  const float* q;        ///< [rows][heads][dim], normed and rotated queries
   const float* k_cache;  ///< [kv_heads][max_context][dim]
   const float* v_cache;  ///< [kv_heads][max_context][dim]
   float* out;            ///< [rows][heads * dim]

@@ -5,6 +5,8 @@
 // inputs whose gate halves read back exactly.
 //
 // Needs a gfx1151 device; without one the check skips with 77.
+#include "src/models/qwen35moe/kernels/rocm/qkv_post.hpp"
+
 #include <hip/hip_runtime.h>
 
 #include <cmath>
@@ -17,7 +19,6 @@
 #include <vector>
 
 #include "src/core/hip/hip_utils.hpp"
-#include "src/models/qwen35moe/kernels/rocm/qkv_post.hpp"
 
 namespace k = gufo::models::qwen35moe::rocm;
 
@@ -56,17 +57,13 @@ constexpr double kThetaScale =
     0.6042963902381329;  // pow(1e7, -2/64), the rotary base rate
 constexpr float kEps = 1e-6F;
 
-std::vector<float> CpuQkvPost(const std::vector<float>& qg,
-                              const std::vector<float>& kk,
-                              const std::vector<float>& vv,
-                              const std::vector<float>& qn,
-                              const std::vector<float>& kn,
-                              std::uint32_t rows, std::uint32_t first_pos,
-                              std::vector<float>& q_out,
-                              std::vector<float>& gate_out,
-                              std::vector<float>& k_cache,
-                              std::vector<float>& v_cache,
-                              std::uint32_t max_ctx) {
+std::vector<float> CpuQkvPost(
+    const std::vector<float>& qg, const std::vector<float>& kk,
+    const std::vector<float>& vv, const std::vector<float>& qn,
+    const std::vector<float>& kn, std::uint32_t rows, std::uint32_t first_pos,
+    std::vector<float>& q_out, std::vector<float>& gate_out,
+    std::vector<float>& k_cache, std::vector<float>& v_cache,
+    std::uint32_t max_ctx) {
   const std::uint32_t qd = kHeads * kDim;
   q_out.assign(rows * qd, 0.0F);
   gate_out.assign(rows * qd, 0.0F);
@@ -85,8 +82,7 @@ std::vector<float> CpuQkvPost(const std::vector<float>& qg,
       const double s = 1.0 / std::sqrt(ss / kDim + kEps);
       for (std::uint32_t i = 0; i < kDim; ++i) {
         q_out[(r * kHeads + h) * kDim + i] =
-            static_cast<float>(qg[(r * 2 * qd) + h * 2 * kDim + i] * s *
-                               qn[i]);
+            static_cast<float>(qg[(r * 2 * qd) + h * 2 * kDim + i] * s * qn[i]);
         gate_out[(r * kHeads + h) * kDim + i] =
             qg[(r * 2 * qd) + h * 2 * kDim + kDim + i];
       }
@@ -209,8 +205,7 @@ void RandomCase(std::uint32_t rows, std::uint32_t first_pos) {
   Report(("qkv_post.random_r" + std::to_string(rows) + "_p" +
           std::to_string(first_pos))
              .c_str(),
-         ok,
-         "worst=" + std::to_string(worst));
+         ok, "worst=" + std::to_string(worst));
   HIP_CHECK(hipFree(dqg));
   HIP_CHECK(hipFree(dkk));
   HIP_CHECK(hipFree(dvv));
@@ -240,8 +235,8 @@ void InterleavePin() {
   std::vector<float> want_q, want_g, want_k(kKv * kCtx * kDim, 0.0F),
       want_v(kKv * kCtx * kDim, 0.0F);
   CpuQkvPost(qg, kk, vv, qn, kn, rows, 0, want_q, want_g, want_k, want_v, kCtx);
-  std::vector<float> got_q(qd), got_g(qd),
-      got_k(kKv * kCtx * kDim, 0.0F), got_v(kKv * kCtx * kDim, 0.0F);
+  std::vector<float> got_q(qd), got_g(qd), got_k(kKv * kCtx * kDim, 0.0F),
+      got_v(kKv * kCtx * kDim, 0.0F);
   float* dqg = Device(qg);
   float* dkk = Device(kk);
   float* dvv = Device(vv);

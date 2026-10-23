@@ -71,8 +71,7 @@ void Forward(const std::string& path) {
   const std::vector<std::size_t> splits = {6, 7, 8};
   std::size_t done = 0;
   for (std::size_t k = 0; k < splits.size() && ok; ++k) {
-    std::vector<m::TokenId> chunk(ids.begin() + done,
-                                  ids.begin() + splits[k]);
+    std::vector<m::TokenId> chunk(ids.begin() + done, ids.begin() + splits[k]);
     session->Append(chunk);
     std::vector<float> ref_logits;
     std::vector<std::int32_t> prefix(ids.begin(), ids.begin() + splits[k]);
@@ -101,9 +100,9 @@ void Forward(const std::string& path) {
     }
     double worst = 0.0;
     for (std::size_t i = 0; i < v; ++i) {
-      worst = std::max(worst, std::fabs(static_cast<double>(
-                                           session->logits()[i]) -
-                                       ref_last[i]));
+      worst = std::max(
+          worst,
+          std::fabs(static_cast<double>(session->logits()[i]) - ref_last[i]));
     }
     char buf[128];
     std::snprintf(buf, sizeof(buf), "k=%zu got=%zu want=%zu worst=%.3f",

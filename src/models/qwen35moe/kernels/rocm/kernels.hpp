@@ -68,9 +68,9 @@ void SigmoidGateAct(const SigmoidGateArgs& args, hipStream_t stream);
 /// The dot product is one row of the gate vector against one normalized
 /// layer input; the shared expert output waits for it before MoeCombine.
 struct GateSharedArgs {
-  float* shared;       ///< [rows][hidden], scaled in place
-  const float* gate;   ///< [hidden], the shared-expert gate vector
-  const float* h;      ///< [rows][hidden], the normalized layer input
+  float* shared;      ///< [rows][hidden], scaled in place
+  const float* gate;  ///< [hidden], the shared-expert gate vector
+  const float* h;     ///< [rows][hidden], the normalized layer input
   std::uint32_t rows;
   std::uint32_t hidden;
 };
@@ -159,8 +159,7 @@ struct GroupedGemvArgs {
   std::uint32_t k;
 };
 /// False without launching when the shape or format is not supported.
-[[nodiscard]] bool GroupedGemv(const GroupedGemvArgs& args,
-                               hipStream_t stream);
+[[nodiscard]] bool GroupedGemv(const GroupedGemvArgs& args, hipStream_t stream);
 
 /// One row of the embedding table, dequantized: y[r][0..n) = table[token[r]].
 struct EmbedArgs {
@@ -179,9 +178,9 @@ void EmbedRows(const EmbedArgs& args, hipStream_t stream);
 /// the residual (transformers adds `mlp(...)` straight onto it, and so does
 /// the graph). The caller adds `out` to the stream with AddRows.
 struct MoeCombineArgs {
-  float* out;           ///< [rows][hidden]
-  const float* routed;  ///< [rows * used][hidden]
-  const float* shared;  ///< [rows][hidden], gated shared-expert output
+  float* out;            ///< [rows][hidden]
+  const float* routed;   ///< [rows * used][hidden]
+  const float* shared;   ///< [rows][hidden], gated shared-expert output
   const float* weights;  ///< [rows][used]
   std::uint32_t rows;
   std::uint32_t hidden;

@@ -131,8 +131,7 @@ void AddGateUp() {
   for (std::size_t i = 0; i < kCount; ++i) {
     want_add[i] += add[i];
     const double g = gate[i];
-    want_act[i] =
-        static_cast<float>(g / (1.0 + std::exp(-g)) * up[i]);
+    want_act[i] = static_cast<float>(g / (1.0 + std::exp(-g)) * up[i]);
   }
   float* dx = Device(x);
   float* dadd = Device(add);

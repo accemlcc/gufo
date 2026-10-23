@@ -75,7 +75,7 @@ struct DeviceLayer {
 
 /// The whole model in device memory, uploaded once and read by every forward.
 class DeviceModel {
- public:
+public:
   ~DeviceModel();
   DeviceModel(const DeviceModel&) = delete;
   DeviceModel& operator=(const DeviceModel&) = delete;
@@ -104,7 +104,7 @@ class DeviceModel {
   /// cosine needs.
   [[nodiscard]] double theta_scale() const noexcept { return theta_scale_; }
 
- private:
+private:
   DeviceModel() = default;
 
   Config config_;

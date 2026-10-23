@@ -46,8 +46,8 @@ struct Uploader {
 
   // Copies the tensor after checking the shape the binder recorded against
   // the layout the kernels read: [cols][rows][experts] with cols contiguous.
-  DeviceTensor Copy(const TensorRef& t, std::uint64_t cols,
-                    std::uint64_t rows, std::uint64_t experts) {
+  DeviceTensor Copy(const TensorRef& t, std::uint64_t cols, std::uint64_t rows,
+                    std::uint64_t experts) {
     DeviceTensor d;
     if (t.empty() || !ok) {
       return d;
@@ -55,9 +55,8 @@ struct Uploader {
     if (t.cols != cols || t.rows != rows || t.experts != experts) {
       Fail("tensor " + std::string(t.name) + " has shape [" +
            std::to_string(t.cols) + ", " + std::to_string(t.rows) + ", " +
-           std::to_string(t.experts) + "], expected [" +
-           std::to_string(cols) + ", " + std::to_string(rows) + ", " +
-           std::to_string(experts) + "]");
+           std::to_string(t.experts) + "], expected [" + std::to_string(cols) +
+           ", " + std::to_string(rows) + ", " + std::to_string(experts) + "]");
       return d;
     }
     const std::size_t size = t.SizeBytes();
@@ -110,9 +109,9 @@ DeviceModel::~DeviceModel() {
   }
 }
 
-std::unique_ptr<DeviceModel> DeviceModel::Upload(
-    const ModelWeights& weights, const core::GgufReader& reader,
-    std::string* error_msg) {
+std::unique_ptr<DeviceModel> DeviceModel::Upload(const ModelWeights& weights,
+                                                 const core::GgufReader& reader,
+                                                 std::string* error_msg) {
   std::unique_ptr<DeviceModel> m(new DeviceModel());
   const Config& c = weights.config;
   m->config_ = c;
@@ -133,11 +132,10 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
   Uploader up{*stager, m->allocations_, m->bytes_, error_msg};
   m->token_embd_ = up.Copy(weights.token_embd, h, m->vocab_, 1);
   // A tied head is the same bytes: one upload, two views of it.
-  const bool tied = weights.output.data == weights.token_embd.data &&
-                    weights.output.num_elements ==
-                        weights.token_embd.num_elements;
-  m->output_ =
-      tied ? m->token_embd_ : up.Copy(weights.output, h, m->vocab_, 1);
+  const bool tied =
+      weights.output.data == weights.token_embd.data &&
+      weights.output.num_elements == weights.token_embd.num_elements;
+  m->output_ = tied ? m->token_embd_ : up.Copy(weights.output, h, m->vocab_, 1);
   m->output_norm_ = up.Copy(weights.output_norm, h, 1, 1);
 
   const std::uint64_t qd = c.AttnOutDim();

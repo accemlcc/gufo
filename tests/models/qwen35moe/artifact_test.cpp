@@ -99,7 +99,7 @@ int main() {
     CheckVariant(weights->config);
     CheckLayout(*weights);
     std::cout << "bound trunk=" << weights->config.num_layers
-              << " hidden=" << weights->config.hidden_size << " mtp="
-              << (weights->config.has_mtp ? "yes" : "no") << '\n';
+              << " hidden=" << weights->config.hidden_size
+              << " mtp=" << (weights->config.has_mtp ? "yes" : "no") << '\n';
   });
 }

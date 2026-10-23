@@ -5,6 +5,8 @@
 #define GUFO_QWEN35MOE_FIXTURES "."
 #endif
 
+#include "src/models/qwen35moe/reference.hpp"
+
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -12,7 +14,6 @@
 #include <vector>
 
 #include "src/core/gguf_reader.hpp"
-#include "src/models/qwen35moe/reference.hpp"
 #include "src/models/qwen35moe/weights.hpp"
 #include "tests/models/qwen35moe/check.hpp"
 
@@ -51,8 +52,8 @@ FixtureData ReadLogits() {
 void ReferenceMatchesFixture() {
   const FixtureData fx = ReadLogits();
   std::string error;
-  auto reader = gufo::core::GgufReader::OpenFile(
-      Fixture("qwen35moe_tiny.gguf"), &error);
+  auto reader =
+      gufo::core::GgufReader::OpenFile(Fixture("qwen35moe_tiny.gguf"), &error);
   Require(reader != nullptr, "cannot open fixture artifact: " + error);
   const auto weights = q35::ModelWeights::LoadFromGguf(*reader, &error);
   Require(weights.has_value(), "fixture artifact rejected: " + error);
@@ -89,8 +90,8 @@ void ReferenceMatchesFixture() {
 void ChunkInvariant() {
   const FixtureData fx = ReadLogits();
   std::string error;
-  auto reader = gufo::core::GgufReader::OpenFile(
-      Fixture("qwen35moe_tiny.gguf"), &error);
+  auto reader =
+      gufo::core::GgufReader::OpenFile(Fixture("qwen35moe_tiny.gguf"), &error);
   Require(reader != nullptr, "cannot open fixture artifact: " + error);
   const auto weights = q35::ModelWeights::LoadFromGguf(*reader, &error);
   Require(weights.has_value(), "fixture artifact rejected: " + error);
@@ -100,8 +101,7 @@ void ChunkInvariant() {
   q35::Reference split(*weights);
   const std::size_t half = fx.tokens.size() / 2;
   std::vector<float> first;
-  std::vector<std::int32_t> head(fx.tokens.begin(),
-                                 fx.tokens.begin() + half);
+  std::vector<std::int32_t> head(fx.tokens.begin(), fx.tokens.begin() + half);
   std::vector<std::int32_t> tail(fx.tokens.begin() + half, fx.tokens.end());
   std::vector<float> ignored;
   split.Forward(head, &ignored);
@@ -109,8 +109,7 @@ void ChunkInvariant() {
   Require(first.size() == tail.size() * fx.vocab, "tail logit rows");
   for (std::size_t r = 0; r < tail.size(); ++r) {
     for (std::uint32_t v = 0; v < fx.vocab; ++v) {
-      Require(first[r * fx.vocab + v] ==
-                  all[(half + r) * fx.vocab + v],
+      Require(first[r * fx.vocab + v] == all[(half + r) * fx.vocab + v],
               "split append is bit-identical");
     }
   }
