@@ -9,6 +9,10 @@ graph at larger widths.
 | `Ornith-1.5-35B-Q5_K_M.gguf` (single file) | Config + weight binding passes (`qwen35moe.artifact`) |
 | `Ornith-1.5-122B-UD-Q4_K_XL` (3 shards) | Config + weight binding passes (`qwen35moe.artifact`) |
 
+The 35B file's md5 is `245dddbd40262ada1b343f16369db2cf`; verify it after
+copying — a corrupt 1 GB window once NaN'd the oracle at layer 10 while the
+device still answered from the same bytes.
+
 ## What is verified
 
 - `src/models/qwen35moe` binds the released metadata and every tensor of both

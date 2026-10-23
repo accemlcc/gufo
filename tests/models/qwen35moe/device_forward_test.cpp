@@ -76,10 +76,10 @@ void Forward(const std::string& path) {
     session->Append(chunk);
     std::vector<float> ref_logits;
     std::vector<std::int32_t> prefix(ids.begin(), ids.begin() + splits[k]);
-    // DIAGNOSTIC ONLY: fresh oracle per frontier instead of Reset, to tell
-    // a Reset bug from a shape bug. Remove before finishing.
-    m::Reference ref2(*weights);
-    ref2.Forward(prefix, &ref_logits);
+    // The oracle appends after its own frontier, so restart it: each
+    // compared frontier is the same full prefix the session has seen.
+    ref.Reset();
+    ref.Forward(prefix, &ref_logits);
     // The session keeps only the requested (last) row; the oracle returns
     // every position, so compare against its last row.
     const std::size_t v = session->logits().size();
@@ -108,19 +108,6 @@ void Forward(const std::string& path) {
     char buf[128];
     std::snprintf(buf, sizeof(buf), "k=%zu got=%zu want=%zu worst=%.3f",
                   splits[k], got_top, want_top, worst);
-    // DIAGNOSTIC ONLY: the k=7 frontier reports equal logits with different
-    // argmax; dump the raw values. Remove before finishing.
-    if (got_top != want_top || worst > 0.5) {
-      std::fprintf(stderr, "DIAG v=%zu refsize=%zu n=%zu\n", v,
-                   ref_logits.size(), n);
-      std::fprintf(stderr, "DIAG got0=%.6f got1=%.6f got19241=%.6f\n",
-                   v > 0 ? session->logits()[0] : 0.0F,
-                   v > 1 ? session->logits()[1] : 0.0F,
-                   v > 19241 ? session->logits()[19241] : 0.0F);
-      std::fprintf(stderr, "DIAG ref0=%.6f ref1=%.6f ref19241=%.6f\n",
-                   v > 0 ? ref_last[0] : 0.0F, v > 1 ? ref_last[1] : 0.0F,
-                   v > 19241 ? ref_last[19241] : 0.0F);
-    }
     if (got_top != want_top || worst > 0.5) {
       ok = false;
       detail = buf;
