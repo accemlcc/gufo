@@ -117,10 +117,12 @@ Built Build(k::WeightFormat format, std::uint32_t experts, std::uint32_t m,
     // Q8_0's unit holds eight 32-value blocks; the K-quants hold one block
     // per unit. Every block gets a small scale so no random exponent bit
     // becomes an infinity.
-    const std::uint32_t nblocks =
+    const std::size_t nblocks =
         format == k::WeightFormat::kQ8_0 ? kdim / 32 : kdim / 256;
     const std::size_t bb =
-        format == k::WeightFormat::kQ8_0 ? sizeof(q::block_q8_0) : row / (kdim / 256);
+        format == k::WeightFormat::kQ8_0
+            ? sizeof(q::block_q8_0)
+            : row / (kdim / 256);
     for (std::uint32_t b = 0; b < nblocks; ++b) {
       std::uint8_t* p = w.bytes.data() + r * row + static_cast<std::size_t>(b) * bb;
       if (format == k::WeightFormat::kQ4_K) {
