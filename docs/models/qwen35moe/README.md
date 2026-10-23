@@ -42,8 +42,13 @@ device still answered from the same bytes.
   IQ4_XS and decode in-kernel (136-byte super-blocks, shared non-linear
   codebook); upload-time F32 would have cost 64 GB. The shared-gate reduction
   keeps its second stage sequential — a chained wave-shuffle reduction
-  mis-sums on this target. Tokenizer/chat-template wiring and quality runs
-  are open.
+  mis-sums on this target. The Qwen tokenizer is reused straight from the
+  GGUF metadata (gpt2 merge tables, qwen35 pre-tokenizer, file BOS/EOS), the
+  compiled chat template covers both qualified file revisions (verified
+  byte-for-byte against Jinja2 ground truth), and `gufo prompt`/`chat`
+  generate through the engine — the first quality spot-check agrees with
+  llama-server (`The capital of France is **Paris**.`, thinking stripped
+  server-side). Serve dispatch and broader quality runs are open.
 
 ## Parity against served weights
 
