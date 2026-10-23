@@ -409,7 +409,7 @@ void Reference::FullLayer(std::uint32_t layer, const float* x,
 }
 
 void Reference::Mixture(const LayerWeights& w, const float* x, std::size_t rows,
-                        float* out) const {
+                        float* out, std::uint32_t layer) const {
   const Config& c = weights_.config;
   const std::size_t d = c.hidden_size;
   const std::size_t f = c.expert_ffn_size;
@@ -425,6 +425,9 @@ void Reference::Mixture(const LayerWeights& w, const float* x, std::size_t rows,
   std::vector<float> up(f);
   std::vector<float> down(d);
   std::vector<float> probs(e);
+  // DIAGNOSTIC ONLY: the routed choice per row. Remove before finishing.
+  std::vector<std::int32_t> d_ids(rows * c.experts_used, -1);
+  std::vector<float> d_w(rows * c.experts_used, 0.0F);
   for (std::size_t r = 0; r < rows; ++r) {
     double best = -INFINITY;
     for (std::size_t i = 0; i < e; ++i) {
@@ -457,6 +460,8 @@ void Reference::Mixture(const LayerWeights& w, const float* x, std::size_t rows,
     for (std::size_t j = 0; j < c.experts_used; ++j) {
       const std::size_t ex = order[j];
       const double weight = probs[ex] / wsum;
+      d_ids[r * c.experts_used + j] = static_cast<std::int32_t>(ex);
+      d_w[r * c.experts_used + j] = static_cast<float>(weight);
       const std::uint8_t* gb =
           static_cast<const std::uint8_t*>(w.ffn_gate_exps.data) +
           ex * gate_expert;
@@ -478,6 +483,23 @@ void Reference::Mixture(const LayerWeights& w, const float* x, std::size_t rows,
     }
   }
   // The shared expert is gated by sigmoid(gate_vector . x).
+  if (std::getenv("GUFO_QWEN35MOE_DUMP_LAYERS") != nullptr) {
+    char path[256];
+    std::snprintf(path, sizeof(path), "%s/ref_c%d_layer%02u_ids.bin",
+                  std::getenv("GUFO_QWEN35MOE_DUMP_LAYERS"), ref_call, layer);
+    FILE* f = std::fopen(path, "wb");
+    if (f != nullptr) {
+      std::fwrite(d_ids.data(), sizeof(std::int32_t), d_ids.size(), f);
+      std::fclose(f);
+    }
+    std::snprintf(path, sizeof(path), "%s/ref_c%d_layer%02u_w.bin",
+                  std::getenv("GUFO_QWEN35MOE_DUMP_LAYERS"), ref_call, layer);
+    f = std::fopen(path, "wb");
+    if (f != nullptr) {
+      std::fwrite(d_w.data(), sizeof(float), d_w.size(), f);
+      std::fclose(f);
+    }
+  }
   std::vector<float> sh_gate(rows * s);
   std::vector<float> sh_up(rows * s);
   MatMulRef(w.ffn_gate_shexp, s, d, x, rows, sh_gate.data());
@@ -570,7 +592,7 @@ void Reference::Forward(std::span<const std::int32_t> tokens,
     for (std::size_t r = 0; r < n; ++r) {
       RmsNorm(&h[r * d], wp, d, c.rms_eps, &normed[r * d]);
     }
-    Mixture(w, normed.data(), n, tmp.data());
+    Mixture(w, normed.data(), n, tmp.data(), l);
     if (dump_dir != nullptr) {
       const char* tags[] = {"pnorm", "moe"};
       const std::vector<float>* vecs[] = {&normed, &tmp};

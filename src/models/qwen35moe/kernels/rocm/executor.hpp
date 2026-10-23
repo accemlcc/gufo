@@ -94,7 +94,7 @@ class Executor {
   void StageDenseGroups(std::uint32_t rows);
   /// The routed experts of one layer over the rows of `h`.
   void Experts(const DeviceLayer& l, const float* h, std::uint32_t count,
-               float* routed, float* weights);
+               float* routed, float* weights, std::uint32_t layer_idx);
   /// The one sigmoid-gated shared expert over `rows` rows of `h`.
   void SharedExpert(const DeviceLayer& l, const float* h, std::uint32_t rows,
                     float* out, float* gated);
@@ -102,6 +102,8 @@ class Executor {
   /// GUFO_QWEN35MOE_DUMP_DEV_LAYERS. Remove before finishing.
   void DumpStage(const char* tag, const float* ptr, std::uint32_t n,
                  std::uint32_t d, int call);
+  void DumpStageI32(const char* tag, const std::int32_t* ptr, std::uint32_t n,
+                    int call);
 
   const DeviceModel& model_;
   std::uint32_t max_rows_;

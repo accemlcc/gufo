@@ -299,7 +299,7 @@ void Executor::Forward(KvCache& cache, SsmState& ssm,
     RmsNormRows({x_, w.post_attention_norm.f32(), h_, n,
                  static_cast<std::uint32_t>(d), c.rms_eps},
                 stream_);
-    Experts(w, h_, n, moe_out_, moe_weights_);
+    Experts(w, h_, n, moe_out_, moe_weights_, l);
     SharedExpert(w, h_, n, shared_, shared_);
     MoeCombineArgs margs{};
     margs.out = tmp_mix_;
@@ -444,7 +444,8 @@ void Executor::Project(const DeviceTensor& w, const float* x,
 }
 
 void Executor::Experts(const DeviceLayer& l, const float* h,
-                       std::uint32_t count, float* routed, float* weights) {
+                       std::uint32_t count, float* routed, float* weights,
+                       std::uint32_t layer_idx) {
   const Config& c = model_.config();
   const std::uint32_t u = c.experts_used;
   const std::uint32_t e = c.num_experts;
@@ -463,6 +464,13 @@ void Executor::Experts(const DeviceLayer& l, const float* h,
   rargs.experts = e;
   rargs.used = u;
   MoeRoute(rargs, stream_);
+  if (dump_call_ >= 0) {
+    char tag[32];
+    std::snprintf(tag, sizeof(tag), "layer%02u_ids", layer_idx);
+    DumpStageI32(tag, moe_ids_, count * u, dump_call_);
+    std::snprintf(tag, sizeof(tag), "layer%02u_w", layer_idx);
+    DumpStage(tag, weights, count * u, 1, dump_call_);
+  }
   auto routed_proj = [&](const DeviceTensor& w, const float* in, float* y,
                          std::uint32_t m, std::uint32_t k,
                          std::uint32_t spr) {
@@ -551,6 +559,26 @@ void Executor::DumpStage(const char* tag, const float* ptr, std::uint32_t n,
   FILE* f = std::fopen(path, "wb");
   if (f != nullptr) {
     std::fwrite(host.data(), sizeof(float), host.size(), f);
+    std::fclose(f);
+  }
+}
+
+// DIAGNOSTIC ONLY. Remove before finishing.
+void Executor::DumpStageI32(const char* tag, const std::int32_t* ptr,
+                             std::uint32_t n, int call) {
+  const char* dir = std::getenv("GUFO_QWEN35MOE_DUMP_DEV_LAYERS");
+  if (dir == nullptr) {
+    return;
+  }
+  HIP_CHECK(hipStreamSynchronize(stream_));
+  std::vector<std::int32_t> host(n);
+  HIP_CHECK(hipMemcpy(host.data(), ptr, host.size() * sizeof(std::int32_t),
+                      hipMemcpyDeviceToHost));
+  char path[320];
+  std::snprintf(path, sizeof(path), "%s/dev_c%d_%s.bin", dir, call, tag);
+  FILE* f = std::fopen(path, "wb");
+  if (f != nullptr) {
+    std::fwrite(host.data(), sizeof(std::int32_t), host.size(), f);
     std::fclose(f);
   }
 }
