@@ -1,9 +1,11 @@
 // Dumps dequantized rows for cross-checking against tools/qwen35moe/dequant_check.py:
-// each line is "<name> <row> <cols> <mean> <std> <min> <max>" followed by the
-// raw float row on the next line (space separated).
+// one header line "<name> row=<r> ex=<e> cols=<c>" followed by the raw float
+// row. Column count is dims[0]; expert tensors address expert e at
+// e * erows * row_bytes.
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -14,33 +16,78 @@ namespace {
 using gufo::core::GgufReader;
 using gufo::core::GgmlType;
 
-void DumpRow(const GgufReader& reader, const std::string& name,
-             std::uint64_t row, std::uint64_t cols, GgmlType type,
-             const void* data) {
-  const std::size_t rb = gufo::quant::EncodedSizeBytes(type, cols);
-  std::vector<float> out(cols);
-  const auto* src = static_cast<const std::uint8_t*>(data) + row * rb;
+void DequantRow(GgmlType type, const void* src, float* dst,
+                std::size_t cols) {
   switch (type) {
     case GgmlType::kF32:
-      out.assign(static_cast<const float*>(data) + row * cols,
-                 static_cast<const float*>(data) + (row + 1) * cols);
-      break;
-    case GgmlType::kQ8_0:
-      gufo::quant::DequantizeQ8_0(src, out.data(), cols);
-      break;
-    case GgmlType::kQ4_K:
-      gufo::quant::DequantizeQ4_K(src, out.data(), cols);
-      break;
-    case GgmlType::kQ5_K:
-      gufo::quant::DequantizeQ5_K(src, out.data(), cols);
-      break;
-    case GgmlType::kQ6_K:
-      gufo::quant::DequantizeQ6_K(src, out.data(), cols);
-      break;
-    default:
-      std::fprintf(stderr, "unsupported %s\n", name.c_str());
+      std::memcpy(dst, src, cols * sizeof(float));
       return;
+    case GgmlType::kBF16: {
+      const auto* s = static_cast<const std::uint16_t*>(src);
+      for (std::size_t i = 0; i < cols; ++i) {
+        const std::uint32_t u = static_cast<std::uint32_t>(s[i]) << 16;
+        float f = 0.0F;
+        std::memcpy(&f, &u, sizeof(float));
+        dst[i] = f;
+      }
+      return;
+    }
+    case GgmlType::kF16: {
+      const auto* s = static_cast<const std::uint16_t*>(src);
+      for (std::size_t i = 0; i < cols; ++i) {
+        dst[i] = gufo::quant::Fp16ToFloat(s[i]);
+      }
+      return;
+    }
+    case GgmlType::kQ8_0:
+      gufo::quant::DequantizeQ8_0(src, dst, cols);
+      return;
+    case GgmlType::kQ4_K:
+      gufo::quant::DequantizeQ4_K(src, dst, cols);
+      return;
+    case GgmlType::kQ5_K:
+      gufo::quant::DequantizeQ5_K(src, dst, cols);
+      return;
+    case GgmlType::kQ6_K:
+      gufo::quant::DequantizeQ6_K(src, dst, cols);
+      return;
+    case GgmlType::kQ3_K:
+      gufo::quant::DequantizeQ3_K(src, dst, cols);
+      return;
+    case GgmlType::kQ8_K:
+      gufo::quant::DequantizeQ8_K(src, dst, cols);
+      return;
+    case GgmlType::kIQ4_NL:
+      gufo::quant::DequantizeIQ4_NL(src, dst, cols);
+      return;
+    case GgmlType::kIQ4_XS:
+      gufo::quant::DequantizeIQ4_XS(src, dst, cols);
+      return;
+    case GgmlType::kIQ3_S:
+      gufo::quant::DequantizeIQ3_S(src, dst, cols);
+      return;
+    default:
+      break;
   }
+  std::fill(dst, dst + cols, 0.0F);
+}
+
+struct Req {
+  const char* name;
+  std::uint64_t row, cols, erows, expert;
+};
+
+void DumpRow(const GgufReader& reader, const Req& q) {
+  const auto* t = reader.FindTensor(q.name);
+  if (t == nullptr) {
+    std::fprintf(stderr, "missing %s\n", q.name);
+    return;
+  }
+  const std::size_t rb = gufo::quant::EncodedSizeBytes(t->type, q.cols);
+  const std::uint8_t* base = static_cast<const std::uint8_t*>(t->data) +
+                             q.expert * q.erows * rb;
+  std::vector<float> out(q.cols);
+  DequantRow(t->type, base + q.row * rb, out.data(), q.cols);
   double mean = 0, sq = 0, mn = out[0], mx = out[0];
   for (float v : out) {
     mean += v;
@@ -48,13 +95,13 @@ void DumpRow(const GgufReader& reader, const std::string& name,
     mn = std::min<double>(mn, v);
     mx = std::max<double>(mx, v);
   }
-  mean /= cols;
-  const double std = std::sqrt(sq / cols - mean * mean);
-  std::printf("%s %llu %llu %.6f %.6f %.6f %.6f\n", name.c_str(),
-              (unsigned long long)row, (unsigned long long)cols, mean, std, mn,
-              mx);
-  for (std::uint64_t i = 0; i < cols; ++i) {
-    std::printf("%.6f%c", out[i], i + 1 == cols ? '\n' : ' ');
+  mean /= q.cols;
+  const double std = std::sqrt(sq / q.cols - mean * mean);
+  std::printf("%s row=%llu ex=%llu cols=%llu %.6f %.6f %.6f %.6f\n", q.name,
+              (unsigned long long)q.row, (unsigned long long)q.expert,
+              (unsigned long long)q.cols, mean, std, mn, mx);
+  for (std::uint64_t i = 0; i < q.cols; ++i) {
+    std::printf("%.6f%c", out[i], i + 1 == q.cols ? '\n' : ' ');
   }
 }
 }  // namespace
@@ -70,31 +117,31 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "open: %s\n", error.c_str());
     return 1;
   }
-  const struct Req {
-    const char* name;
-    std::uint64_t row, cols;
-  } reqs[] = {
-      {"token_embd.weight", 760, 2048},
-      {"output.weight", 19241, 2048},
-      {"blk.0.attn_qkv.weight", 0, 8192},
-      {"blk.0.attn_gate.weight", 0, 4096},
-      {"blk.0.ssm_alpha.weight", 0, 2048},
-      {"blk.0.ssm_beta.weight", 1, 2048},
-      {"blk.0.ffn_gate_exps.weight", 0, 2048},
-      {"blk.0.ffn_down_exps.weight", 0, 512},
-      {"blk.3.attn_q.weight", 0, 8192},
-      {"blk.3.attn_output.weight", 0, 4096},
-      {"blk.0.ffn_gate_shexp.weight", 0, 2048},
-      {"blk.0.ssm_a", 0, 32},
-      {"blk.0.ssm_dt.bias", 0, 32},
+  // cols is always dims[0]; erows is dims[1] for 3D expert stacks, 0 else.
+  const Req reqs[] = {
+      {"token_embd.weight", 760, 2048, 0, 0},
+      {"token_embd.weight", 248319, 2048, 0, 0},
+      {"output.weight", 19241, 2048, 0, 0},
+      {"output.weight", 248319, 2048, 0, 0},
+      {"blk.0.attn_qkv.weight", 0, 2048, 0, 0},
+      {"blk.0.attn_qkv.weight", 8191, 2048, 0, 0},
+      {"blk.0.attn_gate.weight", 0, 2048, 0, 0},
+      {"blk.0.attn_gate.weight", 4095, 2048, 0, 0},
+      {"blk.0.ssm_alpha.weight", 0, 2048, 0, 0},
+      {"blk.0.ssm_beta.weight", 1, 2048, 0, 0},
+      {"blk.0.ffn_gate_exps.weight", 0, 2048, 512, 0},
+      {"blk.0.ffn_gate_exps.weight", 511, 2048, 512, 255},
+      {"blk.0.ffn_down_exps.weight", 0, 512, 2048, 0},
+      {"blk.0.ffn_down_exps.weight", 2047, 512, 2048, 255},
+      {"blk.3.attn_q.weight", 0, 2048, 0, 0},
+      {"blk.3.attn_q.weight", 8191, 2048, 0, 0},
+      {"blk.3.attn_output.weight", 0, 4096, 0, 0},
+      {"blk.3.attn_output.weight", 2047, 4096, 0, 0},
+      {"blk.0.ffn_gate_shexp.weight", 0, 2048, 0, 0},
+      {"blk.0.ffn_gate_shexp.weight", 511, 2048, 0, 0},
   };
   for (const auto& q : reqs) {
-    const auto* t = reader->FindTensor(q.name);
-    if (t == nullptr) {
-      std::fprintf(stderr, "missing %s\n", q.name);
-      continue;
-    }
-    DumpRow(*reader, q.name, q.row, q.cols, t->type, t->data);
+    DumpRow(*reader, q);
   }
   return 0;
 }

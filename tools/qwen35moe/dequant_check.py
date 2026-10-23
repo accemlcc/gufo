@@ -86,20 +86,19 @@ def main():
             continue
         if line[0].isalpha():
             parts = line.split()
-            assert len(parts) == 7, line[:80]
-            name, row, cols = parts[0], int(parts[1]), int(parts[2])
-            blocks[name] = (row, cols, [])
+            assert len(parts) == 8, line[:80]
+            name = parts[0]
+            row = int(parts[1].split("=")[1])
+            ex = int(parts[2].split("=")[1])
+            cols = int(parts[3].split("=")[1])
+            blocks[f"{name}@{ex}"] = (name, row, ex, cols, [])
         else:
             name = list(blocks.keys())[-1]
-            blocks[name][2].extend(float(x) for x in line.split())
+            blocks[name][4].extend(float(x) for x in line.split())
     fails = 0
-    for name, (row, cols, cpp_vals) in blocks.items():
+    for key, (name, row, ex, cols, cpp_vals) in blocks.items():
         typ, dims, toff = tensors[name]
         assert typ in QTYPES, f"{name} has unexpected type {typ}"
-        n_elem = 1
-        for dd in dims:
-            n_elem *= dd
-        # row size for K-quants: blocks of the fastest dim
         if typ == 8:
             rb, bq = 34, 32
         elif typ == 12:
@@ -109,7 +108,12 @@ def main():
         else:
             rb, bq = 210, 256
         assert cols % bq == 0
-        start = base + toff + row * (cols // bq) * rb
+        if len(dims) == 3:
+            expert_bytes = (dims[0] * dims[1] // bq) * rb
+            assert ex < dims[2]
+        else:
+            expert_bytes, ex = 0, 0
+        start = base + toff + ex * expert_bytes + row * (cols // bq) * rb
         vals = []
         for b in range(cols // bq):
             blob = data[start + b * rb:start + (b + 1) * rb]
@@ -121,7 +125,7 @@ def main():
         diff = np.abs(cpp - ref)
         ok = diff.max() < 2e-3
         fails += not ok
-        print(f"{name} row={row}: max_abs={diff.max():.2e} "
+        print(f"{name} row={row} ex={ex}: max_abs={diff.max():.2e} "
               f"{'OK' if ok else 'FAIL'}")
     print("FAILURES:", fails)
     return 1 if fails else 0

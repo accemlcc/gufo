@@ -22,8 +22,11 @@ routing). GGUF architecture key `qwen35moe`, Unsloth dynamic quants plus the
   `nextn_predict_layers == 1`.
 - **Linear layers** are Gated DeltaNet: `attn_qkv` splits into
   `2 * key_dim + value_dim`, `attn_gate` is the output gate `z`,
-  `ssm_alpha`/`ssm_beta`/`ssm_dt`/`ssm_a` drive the decay and rate,
+  `ssm_alpha`/`ssm_beta`/`ssm_dt` drive the decay and rate,
   `ssm_norm` is the gated RMSNorm, `ssm_out` the output projection.
+  `ssm_a` stores the *negative decay rates* (`-A`), not the checkpoint's
+  `A_log`: the graph multiplies them with `softplus(a + dt)` directly, no
+  `exp`, no negation. The converter bakes `-exp()` in.
 - **Full layers** pack query and gate (`attn_q` is `[hidden, 2 * heads *
   head_dim]`), carry per-head-dim Q/K norms, rotate the first `rotary_dim`
   elements with mRoPE sections `[11, 11, 10]`, and gate the attention output
