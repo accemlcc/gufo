@@ -35,6 +35,10 @@ template<int M>
 __device__ __forceinline__ float XorLane(float v) {
   static_assert(M > 0 && M < kWave && (M & (M - 1)) == 0);
   const int x = __float_as_int(v);
+  if constexpr (M == 16) {
+    return __int_as_float(__builtin_amdgcn_permlanex16(
+        x, x, 0x76543210, 0xfedcba98, false, false));
+  }
   return __int_as_float(__builtin_amdgcn_update_dpp(x, x, 0x160 | M, 0xf, 0xf,
                                                    false));
 }
