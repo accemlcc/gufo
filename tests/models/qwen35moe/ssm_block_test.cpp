@@ -218,8 +218,8 @@ void CpuSsm(const m::ModelWeights& w, const m::LayerWeights& l,
       const double sc = 1.0 / std::sqrt(ss / hk + w.config.rms_eps);
       for (std::size_t j = 0; j < hk; ++j) {
         const double z = gate_r[hh * hk + j];
-        normed[hh * hk + j] = static_cast<float>(core[hh * hk + j] * sc *
-                                                 wn[j] * z / (1 + std::exp(-z)));
+        const double act = core[hh * hk + j] * sc * wn[j];
+        normed[hh * hk + j] = static_cast<float>(act * z / (1 + std::exp(-z)));
       }
     }
     for (std::size_t o = 0; o < d; ++o) {

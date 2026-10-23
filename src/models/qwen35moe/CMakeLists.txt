@@ -17,11 +17,13 @@ if (ENGINE_ENABLE_HIP)
   target_sources(gufo_qwen35moe PRIVATE kernels/rocm/device_model.cpp
                       kernels/rocm/route.hip.cpp
                       kernels/rocm/qkv_post.hip.cpp
-                      kernels/rocm/attention.hip.cpp)
+                      kernels/rocm/attention.hip.cpp
+                      kernels/rocm/ssm.hip.cpp)
   set_source_files_properties(kernels/rocm/device_model.cpp
                               kernels/rocm/route.hip.cpp
                               kernels/rocm/qkv_post.hip.cpp
                               kernels/rocm/attention.hip.cpp
+                              kernels/rocm/ssm.hip.cpp
     PROPERTIES LANGUAGE HIP)
 endif()
 

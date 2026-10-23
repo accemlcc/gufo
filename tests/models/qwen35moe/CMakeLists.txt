@@ -23,6 +23,8 @@ if (ENGINE_ENABLE_HIP)
   add_qwen35moe_test(gemv gufo_qwen35moe "hip;gpu;gfx1151")
   add_qwen35moe_test(qkv_post gufo_qwen35moe "hip;gpu;gfx1151")
   add_qwen35moe_test(attention gufo_qwen35moe "hip;gpu;gfx1151")
+  add_qwen35moe_test(ssm_block gufo_qwen35moe
+    "hip;gpu;gfx1151;slow;external-model")
   add_qwen35moe_test(moe_block gufo_qwen35moe
     "hip;gpu;gfx1151;slow;external-model")
 endif()
