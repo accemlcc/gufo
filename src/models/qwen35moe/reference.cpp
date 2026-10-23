@@ -396,7 +396,7 @@ void Reference::FullLayer(std::uint32_t layer, const float* x,
           acc[i] += weight * v[i];
         }
       }
-      // The output gate is the second half of the packed q projection,
+      // The output gate is the packed gate half of this head,
       // applied elementwise before the output projection.
       const float* gh = qgr + h * 2 * dim + dim;
       for (std::size_t i = 0; i < dim; ++i) {
