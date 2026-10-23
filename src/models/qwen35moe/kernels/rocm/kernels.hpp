@@ -64,7 +64,7 @@ void SigmoidGateAct(const SigmoidGateArgs& args, hipStream_t stream);
 
 /// Scales each row of `shared` in place by sigmoid(gate_vec . h[row]).
 /// The dot product is one row of the gate vector against one normalized
-/// layer input; the shared expert output waits for it before MoeFinish.
+/// layer input; the shared expert output waits for it before MoeCombine.
 struct GateSharedArgs {
   float* shared;       ///< [rows][hidden], scaled in place
   const float* gate;   ///< [hidden], the shared-expert gate vector
