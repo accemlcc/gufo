@@ -52,6 +52,16 @@ struct GateUpArgs {
 };
 void GateUpAct(const GateUpArgs& args, hipStream_t stream);
 
+/// out = attn * sigmoid(gate) over `count` elements: the full-attention gate
+/// is a sigmoid, not the silu of the expert path.
+struct SigmoidGateArgs {
+  const float* attn;
+  const float* gate;
+  float* out;
+  std::size_t count;
+};
+void SigmoidGateAct(const SigmoidGateArgs& args, hipStream_t stream);
+
 /// ---------------------------------------------------------------------------
 /// Routing (route.hip.cpp)
 ///

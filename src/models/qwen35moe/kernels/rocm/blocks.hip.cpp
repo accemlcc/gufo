@@ -336,6 +336,28 @@ void AddRows(const AddRowsArgs& args, hipStream_t stream) {
       args.x, args.add, args.count / kVec, args.count);
 }
 
+__global__ void __launch_bounds__(kBlock)
+    SigmoidGateKernel(const float* attn, const float* gate, float* out,
+                      std::size_t groups, std::size_t count) {
+  const std::size_t first =
+      static_cast<std::size_t>(blockIdx.x) * kBlock + threadIdx.x;
+  if (first < groups) {
+    const float4 a = reinterpret_cast<const float4*>(attn)[first];
+    const float4 g = reinterpret_cast<const float4*>(gate)[first];
+    float4 o;
+    o.x = a.x / (1.0F + expf(-g.x));
+    o.y = a.y / (1.0F + expf(-g.y));
+    o.z = a.z / (1.0F + expf(-g.z));
+    o.w = a.w / (1.0F + expf(-g.w));
+    reinterpret_cast<float4*>(out)[first] = o;
+  }
+  const std::size_t tail = groups * kVec;
+  if (first < count - tail) {
+    const float gg = gate[tail + first];
+    out[tail + first] = attn[tail + first] / (1.0F + expf(-gg));
+  }
+}
+
 void GateUpAct(const GateUpArgs& args, hipStream_t stream) {
   if (args.count == 0) {
     return;
@@ -345,6 +367,17 @@ void GateUpAct(const GateUpArgs& args, hipStream_t stream) {
   }
   GateUpKernel<<<ElementBlocks(args.count / kVec), kBlock, 0, stream>>>(
       args.gate, args.up, args.act, args.count / kVec, args.count);
+}
+
+void SigmoidGateAct(const SigmoidGateArgs& args, hipStream_t stream) {
+  if (args.count == 0) {
+    return;
+  }
+  if (!Aligned(args.attn) || !Aligned(args.gate) || !Aligned(args.out)) {
+    throw std::invalid_argument("SigmoidGateAct needs 16-byte aligned buffers");
+  }
+  SigmoidGateKernel<<<ElementBlocks(args.count / kVec), kBlock, 0, stream>>>(
+      args.attn, args.gate, args.out, args.count / kVec, args.count);
 }
 
 void MoeFinish(const MoeFinishArgs& args, hipStream_t stream) {

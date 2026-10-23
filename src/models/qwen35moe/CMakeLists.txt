@@ -15,9 +15,13 @@ target_link_libraries(gufo_qwen35moe PUBLIC gufo_core Threads::Threads)
 # projection, the attention paths and the executor follow in later steps.
 if (ENGINE_ENABLE_HIP)
   target_sources(gufo_qwen35moe PRIVATE kernels/rocm/device_model.cpp
-                      kernels/rocm/route.hip.cpp)
+                      kernels/rocm/route.hip.cpp
+                      kernels/rocm/qkv_post.hip.cpp
+                      kernels/rocm/attention.hip.cpp)
   set_source_files_properties(kernels/rocm/device_model.cpp
                               kernels/rocm/route.hip.cpp
+                              kernels/rocm/qkv_post.hip.cpp
+                              kernels/rocm/attention.hip.cpp
     PROPERTIES LANGUAGE HIP)
 endif()
 
