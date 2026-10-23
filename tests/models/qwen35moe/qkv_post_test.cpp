@@ -202,8 +202,8 @@ void RandomCase(std::uint32_t rows, std::uint32_t first_pos) {
   const double dqv = MaxAbsDiff(got_q, want_q);
   const double dgv = MaxAbsDiff(got_g, want_g);
   const double dkv = MaxAbsDiff(got_k, want_k);
-  const double dvv = MaxAbsDiff(got_v, want_v);
-  const double worst = std::max(std::max(dqv, dgv), std::max(dkv, dvv));
+  const double dvw = MaxAbsDiff(got_v, want_v);
+  const double worst = std::max(std::max(dqv, dgv), std::max(dkv, dvw));
   const bool ok = worst < 2e-5;
   Report(("qkv_post.random_r" + std::to_string(rows) + "_p" +
           std::to_string(first_pos))

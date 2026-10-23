@@ -20,26 +20,28 @@ constexpr std::uint32_t kWave = 32;
 constexpr std::uint32_t kWaves = 8;
 constexpr std::uint32_t kThreads = kWave * kWaves;
 
-__device__ __forceinline__ float XorLane(float v, std::uint32_t m) {
+template<int M>
+__device__ __forceinline__ float XorLane(float v) {
+  static_assert(M > 0 && M < kWave && (M & (M - 1)) == 0);
   const int x = __float_as_int(v);
-  return __int_as_float(__builtin_amdgcn_update_dpp(x, x, 0x160 | m, 0xf, 0xf,
+  return __int_as_float(__builtin_amdgcn_update_dpp(x, x, 0x160 | M, 0xf, 0xf,
                                                    false));
 }
 
 __device__ __forceinline__ float WaveSum(float v) {
-  v += XorLane(v, 16);
-  v += XorLane(v, 8);
-  v += XorLane(v, 4);
-  v += XorLane(v, 2);
-  return v + XorLane(v, 1);
+  v += XorLane<16>(v);
+  v += XorLane<8>(v);
+  v += XorLane<4>(v);
+  v += XorLane<2>(v);
+  return v + XorLane<1>(v);
 }
 
 __device__ __forceinline__ float WaveMax(float v) {
-  v = fmaxf(v, XorLane(v, 16));
-  v = fmaxf(v, XorLane(v, 8));
-  v = fmaxf(v, XorLane(v, 4));
-  v = fmaxf(v, XorLane(v, 2));
-  return fmaxf(v, XorLane(v, 1));
+  v = fmaxf(v, XorLane<16>(v));
+  v = fmaxf(v, XorLane<8>(v));
+  v = fmaxf(v, XorLane<4>(v));
+  v = fmaxf(v, XorLane<2>(v));
+  return fmaxf(v, XorLane<1>(v));
 }
 
 /// One wave per (row, query head). Lanes split the head dim; every lane holds

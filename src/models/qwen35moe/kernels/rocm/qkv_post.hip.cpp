@@ -31,18 +31,20 @@ constexpr std::uint32_t kThreads = kWave * kWaves;
 /// Values per lane for a 256-wide head at a stride of one wave.
 constexpr std::uint32_t kPerLane = 8;
 
-__device__ __forceinline__ float XorLane(float v, std::uint32_t m) {
+template<int M>
+__device__ __forceinline__ float XorLane(float v) {
+  static_assert(M > 0 && M < kWave && (M & (M - 1)) == 0);
   const int x = __float_as_int(v);
-  return __int_as_float(__builtin_amdgcn_update_dpp(x, x, 0x160 | m, 0xf, 0xf,
+  return __int_as_float(__builtin_amdgcn_update_dpp(x, x, 0x160 | M, 0xf, 0xf,
                                                    false));
 }
 
 __device__ __forceinline__ float WaveSum(float v) {
-  v += XorLane(v, 16);
-  v += XorLane(v, 8);
-  v += XorLane(v, 4);
-  v += XorLane(v, 2);
-  return v + XorLane(v, 1);
+  v += XorLane<16>(v);
+  v += XorLane<8>(v);
+  v += XorLane<4>(v);
+  v += XorLane<2>(v);
+  return v + XorLane<1>(v);
 }
 
 __global__ void __launch_bounds__(kThreads)
