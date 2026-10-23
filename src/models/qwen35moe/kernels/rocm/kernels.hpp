@@ -11,13 +11,15 @@ namespace gufo::models::qwen35moe::rocm {
 /// The weight types the released artifacts carry. Q5_K holds the attention
 /// gate/up projections, the shared-expert gate/up and the routed gate/up
 /// halves; Q6_K the joint QKV, the down halves and the LM head; Q4_K appears
-/// in the 122B UD file. F32 carries every norm, the router, the shared gate
-/// vector and the SSM biases. Anything else is refused at load.
+/// in the 122B UD file, IQ4_XS its sparsest routed gate/up experts. F32
+/// carries every norm, the router, the shared gate vector and the SSM biases.
+/// Anything else is refused at load.
 enum class WeightFormat : std::uint32_t {
   kQ4_K,
   kQ5_K,
   kQ6_K,
   kQ8_0,
+  kIQ4_XS,
 };
 
 /// ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 // Qwen3.5-MoE's grouped projection: the routed experts and the ordinary
-// projections in one kernel over the three super-block formats the artifacts
-// carry, Q4_K, Q5_K and Q6_K.
+// projections in one kernel over the super-block formats the artifacts
+// carry, Q4_K, Q5_K, Q6_K, Q8_0 and IQ4_XS.
 //
 // A workgroup covers kRowsPerBlock rows of one expert's matrix and one group of
 // the table, so an expert's weights are read once per pass of slots. The
@@ -179,6 +179,13 @@ struct Traits<WeightFormat::kQ8_0> {
   static constexpr int kValues = 64;
 };
 
+template<>
+struct Traits<WeightFormat::kIQ4_XS> {
+  static constexpr int kBytes = 136;
+  static constexpr int kTasks = 4;
+  static constexpr int kValues = 64;
+};
+
 template<WeightFormat F>
 __host__ __device__ constexpr std::size_t RowBytes(std::uint32_t k) {
   return static_cast<std::size_t>(k) / 256 * Traits<F>::kBytes;
@@ -260,6 +267,12 @@ __device__ __forceinline__ void DecodeQ80(const std::uint8_t* block, int t,
   }
 }
 
+/// The shared non-linear 4-bit codebook IQ4_XS indexes: the values enter the
+/// dot product straight, the super-scale carries the magnitude.
+__constant__ static const std::int8_t kIq4XsValues[16] = {
+    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13,
+    25,   38,   53,  69,  89,  113};
+
 /// Q6_K task t = 2 n + h: ql bytes [64 n + 16 h, +16) and
 /// [64 n + 32 + 16 h, +16) with qh bytes [128 + 32 n + 16 h, +16), which are
 /// the values 128 n + 16 h + 32 r + i under scale scales[8 n + h + 2 r] and the
@@ -290,6 +303,38 @@ __device__ __forceinline__ void DecodeQ6K(const std::uint8_t* block, int t,
   Dequant16Six(ql_b, 4, qh, 6, s3, -32.0F * s3, w + 48);
 }
 
+/// IQ4_XS task t, values [64 t, +64): sub-blocks 2 t and 2 t + 1, sixteen
+/// bytes each with the low nibbles first. The sub-block scale is six bits -
+/// its nibble of scales_l plus two bits of scales_h - biased by 32 and folded
+/// with the half super-scale; the codes index the shared non-linear table.
+__device__ __forceinline__ void DecodeIQ4XS(const std::uint8_t* block, int t,
+                                            float (&w)[64]) {
+  const float d = Half(block);
+  const std::uint32_t scales_h =
+      static_cast<std::uint32_t>(block[2]) |
+      (static_cast<std::uint32_t>(block[3]) << 8);
+  const std::uint8_t* scales_l = block + 4;
+  const std::uint8_t* qs = block + 8;
+#pragma unroll
+  for (int h = 0; h < 2; ++h) {
+    const int ib = 2 * t + h;
+    const std::uint32_t low =
+        (scales_l[ib >> 1] >> (4 * (ib & 1))) & 0xFU;
+    const std::uint32_t high = (scales_h >> (2 * ib)) & 0x3U;
+    const float scale =
+        d * (static_cast<float>((high << 4) | low) - 32.0F);
+    const std::uint8_t* q = qs + 16 * ib;
+#pragma unroll
+    for (int i = 0; i < 16; ++i) {
+      const std::uint32_t v = q[i];
+      w[h * 32 + i] =
+          scale * static_cast<float>(kIq4XsValues[v & 0xFU]);
+      w[h * 32 + 16 + i] =
+          scale * static_cast<float>(kIq4XsValues[v >> 4]);
+    }
+  }
+}
+
 /// Lane `t`'s decoded weights of super-block `unit` of a row and the activation
 /// index of w[0]. The launcher refused every k the blocks do not divide.
 template<WeightFormat F>
@@ -308,6 +353,9 @@ __device__ __forceinline__ void Decode(const std::uint8_t* row,
     *offset = unit * 256 + 64 * static_cast<std::uint32_t>(t);
   } else if constexpr (F == WeightFormat::kQ8_0) {
     DecodeQ80(block, t, w);
+    *offset = unit * 256 + 64 * static_cast<std::uint32_t>(t);
+  } else if constexpr (F == WeightFormat::kIQ4_XS) {
+    DecodeIQ4XS(block, t, w);
     *offset = unit * 256 + 64 * static_cast<std::uint32_t>(t);
   } else {
     DecodeQ4K(block, t, w);
@@ -585,6 +633,12 @@ bool GroupedGemv(const GroupedGemvArgs& args, hipStream_t stream) {
     case WeightFormat::kQ8_0:
       LaunchGrouped<WeightFormat::kQ8_0>(args, stream);
       return true;
+    case WeightFormat::kIQ4_XS:
+      if (!RowAligned<WeightFormat::kIQ4_XS>(args.k)) {
+        return false;
+      }
+      LaunchGrouped<WeightFormat::kIQ4_XS>(args, stream);
+      return true;
   }
   return false;
 }
@@ -629,6 +683,14 @@ void EmbedRows(const EmbedArgs& args, hipStream_t stream) {
             "pairs");
       }
       launch.template operator()<WeightFormat::kQ6_K>();
+      return;
+    case WeightFormat::kIQ4_XS:
+      if (!RowAligned<WeightFormat::kIQ4_XS>(args.n)) {
+        throw std::invalid_argument(
+            "qwen35moe embedding needs an IQ4_XS width of whole super-block "
+            "pairs");
+      }
+      launch.template operator()<WeightFormat::kIQ4_XS>();
       return;
   }
   throw std::invalid_argument(

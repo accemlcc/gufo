@@ -79,7 +79,7 @@ void FreeAll() {
 }
 
 // Super-block bytes: one kernel unit of 256 values. Q8_0 packs eight
-// 32-value blocks per unit while the K-quants pack one.
+// 32-value blocks per unit while the K-quants and IQ4_XS pack one.
 std::size_t BlockBytes(k::WeightFormat format) {
   switch (format) {
     case k::WeightFormat::kQ4_K:
@@ -90,6 +90,8 @@ std::size_t BlockBytes(k::WeightFormat format) {
       return sizeof(q::block_q6_K);
     case k::WeightFormat::kQ8_0:
       return 8 * sizeof(q::block_q8_0);
+    case k::WeightFormat::kIQ4_XS:
+      return sizeof(q::block_iq4_xs);
   }
   return 0;
 }
@@ -114,9 +116,9 @@ Built Build(k::WeightFormat format, std::uint32_t experts, std::uint32_t m,
   }
   std::uniform_real_distribution<float> scale(0.001F, 0.006F);
   for (std::size_t r = 0; r < static_cast<std::size_t>(experts) * m; ++r) {
-    // Q8_0's unit holds eight 32-value blocks; the K-quants hold one block
-    // per unit. Every block gets a small scale so no random exponent bit
-    // becomes an infinity.
+    // Q8_0's unit holds eight 32-value blocks; the K-quants and IQ4_XS hold
+    // one super-block per unit. Every block gets a small scale so no random
+    // exponent bit becomes an infinity.
     const std::size_t nblocks =
         format == k::WeightFormat::kQ8_0 ? kdim / 32 : kdim / 256;
     const std::size_t bb =
@@ -136,6 +138,14 @@ Built Build(k::WeightFormat format, std::uint32_t experts, std::uint32_t m,
         blk->dmin = ToHalf(0.5F * scale(rng));
       } else if (format == k::WeightFormat::kQ8_0) {
         reinterpret_cast<q::block_q8_0*>(p)->d = ToHalf(scale(rng));
+      } else if (format == k::WeightFormat::kIQ4_XS) {
+        // A middling 6-bit sub-scale (40, bias 32) under a small
+        // super-scale: the decoded values stay order-one either way.
+        auto* blk = reinterpret_cast<q::block_iq4_xs*>(p);
+        blk->d = ToHalf(0.01F);
+        blk->scales_h = 0xAAAA;
+        blk->scales_l[0] = blk->scales_l[1] = blk->scales_l[2] =
+            blk->scales_l[3] = 0x88;
       } else {
         reinterpret_cast<q::block_q6_K*>(p)->d = ToHalf(0.25F * scale(rng));
       }
@@ -151,6 +161,8 @@ Built Build(k::WeightFormat format, std::uint32_t experts, std::uint32_t m,
       q::DequantizeQ5_K(src, dst, kdim);
     } else if (format == k::WeightFormat::kQ8_0) {
       q::DequantizeQ8_0(src, dst, kdim);
+    } else if (format == k::WeightFormat::kIQ4_XS) {
+      q::DequantizeIQ4_XS(src, dst, kdim);
     } else {
       q::DequantizeQ6_K(src, dst, kdim);
     }
@@ -180,8 +192,9 @@ struct Case {
 
 std::string CaseName(const Case& c) {
   const char* f = c.format == k::WeightFormat::kQ4_K      ? "q4k"
-                    : c.format == k::WeightFormat::kQ5_K ? "q5k"
-                    : c.format == k::WeightFormat::kQ8_0 ? "q8_0"
+                  : c.format == k::WeightFormat::kQ5_K   ? "q5k"
+                  : c.format == k::WeightFormat::kQ8_0   ? "q8_0"
+                  : c.format == k::WeightFormat::kIQ4_XS ? "iq4_xs"
                                                          : "q6k";
   return std::string(f) + "_e" + std::to_string(c.experts) + "_m" +
          std::to_string(c.m) + "_k" + std::to_string(c.kdim) + "_r" +
@@ -276,9 +289,10 @@ void RunCase(const Case& c, std::mt19937& rng, bool& ok, std::string& detail) {
 
 void DenseAndGrouped() {
   std::mt19937 rng(31);
-  const k::WeightFormat formats[4] = {
+  const k::WeightFormat formats[5] = {
       k::WeightFormat::kQ4_K, k::WeightFormat::kQ5_K,
-      k::WeightFormat::kQ6_K, k::WeightFormat::kQ8_0};
+      k::WeightFormat::kQ6_K, k::WeightFormat::kQ8_0,
+      k::WeightFormat::kIQ4_XS};
   for (k::WeightFormat f : formats) {
     // Dense single-group, one row and sixteen.
     for (std::uint32_t rows : {1U, 16U}) {
@@ -402,7 +416,8 @@ void Embed() {
   constexpr std::uint32_t kN = 512;
   for (k::WeightFormat format :
        {k::WeightFormat::kQ4_K, k::WeightFormat::kQ5_K,
-        k::WeightFormat::kQ6_K, k::WeightFormat::kQ8_0}) {
+        k::WeightFormat::kQ6_K, k::WeightFormat::kQ8_0,
+        k::WeightFormat::kIQ4_XS}) {
     Built w = Build(format, 1, kVocab, kN, rng);
     const std::uint32_t rows = 5;
     std::vector<std::int32_t> tokens = {0, 7, 63, 1, 32};
@@ -432,10 +447,11 @@ void Embed() {
     }
     got = Read(dy, got);
     FreeAll();
-    const char* name = format == k::WeightFormat::kQ4_K   ? "q4k"
-                       : format == k::WeightFormat::kQ5_K ? "q5k"
-                       : format == k::WeightFormat::kQ8_0 ? "q8_0"
-                                                         : "q6k";
+    const char* name = format == k::WeightFormat::kQ4_K     ? "q4k"
+                       : format == k::WeightFormat::kQ5_K   ? "q5k"
+                       : format == k::WeightFormat::kQ8_0   ? "q8_0"
+                       : format == k::WeightFormat::kIQ4_XS ? "iq4_xs"
+                                                           : "q6k";
     const double worst = MaxAbsDiff(got, want);
     Report(("gemv.embed_" + std::string(name)).c_str(),
            !threw && worst < 1e-6,

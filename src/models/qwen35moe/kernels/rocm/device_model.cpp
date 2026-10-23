@@ -95,9 +95,12 @@ WeightFormat DeviceTensor::quant() const {
       return WeightFormat::kQ6_K;
     case core::GgmlType::kQ8_0:
       return WeightFormat::kQ8_0;
+    case core::GgmlType::kIQ4_XS:
+      return WeightFormat::kIQ4_XS;
     default:
       throw std::invalid_argument(
-          "qwen35moe projections need Q4_K, Q5_K, Q6_K or Q8_0 weights");
+          "qwen35moe projections need Q4_K, Q5_K, Q6_K, Q8_0 or IQ4_XS "
+          "weights");
   }
 }
 

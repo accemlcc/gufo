@@ -168,15 +168,23 @@ void CpuMoe(const m::ModelWeights& w, const m::LayerWeights& l,
           q::DequantizeQ5_K(gb, grow.data(), d);
         } else if (l.ffn_gate_exps.type == gufo::core::GgmlType::kQ4_K) {
           q::DequantizeQ4_K(gb, grow.data(), d);
-        } else {
+        } else if (l.ffn_gate_exps.type == gufo::core::GgmlType::kQ6_K) {
           q::DequantizeQ6_K(gb, grow.data(), d);
+        } else if (l.ffn_gate_exps.type == gufo::core::GgmlType::kIQ4_XS) {
+          q::DequantizeIQ4_XS(gb, grow.data(), d);
+        } else {
+          std::abort();
         }
         if (l.ffn_up_exps.type == gufo::core::GgmlType::kQ5_K) {
           q::DequantizeQ5_K(ub, urow.data(), d);
         } else if (l.ffn_up_exps.type == gufo::core::GgmlType::kQ4_K) {
           q::DequantizeQ4_K(ub, urow.data(), d);
-        } else {
+        } else if (l.ffn_up_exps.type == gufo::core::GgmlType::kQ6_K) {
           q::DequantizeQ6_K(ub, urow.data(), d);
+        } else if (l.ffn_up_exps.type == gufo::core::GgmlType::kIQ4_XS) {
+          q::DequantizeIQ4_XS(ub, urow.data(), d);
+        } else {
+          std::abort();
         }
         double gg = 0.0, uu = 0.0;
         for (std::size_t kk = 0; kk < d; ++kk) {
@@ -193,8 +201,10 @@ void CpuMoe(const m::ModelWeights& w, const m::LayerWeights& l,
           q::DequantizeQ6_K(base, drow.data(), f);
         } else if (l.ffn_down_exps.type == gufo::core::GgmlType::kQ4_K) {
           q::DequantizeQ4_K(base, drow.data(), f);
-        } else {
+        } else if (l.ffn_down_exps.type == gufo::core::GgmlType::kQ5_K) {
           q::DequantizeQ5_K(base, drow.data(), f);
+        } else {
+          std::abort();
         }
         double dd = 0.0;
         for (std::size_t i = 0; i < f; ++i) {
@@ -221,15 +231,19 @@ void CpuMoe(const m::ModelWeights& w, const m::LayerWeights& l,
           q::DequantizeQ5_K(gb, gr.data(), d);
         } else if (l.ffn_gate_shexp.type == gufo::core::GgmlType::kQ4_K) {
           q::DequantizeQ4_K(gb, gr.data(), d);
-        } else {
+        } else if (l.ffn_gate_shexp.type == gufo::core::GgmlType::kQ6_K) {
           q::DequantizeQ6_K(gb, gr.data(), d);
+        } else {
+          std::abort();
         }
         if (l.ffn_up_shexp.type == gufo::core::GgmlType::kQ5_K) {
           q::DequantizeQ5_K(ub, ur.data(), d);
         } else if (l.ffn_up_shexp.type == gufo::core::GgmlType::kQ4_K) {
           q::DequantizeQ4_K(ub, ur.data(), d);
-        } else {
+        } else if (l.ffn_up_shexp.type == gufo::core::GgmlType::kQ6_K) {
           q::DequantizeQ6_K(ub, ur.data(), d);
+        } else {
+          std::abort();
         }
         double gg = 0.0, uu = 0.0;
         for (std::size_t kk = 0; kk < d; ++kk) {
@@ -256,8 +270,10 @@ void CpuMoe(const m::ModelWeights& w, const m::LayerWeights& l,
           q::DequantizeQ6_K(base, dr.data(), s);
         } else if (l.ffn_down_shexp.type == gufo::core::GgmlType::kQ4_K) {
           q::DequantizeQ4_K(base, dr.data(), s);
-        } else {
+        } else if (l.ffn_down_shexp.type == gufo::core::GgmlType::kQ5_K) {
           q::DequantizeQ5_K(base, dr.data(), s);
+        } else {
+          std::abort();
         }
         double dd = 0.0;
         for (std::size_t i = 0; i < s; ++i) {

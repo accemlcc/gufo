@@ -83,6 +83,8 @@ void DecodeRow(const m::TensorRef& t, std::uint32_t row, std::uint32_t expert,
     q::DequantizeQ6_K(p, out, t.cols);
   } else if (t.type == gufo::core::GgmlType::kQ8_0) {
     q::DequantizeQ8_0(p, out, t.cols);
+  } else if (t.type == gufo::core::GgmlType::kIQ4_XS) {
+    q::DequantizeIQ4_XS(p, out, t.cols);
   } else {
     std::abort();
   }
