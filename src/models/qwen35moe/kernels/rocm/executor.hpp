@@ -38,7 +38,7 @@ struct SsmState {
   ~SsmState();
   void* allocation{nullptr};
   std::size_t bytes{0};
-  /// Per linear layer in trunk order: [qkv_dim][conv_kernel - 1] history.
+  /// Per linear layer in trunk order: [qkv_dim][conv_kernel] history.
   std::vector<float*> conv;
   /// Per linear layer: [value_heads][state_size][value_head_dim] matrix.
   std::vector<float*> recurrent;
@@ -110,6 +110,7 @@ class Executor {
   float* x_{nullptr};
   float* h_{nullptr};
   float* qkv_{nullptr};
+  float* conv_{nullptr};
   float* gate_{nullptr};
   float* alpha_{nullptr};
   float* beta_{nullptr};

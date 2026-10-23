@@ -100,6 +100,8 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
   const std::size_t s = c.shared_ffn_size;
   const std::size_t u = c.experts_used;
   const std::size_t e = c.num_experts;
+  const std::size_t qkv_max = std::max<std::size_t>(2 * qd, qkv);
+  const std::size_t mix_max = std::max(qd, vd);
   std::size_t arena = 0;
   const auto need = [&](std::size_t count, std::size_t element) {
     arena += Pad(count * element);
@@ -107,12 +109,12 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
   need(max_rows, sizeof(std::int32_t));                 // tokens_
   need(max_rows * d, sizeof(float));                    // x_
   need(max_rows * d, sizeof(float));                    // h_
-  need(max_rows * std::max<std::size_t>(2 * qd, qkv),
-       sizeof(float));                                  // qkv_
+  need(max_rows * qkv_max, sizeof(float));              // qkv_
+  need(max_rows * qkv_max, sizeof(float));              // conv_
   need(max_rows * kvd, sizeof(float));                  // k_
   need(max_rows * kvd, sizeof(float));                  // v_
   need(max_rows * qd, sizeof(float));                   // attn_
-  need(max_rows * qd, sizeof(float));                   // o_ (gated)
+  need(max_rows * mix_max, sizeof(float));              // o_ (gated)
   need(max_rows * vd, sizeof(float));                   // gate_ (ssm z)
   need(max_rows * rk, sizeof(float));                   // alpha_
   need(max_rows * rk, sizeof(float));                   // beta_
@@ -135,11 +137,16 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
   tokens_ = a.Take<std::int32_t>(max_rows_);
   x_ = a.Take<float>(max_rows_ * d);
   h_ = a.Take<float>(max_rows_ * d);
-  qkv_ = a.Take<float>(max_rows_ * std::max<std::size_t>(2 * qd, qkv));
+  const std::size_t qkv_max =
+      std::max<std::size_t>(2 * c.AttnOutDim(), c.SsmQkvDim());
+  const std::size_t mix_max =
+      std::max(c.AttnOutDim(), c.SsmValueDim());
+  qkv_ = a.Take<float>(max_rows_ * qkv_max);
+  conv_ = a.Take<float>(max_rows_ * qkv_max);
   k_ = a.Take<float>(max_rows_ * kvd);
   v_ = a.Take<float>(max_rows_ * kvd);
   attn_ = a.Take<float>(max_rows_ * qd);
-  o_ = a.Take<float>(max_rows_ * qd);
+  o_ = a.Take<float>(max_rows_ * mix_max);
   gate_ = a.Take<float>(max_rows_ * vd);
   alpha_ = a.Take<float>(max_rows_ * rk);
   beta_ = a.Take<float>(max_rows_ * rk);
@@ -325,7 +332,7 @@ void Executor::ForwardLayer(KvCache& cache, SsmState& ssm,
     sa.qkv = qkv_;
     sa.conv_w = static_cast<const float*>(w.ssm_conv1d.data);
     sa.conv_state = ssm.conv[layer];
-    sa.conv_out = attn_;
+    sa.conv_out = conv_;
     sa.recurrent = ssm.recurrent[layer];
     sa.alpha = alpha_;
     sa.beta = beta_;
