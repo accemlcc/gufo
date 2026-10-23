@@ -320,9 +320,17 @@ __global__ void __launch_bounds__(kBlock)
     s_part[threadIdx.x / kWave] = part;
   }
   __syncthreads();
-  float dot = threadIdx.x < kBlock / kWave ? s_part[threadIdx.x] : 0.0F;
-  dot = WaveSum(dot);
-  const float sig = 1.0F / (1.0F + expf(-dot));
+  // The second stage stays sequential: one thread adds the eight wave sums
+  // and shares the total, the same shape the norm's wide path uses.
+  if (threadIdx.x == 0) {
+    float dot = 0.0F;
+    for (int w = 0; w < kBlock / kWave; ++w) {
+      dot += s_part[w];
+    }
+    s_part[0] = dot;
+  }
+  __syncthreads();
+  const float sig = 1.0F / (1.0F + expf(-s_part[0]));
   float* out = shared + static_cast<std::size_t>(row) * hidden;
   for (std::uint32_t i = threadIdx.x; i < hidden; i += kBlock) {
     out[i] *= sig;
