@@ -30,9 +30,13 @@ graph at larger widths.
 - The HIP engine (`kernels/rocm`, `engine.cpp`) runs the full graph on device:
   upload, grouped GEMV (Q4_K/Q5_K/Q6_K/Q8_0), softmax top-k router, gated
   delta-net recurrence, fused QK-norm/RoPE/split/cache write, online GQA
-  attention and the MoE finish, each covered by a device unit test; the
-  end-to-end `device_forward` check against the oracle is in progress.
-  Tokenizer/chat-template wiring and quality runs are open.
+  attention, the gated shared expert and the raw MoE residual add, each
+  covered by a device unit test on the 35B file (attention and MoE blocks
+  bit-exact, worst 0.0). The end-to-end `device_forward` check passes: same
+  argmax as the oracle on a 6-token prefill plus two decodes, within half a
+  logit. The shared-gate reduction keeps its second stage sequential — a
+  chained wave-shuffle reduction mis-sums on this target. Tokenizer/
+  chat-template wiring and quality runs are open.
 
 ## Parity against served weights
 
