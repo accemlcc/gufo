@@ -97,7 +97,7 @@ class Executor {
                float* routed, float* weights, std::uint32_t layer_idx);
   /// The one sigmoid-gated shared expert over `rows` rows of `h`.
   void SharedExpert(const DeviceLayer& l, const float* h, std::uint32_t rows,
-                    float* out, float* gated);
+                    float* out, float* gated, std::uint32_t layer_idx);
   /// DIAGNOSTIC ONLY: writes `n`x`d` floats to the directory named by
   /// GUFO_QWEN35MOE_DUMP_DEV_LAYERS. Remove before finishing.
   void DumpStage(const char* tag, const float* ptr, std::uint32_t n,

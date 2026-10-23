@@ -300,7 +300,7 @@ void Executor::Forward(KvCache& cache, SsmState& ssm,
                  static_cast<std::uint32_t>(d), c.rms_eps},
                 stream_);
     Experts(w, h_, n, moe_out_, moe_weights_, l);
-    SharedExpert(w, h_, n, shared_, shared_);
+    SharedExpert(w, h_, n, shared_, shared_, l);
     MoeCombineArgs margs{};
     margs.out = tmp_mix_;
     margs.routed = moe_out_;
@@ -491,10 +491,23 @@ void Executor::Experts(const DeviceLayer& l, const float* h,
   routed_proj(l.ffn_down_exps, moe_act_, routed,
               static_cast<std::uint32_t>(c.hidden_size),
               static_cast<std::uint32_t>(f), 1);
+  if (dump_call_ >= 0) {
+    char tag[32];
+    std::snprintf(tag, sizeof(tag), "layer%02u_rgate", layer_idx);
+    DumpStage(tag, moe_gate_, count * u, static_cast<std::uint32_t>(f),
+              dump_call_);
+    std::snprintf(tag, sizeof(tag), "layer%02u_ract", layer_idx);
+    DumpStage(tag, moe_act_, count * u, static_cast<std::uint32_t>(f),
+              dump_call_);
+    std::snprintf(tag, sizeof(tag), "layer%02u_rdown", layer_idx);
+    DumpStage(tag, routed, count * u, static_cast<std::uint32_t>(d),
+              dump_call_);
+  }
 }
 
 void Executor::SharedExpert(const DeviceLayer& l, const float* h,
-                            std::uint32_t rows, float* out, float* gated) {
+                            std::uint32_t rows, float* out, float* gated,
+                            std::uint32_t layer_idx) {
   const Config& c = model_.config();
   const std::uint32_t s = c.shared_ffn_size;
   const std::uint32_t d = c.hidden_size;
@@ -512,6 +525,11 @@ void Executor::SharedExpert(const DeviceLayer& l, const float* h,
   dense(l.ffn_up_shexp, h, dense_up_, s, d);
   GateUpAct({dense_gate_, dense_up_, dense_up_, static_cast<std::size_t>(rows) * s}, stream_);
   dense(l.ffn_down_shexp, dense_up_, out, d, s);
+  if (dump_call_ >= 0) {
+    char tag[32];
+    std::snprintf(tag, sizeof(tag), "layer%02u_shpre", layer_idx);
+    DumpStage(tag, out, rows, d, dump_call_);
+  }
   GateSharedArgs gargs{};
   gargs.shared = out;
   gargs.gate = l.ffn_gate_inp_shexp.f32();
