@@ -119,7 +119,7 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
   need(max_rows * u, sizeof(float));                    // moe_weights_
   need(max_rows * u, sizeof(std::int32_t));             // moe_ids_
   need(e, sizeof(std::uint32_t));                       // moe_counts_
-  need(k::GroupTableInts(static_cast<std::uint32_t>(e)),
+  need(GroupTableInts(static_cast<std::uint32_t>(e)),
        sizeof(std::int32_t));                           // moe_groups_
   need(max_rows * u * f, sizeof(float));                // moe_gate_
   need(max_rows * u * f, sizeof(float));                // moe_up_
@@ -128,7 +128,7 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
   need(max_rows * s, sizeof(float));                    // dense_gate_
   need(max_rows * s, sizeof(float));                    // dense_up_
   need(max_rows * d, sizeof(float));                    // shared_
-  need(k::GroupTableInts(kMaxGroupSlots), sizeof(std::int32_t));
+  need(GroupTableInts(kMaxGroupSlots), sizeof(std::int32_t));
   need(max_logit_rows * v, sizeof(float));              // logits_
   HIP_CHECK(hipMalloc(&scratch_, arena));
   Arena a{static_cast<char*>(scratch_)};
@@ -147,7 +147,7 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
   moe_ids_ = a.Take<std::int32_t>(max_rows_ * u);
   moe_counts_ = a.Take<std::uint32_t>(e);
   moe_groups_ = a.Take<std::int32_t>(
-      k::GroupTableInts(static_cast<std::uint32_t>(e)));
+      GroupTableInts(static_cast<std::uint32_t>(e)));
   moe_gate_ = a.Take<float>(max_rows_ * u * f);
   moe_up_ = a.Take<float>(max_rows_ * u * f);
   moe_act_ = a.Take<float>(max_rows_ * u * f);
@@ -155,7 +155,7 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
   dense_gate_ = a.Take<float>(max_rows_ * s);
   dense_up_ = a.Take<float>(max_rows_ * s);
   shared_ = a.Take<float>(max_rows_ * d);
-  dense_groups_ = a.Take<std::int32_t>(k::GroupTableInts(kMaxGroupSlots));
+  dense_groups_ = a.Take<std::int32_t>(GroupTableInts(kMaxGroupSlots));
   logits_ = a.Take<float>(max_logit_rows_ * v);
 }
 

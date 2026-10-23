@@ -126,6 +126,9 @@ class Executor {
   std::uint32_t* moe_counts_{nullptr};
   std::int32_t* moe_groups_{nullptr};
   std::int32_t* dense_groups_{nullptr};
+  float* dense_gate_{nullptr};
+  float* dense_up_{nullptr};
+  float* shared_{nullptr};
   float* logits_{nullptr};
   void* act_q8_{nullptr};
   std::size_t act_q8_bytes_{0};
