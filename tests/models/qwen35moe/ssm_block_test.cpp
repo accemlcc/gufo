@@ -222,11 +222,12 @@ void CpuSsm(const m::ModelWeights& w, const m::LayerWeights& l,
         normed[hh * hk + j] = static_cast<float>(act * z / (1 + std::exp(-z)));
       }
     }
+    std::vector<float> orow(vd);
     for (std::size_t o = 0; o < d; ++o) {
-      DecodeRow(l.ssm_out, static_cast<std::uint32_t>(o), 0, row.data());
+      DecodeRow(l.ssm_out, static_cast<std::uint32_t>(o), 0, orow.data());
       double acc = 0.0;
       for (std::size_t i = 0; i < vd; ++i) {
-        acc += row[i] * normed[i];
+        acc += orow[i] * normed[i];
       }
       out[r * d + o] = static_cast<float>(acc);
     }
