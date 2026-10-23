@@ -77,25 +77,30 @@ void Forward(const std::string& path) {
     std::vector<float> ref_logits;
     std::vector<std::int32_t> prefix(ids.begin(), ids.begin() + splits[k]);
     ref.Forward(prefix, &ref_logits);
-    if (session->logits().size() != ref_logits.size()) {
+    // The session keeps only the requested (last) row; the oracle returns
+    // every position, so compare against its last row.
+    const std::size_t v = session->logits().size();
+    const std::size_t n = splits[k];
+    if (v == 0 || ref_logits.size() != n * v) {
       ok = false;
       detail = "logit width mismatch";
       break;
     }
+    const float* ref_last = ref_logits.data() + (n - 1) * v;
     std::size_t got_top = 0, want_top = 0;
-    for (std::size_t i = 0; i < ref_logits.size(); ++i) {
+    for (std::size_t i = 0; i < v; ++i) {
       if (session->logits()[i] > session->logits()[got_top]) {
         got_top = i;
       }
-      if (ref_logits[i] > ref_logits[want_top]) {
+      if (ref_last[i] > ref_last[want_top]) {
         want_top = i;
       }
     }
     double worst = 0.0;
-    for (std::size_t i = 0; i < ref_logits.size(); ++i) {
+    for (std::size_t i = 0; i < v; ++i) {
       worst = std::max(worst, std::fabs(static_cast<double>(
                                            session->logits()[i]) -
-                                       ref_logits[i]));
+                                       ref_last[i]));
     }
     char buf[128];
     std::snprintf(buf, sizeof(buf), "k=%zu got=%zu want=%zu worst=%.3f",
