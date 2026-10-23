@@ -554,6 +554,14 @@ void Reference::Forward(std::span<const std::int32_t> tokens,
     for (std::size_t i = 0; i < n * d; ++i) {
       h[i] += tmp[i];
     }
+    // DIAGNOSTIC ONLY: first NaN layer. Remove before finishing.
+    for (std::size_t i = 0; i < n * d; ++i) {
+      if (!(h[i] == h[i])) {
+        std::fprintf(stderr, "DIAGREF first NaN at layer %u elem %zu\n", l,
+                     i);
+        break;
+      }
+    }
     if (dump_dir != nullptr) {
       char path[256];
       std::snprintf(path, sizeof(path), "%s/layer%02u.bin", dump_dir, l);
