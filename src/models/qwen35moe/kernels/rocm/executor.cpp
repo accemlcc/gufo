@@ -354,7 +354,7 @@ void Executor::ForwardLayer(KvCache& cache, SsmState& ssm,
               stream_);
   if (dump_call_ >= 0) {
     char tag[32];
-    std::snprintf(tag, sizeof(tag), "layer%02u_anorm", layer_idx);
+    std::snprintf(tag, sizeof(tag), "layer%02u_anorm", layer);
     DumpStage(tag, mixed, n, static_cast<std::uint32_t>(d), dump_call_);
   }
   if (!w.is_full_attention) {
