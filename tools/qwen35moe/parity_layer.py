@@ -264,7 +264,8 @@ def main():
             e = idx[j]
             act = silu(x @ GE[e].T) * (x @ UE[e].T)
             moe = moe + tw[j] * (act @ DE[e].T)
-        gs = 1.0 / (1.0 + np.exp(-(x * m.t(p + "ffn_gate_inp_shexp.weight")).sum()))
+        gs_w = m.t(p + "ffn_gate_inp_shexp.weight")
+        gs = 1.0 / (1.0 + np.exp(-(x * gs_w).sum()))
         sh = silu(x @ m.t(p + "ffn_gate_shexp.weight").T) * (
             x @ m.t(p + "ffn_up_shexp.weight").T)
         moe = moe + gs * (sh @ m.t(p + "ffn_down_shexp.weight").T)
