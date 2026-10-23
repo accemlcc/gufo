@@ -229,6 +229,83 @@ void Combine() {
   Report("blocks.combine", d < 1e-5, "max_abs=" + Number(d));
 }
 
+void GateShared() {
+  constexpr std::uint32_t kRows = 3;
+  constexpr std::uint32_t kHidden = 2048;
+  std::mt19937 rng(47);
+  std::normal_distribution<float> normal(0.0F, 0.3F);
+  std::vector<float> shared(kRows * kHidden);
+  std::vector<float> gate(kHidden);
+  std::vector<float> h(kRows * kHidden);
+  for (float& v : shared) {
+    v = normal(rng);
+  }
+  for (float& v : gate) {
+    v = normal(rng);
+  }
+  for (float& v : h) {
+    v = normal(rng);
+  }
+  std::vector<float> want = shared;
+  for (std::uint32_t r = 0; r < kRows; ++r) {
+    double dot = 0.0;
+    for (std::uint32_t i = 0; i < kHidden; ++i) {
+      dot += static_cast<double>(gate[i]) * h[r * kHidden + i];
+    }
+    const float s = static_cast<float>(1.0 / (1.0 + std::exp(-dot)));
+    for (std::uint32_t i = 0; i < kHidden; ++i) {
+      want[r * kHidden + i] *= s;
+    }
+  }
+  float* dshared = Device(shared);
+  float* dgate = Device(gate);
+  float* dh = Device(h);
+  k::GateSharedArgs args{};
+  args.shared = dshared;
+  args.gate = dgate;
+  args.h = dh;
+  args.rows = kRows;
+  args.hidden = kHidden;
+  k::GateShared(args, nullptr);
+  HIP_CHECK(hipDeviceSynchronize());
+  shared = Read(dshared, shared);
+  const double d = MaxAbsDiff(shared, want);
+  HIP_CHECK(hipFree(dshared));
+  HIP_CHECK(hipFree(dgate));
+  HIP_CHECK(hipFree(dh));
+  Report("blocks.gateshared", d < 1e-5, "max_abs=" + Number(d));
+}
+
+void SigmoidGate() {
+  constexpr std::size_t kCount = 3 * 2048 + 17;
+  std::mt19937 rng(48);
+  std::normal_distribution<float> normal(0.0F, 1.0F);
+  std::vector<float> attn(kCount);
+  std::vector<float> gate(kCount);
+  for (float& v : attn) {
+    v = normal(rng);
+  }
+  for (float& v : gate) {
+    v = normal(rng);
+  }
+  std::vector<float> want(kCount);
+  for (std::size_t i = 0; i < kCount; ++i) {
+    want[i] = static_cast<float>(attn[i] / (1.0 + std::exp(-gate[i])));
+  }
+  float* dattn = Device(attn);
+  float* dgate = Device(gate);
+  std::vector<float> got(kCount, 0.0F);
+  float* dgot = Device(got);
+  k::SigmoidGateAct({dattn, dgate, dgot, kCount}, nullptr);
+  HIP_CHECK(hipDeviceSynchronize());
+  got = Read(dgot, got);
+  const double d = MaxAbsDiff(got, want);
+  HIP_CHECK(hipFree(dattn));
+  HIP_CHECK(hipFree(dgate));
+  HIP_CHECK(hipFree(dgot));
+  Report("blocks.sigmoidgate", d < 1e-5, "max_abs=" + Number(d));
+}
+
 }  // namespace
 
 int main() {
@@ -242,6 +319,8 @@ int main() {
   NormRows();
   AddGateUp();
   Combine();
+  GateShared();
+  SigmoidGate();
 
   if (failures != 0) {
     std::cout << "FAILURES: " << failures << "\n";

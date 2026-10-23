@@ -537,6 +537,11 @@ void Executor::SharedExpert(const DeviceLayer& l, const float* h,
   gargs.rows = rows;
   gargs.hidden = d;
   GateShared(gargs, stream_);
+  if (dump_call_ >= 0) {
+    char tag[32];
+    std::snprintf(tag, sizeof(tag), "layer%02u_shpost", layer_idx);
+    DumpStage(tag, out, rows, d, dump_call_);
+  }
   if (gated != out) {
     HIP_CHECK(hipMemcpyAsync(gated, out,
                              static_cast<std::size_t>(rows) * d * sizeof(float),
