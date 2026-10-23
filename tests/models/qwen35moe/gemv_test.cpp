@@ -385,6 +385,14 @@ void Refusals() {  bool ok = true;
   Report("gemv.refusals", ok, "null and ragged widths refused");
 }
 
+double MaxAbsDiff(const std::vector<float>& a, const std::vector<float>& b) {
+  double worst = 0.0;
+  for (std::size_t i = 0; i < a.size(); ++i) {
+    worst = std::max(worst, std::fabs(static_cast<double>(a[i]) - b[i]));
+  }
+  return worst;
+}
+
 void Embed() {
   // Embedding gather against the CPU decoder on random tables: the row for
   // each token must come back exactly, which is also what pins the token
