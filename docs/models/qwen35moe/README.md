@@ -25,9 +25,14 @@ graph at larger widths.
   independent NumPy implementation of the transformers graph bit-for-bit on a
   synthetic F32 artifact (`reference_test`, max_abs ~1e-5) and is chunk
   invariant. Both oracles agree on real 35B weights through all 40 layers
-  (post-MoE residual, worst max_abs 4.77e-06). Parity of the oracle against
-  served weights is open ([parity](#parity-against-served-weights)).
-- The served engine, tokenizer/chat-template wiring and quality runs are open.
+  (post-MoE residual, worst max_abs 4.77e-06). Parity against served weights
+  holds on both files ([parity](#parity-against-served-weights)).
+- The HIP engine (`kernels/rocm`, `engine.cpp`) runs the full graph on device:
+  upload, grouped GEMV (Q4_K/Q5_K/Q6_K/Q8_0), softmax top-k router, gated
+  delta-net recurrence, fused QK-norm/RoPE/split/cache write, online GQA
+  attention and the MoE finish, each covered by a device unit test; the
+  end-to-end `device_forward` check against the oracle is in progress.
+  Tokenizer/chat-template wiring and quality runs are open.
 
 ## Parity against served weights
 
