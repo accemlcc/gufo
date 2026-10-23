@@ -4,6 +4,8 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <numeric>
 #include <vector>
@@ -515,6 +517,10 @@ void Reference::Forward(std::span<const std::int32_t> tokens,
   std::vector<float> normed(n * d);
   std::vector<float> mixed(n * d);
   std::vector<float> tmp(n * d);
+  // DIAGNOSTIC ONLY: with GUFO_QWEN35MOE_DUMP_LAYERS set to a directory,
+  // writes the post-residual stream after every layer. Used to bisect
+  // oracle-vs-oracle disagreements layer by layer.
+  const char* dump_dir = std::getenv("GUFO_QWEN35MOE_DUMP_LAYERS");
   for (std::uint32_t l = 0; l < c.num_layers; ++l) {
     const LayerWeights& w = weights_.layers[l];
     const float* wn = static_cast<const float*>(w.attn_norm.data);
@@ -540,6 +546,15 @@ void Reference::Forward(std::span<const std::int32_t> tokens,
     Mixture(w, normed.data(), n, tmp.data());
     for (std::size_t i = 0; i < n * d; ++i) {
       h[i] += tmp[i];
+    }
+    if (dump_dir != nullptr) {
+      char path[256];
+      std::snprintf(path, sizeof(path), "%s/layer%02u.bin", dump_dir, l);
+      FILE* f = std::fopen(path, "wb");
+      if (f != nullptr) {
+        std::fwrite(h.data(), sizeof(float), n * d, f);
+        std::fclose(f);
+      }
     }
   }
   const float* wo = static_cast<const float*>(weights_.output_norm.data);
