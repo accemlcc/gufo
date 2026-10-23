@@ -21,6 +21,15 @@ if (ENGINE_ENABLE_HIP)
     PROPERTIES LANGUAGE HIP)
 endif()
 
+# The grouped projection over the experts. Strict floating point, because a
+# slot has to round the same whoever else shares the launch and a batch
+# boundary must not move its value.
+if (ENGINE_ENABLE_HIP)
+  target_sources(gufo_qwen35moe PRIVATE kernels/rocm/gemv.hip.cpp)
+  set_source_files_properties(kernels/rocm/gemv.hip.cpp PROPERTIES
+    LANGUAGE HIP COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off")
+endif()
+
 # The block arithmetic every layer runs several times: the norms, the residual
 # add, the expert activation and the end of a mixture. Strict floating point,
 # because a row has to round the same whatever else shares its launch and a

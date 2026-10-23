@@ -99,6 +99,55 @@ struct MoeRouteArgs {
 };
 void MoeRoute(const MoeRouteArgs& args, hipStream_t stream);
 
+/// ---------------------------------------------------------------------------
+/// Grouped projection (gemv.hip.cpp)
+///
+/// One kernel covers the routed experts and the ordinary projections: a dense
+/// projection is the grouped one with a single group holding one expert and
+/// the rows as its slots. The arithmetic of a slot must not depend on which
+/// other slots share the launch with it, because a batch boundary changes the
+/// grouping and the same token has to come out the same either way.
+/// ---------------------------------------------------------------------------
+
+/// Rows one grouped launch may carry, which is also the most slots one group
+/// can list: an expert is chosen at most once per row.
+inline constexpr std::uint32_t kMaxGroupedSlots = 256;
+
+struct GroupedGemvArgs {
+  WeightFormat format;
+  /// [experts][m][k]: one matrix per expert, k contiguous, experts apart. With
+  /// one expert this is a plain [m][k] projection.
+  const void* w;
+  /// Group table: a count, then per group the expert, its slot count and the
+  /// slot indices in increasing order. A slot s reads x[r][0..k) with
+  /// r = s / slots_per_row and writes y[s][0..m). Every listed group holds at
+  /// least one slot.
+  const std::int32_t* groups;
+  std::uint32_t max_groups;  ///< launch bound; the table's count is <= this
+  const float* x;            ///< [rows][k]
+  float* y;                  ///< [slots][m]
+  std::uint32_t rows;
+  std::uint32_t slots_per_row;  ///< 8 for the routed gate/up, 1 for a dense
+                                ///< projection and for the down half, whose
+                                ///< input is the activation of the slot itself
+  std::uint32_t m;
+  std::uint32_t k;
+};
+/// False without launching when the shape or format is not supported.
+[[nodiscard]] bool GroupedGemv(const GroupedGemvArgs& args,
+                               hipStream_t stream);
+
+/// One row of the embedding table, dequantized: y[r][0..n) = table[token[r]].
+struct EmbedArgs {
+  const void* table;  ///< [vocabulary][n]
+  WeightFormat format;
+  const std::int32_t* tokens;
+  float* y;  ///< [rows][n]
+  std::uint32_t rows;
+  std::uint32_t n;
+};
+void EmbedRows(const EmbedArgs& args, hipStream_t stream);
+
 /// The end of a mixture block, per row r:
 ///   mix[r] = shared_gated[r] + sum_j weights[r][j] * routed[(r * used + j)]
 ///   x[r] += rms(mix[r]) * post_norm
