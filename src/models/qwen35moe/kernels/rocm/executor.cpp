@@ -270,16 +270,36 @@ void Executor::Forward(KvCache& cache, SsmState& ssm,
   EmbedRows({model_.token_embd().data, model_.token_embd().quant(), tokens_,
              x_, n, static_cast<std::uint32_t>(d)},
             stream_);
-    if (std::getenv("GUFO_QWEN35MOE_DUMP_DEV") != nullptr) {
-      std::vector<float> dbg(static_cast<std::size_t>(n) * d);
-      HIP_CHECK(hipMemcpy(dbg.data(), x_, dbg.size() * sizeof(float),
-                          hipMemcpyDeviceToHost));
-      double amax = 0.0;
-      for (float v : dbg) {
-        amax = std::max(amax, std::fabs(static_cast<double>(v)));
-      }
-      std::fprintf(stderr, "DEV embed max=%.3f\n", amax);
+  // DIAGNOSTIC ONLY: with GUFO_QWEN35MOE_DUMP_DEV_LAYERS set to a directory,
+  // writes the embed stream, the post-residual stream after every layer and
+  // the final normed stream. Filenames carry a per-Forward call index so the
+  // test's prefill plus two decodes do not overwrite each other. Remove
+  // before finishing: it synchronizes the stream on every layer.
+  const char* dev_dump = std::getenv("GUFO_QWEN35MOE_DUMP_DEV_LAYERS");
+  static int dev_call = 0;
+  const int this_call = dev_call;
+  auto dump_stream = [&](const char* tag, const float* ptr) {
+    if (dev_dump == nullptr) {
+      return;
     }
+    HIP_CHECK(hipStreamSynchronize(stream_));
+    std::vector<float> host(static_cast<std::size_t>(n) * d);
+    HIP_CHECK(hipMemcpy(host.data(), ptr, host.size() * sizeof(float),
+                        hipMemcpyDeviceToHost));
+    char path[320];
+    std::snprintf(path, sizeof(path), "%s/dev_c%d_%s.bin", dev_dump,
+                  this_call, tag);
+    FILE* f = std::fopen(path, "wb");
+    if (f != nullptr) {
+      std::fwrite(host.data(), sizeof(float), host.size(), f);
+      std::fclose(f);
+    }
+  };
+  {
+    char tag[32];
+    std::snprintf(tag, sizeof(tag), "embed");
+    dump_stream(tag, x_);
+  }
   for (std::uint32_t l = 0; l < c.num_layers; ++l) {
     ForwardLayer(cache, ssm, model_.layers()[l], l, x_, n, first_position, h_);
     AddRows({x_, h_, static_cast<std::size_t>(n) * d}, stream_);
@@ -299,10 +319,17 @@ void Executor::Forward(KvCache& cache, SsmState& ssm,
     margs.used = c.experts_used;
     MoeCombine(margs, stream_);
     AddRows({x_, tmp_mix_, static_cast<std::size_t>(n) * d}, stream_);
+    if (dev_dump != nullptr) {
+      char tag[32];
+      std::snprintf(tag, sizeof(tag), "layer%02u", l);
+      dump_stream(tag, x_);
+    }
   }
   RmsNormRows({x_, model_.output_norm().f32(), h_, n,
                static_cast<std::uint32_t>(d), c.rms_eps},
               stream_);
+  dump_stream("final", h_);
+  ++dev_call;
   for (std::size_t k = 0; k < logit_rows.size(); ++k) {
     const std::uint32_t r = logit_rows[k];
     if (r >= n) {

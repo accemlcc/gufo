@@ -528,6 +528,9 @@ void Reference::Forward(std::span<const std::int32_t> tokens,
   // writes the post-residual stream after every layer. Used to bisect
   // oracle-vs-oracle disagreements layer by layer.
   const char* dump_dir = std::getenv("GUFO_QWEN35MOE_DUMP_LAYERS");
+  // DIAGNOSTIC ONLY counter part: keeps the test's three Forward calls apart.
+  // Remove before finishing.
+  static int ref_call = 0;
   for (std::uint32_t l = 0; l < c.num_layers; ++l) {
     const LayerWeights& w = weights_.layers[l];
     const float* wn = static_cast<const float*>(w.attn_norm.data);
@@ -556,7 +559,8 @@ void Reference::Forward(std::span<const std::int32_t> tokens,
     }
     if (dump_dir != nullptr) {
       char path[256];
-      std::snprintf(path, sizeof(path), "%s/layer%02u.bin", dump_dir, l);
+      std::snprintf(path, sizeof(path), "%s/ref_c%d_layer%02u.bin", dump_dir,
+                    ref_call, l);
       FILE* f = std::fopen(path, "wb");
       if (f != nullptr) {
         std::fwrite(h.data(), sizeof(float), n * d, f);
@@ -571,6 +575,7 @@ void Reference::Forward(std::span<const std::int32_t> tokens,
   out_logits->assign(n * vocab, 0.0F);
   MatMulRef(weights_.output, vocab, d, normed.data(), n, out_logits->data());
   position_ += static_cast<std::uint32_t>(n);
+  ++ref_call;
 }
 
 }  // namespace gufo::models::qwen35moe
